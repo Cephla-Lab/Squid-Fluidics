@@ -196,3 +196,6 @@ class TestRegistryConsistency:
         for app, seq_types in APPLICATION_SEQUENCES.items():
             for t in seq_types:
                 assert t in SEQUENCE_TYPES, f"{t} not in SEQUENCE_TYPES"
+
+    def test_flow_cell_includes_set_temperature(self):
+        assert "set_temperature" in APPLICATION_SEQUENCES["Flow Cell"]

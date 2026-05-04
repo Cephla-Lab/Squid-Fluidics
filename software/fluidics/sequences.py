@@ -99,7 +99,7 @@ SEQUENCE_TYPE_LABELS: dict[str, str] = {
 }
 
 APPLICATION_SEQUENCES: dict[str, list[str]] = {
-    "Flow Cell": ["flow_reagent", "priming", "clean_up"],
+    "Flow Cell": ["flow_reagent", "priming", "clean_up", "set_temperature"],
     "Open Chamber": [
         "add_reagent",
         "clear_and_add_reagent",
