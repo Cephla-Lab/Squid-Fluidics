@@ -45,7 +45,13 @@ def initialize_hardware(simulation, config):
             speed_code_limit=config.syringe_pump.speed_code_limit,
             waste_port=config.syringe_pump.waste_port)
         if config.temperature_controller is not None:
-            temperatureController = TCMControllerSimulation()
+            tc_cfg = config.temperature_controller
+            temperatureController = TCMControllerSimulation(
+                sn=tc_cfg.serial_number,
+                channels=tc_cfg.channels,
+                tolerance_celsius=tc_cfg.tolerance_celsius,
+                stabilization_timeout_seconds=tc_cfg.stabilization_timeout_seconds,
+            )
     else:
         controller = FluidController(config.microcontroller.serial_number)
         syringePump = SyringePump(
@@ -54,7 +60,13 @@ def initialize_hardware(simulation, config):
             speed_code_limit=config.syringe_pump.speed_code_limit,
             waste_port=config.syringe_pump.waste_port)
         if config.temperature_controller is not None:
-            temperatureController = TCMController(config.temperature_controller.serial_number)
+            tc_cfg = config.temperature_controller
+            temperatureController = TCMController(
+                sn=tc_cfg.serial_number,
+                channels=tc_cfg.channels,
+                tolerance_celsius=tc_cfg.tolerance_celsius,
+                stabilization_timeout_seconds=tc_cfg.stabilization_timeout_seconds,
+            )
 
     controller.begin()
     controller.send_command(CMD_SET.CLEAR)

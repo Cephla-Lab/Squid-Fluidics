@@ -1034,7 +1034,13 @@ class FluidicsControlGUI(QMainWindow):
                                 speed_code_limit=config.syringe_pump.speed_code_limit,
                                 waste_port=config.syringe_pump.waste_port)
             if config.temperature_controller is not None:
-                self.temperatureController = TCMControllerSimulation()
+                tc_cfg = config.temperature_controller
+                self.temperatureController = TCMControllerSimulation(
+                    sn=tc_cfg.serial_number,
+                    channels=tc_cfg.channels,
+                    tolerance_celsius=tc_cfg.tolerance_celsius,
+                    stabilization_timeout_seconds=tc_cfg.stabilization_timeout_seconds,
+                )
         else:
             self.controller = FluidController(config.microcontroller.serial_number)
             self.syringePump = SyringePump(
@@ -1044,7 +1050,13 @@ class FluidicsControlGUI(QMainWindow):
                                 waste_port=config.syringe_pump.waste_port)
             if config.temperature_controller is not None:
                 try:
-                    self.temperatureController = TCMController(config.temperature_controller.serial_number)
+                    tc_cfg = config.temperature_controller
+                    self.temperatureController = TCMController(
+                        sn=tc_cfg.serial_number,
+                        channels=tc_cfg.channels,
+                        tolerance_celsius=tc_cfg.tolerance_celsius,
+                        stabilization_timeout_seconds=tc_cfg.stabilization_timeout_seconds,
+                    )
                 except Exception as e:
                     print(f"Error initializing temperature controller: {e}")
                     self.temperatureController = None
