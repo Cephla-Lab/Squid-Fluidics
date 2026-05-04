@@ -18,6 +18,9 @@ class _StuckController:
     def set_target_temperature(self, channel, t):
         self.target_temperatures[channel - 1] = t
 
+    def get_actual_temperature(self, channel):
+        return self.actual_temperatures[channel - 1]
+
 
 class TestSetTemperature:
     def test_none_controller_returns_silently(self, capsys):

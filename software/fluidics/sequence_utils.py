@@ -24,11 +24,12 @@ def set_temperature(tc, target):
         sleep(1)
         if tc.is_aborted:
             return
-        if all(abs(t - target) <= tc.tolerance_celsius for t in tc.actual_temperatures):
+        actuals = [tc.get_actual_temperature(c) for c in range(1, tc.channels + 1)]
+        if all(abs(t - target) <= tc.tolerance_celsius for t in actuals):
             return
         if time() - start_time > tc.stabilization_timeout_seconds:
             raise OperationError(
                 f"Temperature failed to stabilize within "
                 f"{tc.stabilization_timeout_seconds}s "
-                f"(target={target}, actual={tc.actual_temperatures})"
+                f"(target={target}, actual={actuals})"
             )
