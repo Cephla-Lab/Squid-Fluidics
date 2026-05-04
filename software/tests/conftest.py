@@ -47,6 +47,8 @@ def _fast_clock(monkeypatch):
     monkeypatch.setattr("fluidics.open_chamber_operations.time", fake_time_fn)
     monkeypatch.setattr("fluidics.control.controller.sleep", fake_sleep)
     monkeypatch.setattr("fluidics.control.controller.time", fake_time_fn)
+    monkeypatch.setattr("fluidics.sequence_utils.sleep", fake_sleep, raising=False)
+    monkeypatch.setattr("fluidics.sequence_utils.time", fake_time_fn, raising=False)
 
     # Patch threading.Event.wait (used by DiscPump.aspirate)
     monkeypatch.setattr(threading.Event, "wait", fake_event_wait)
