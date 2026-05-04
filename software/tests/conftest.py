@@ -44,7 +44,7 @@ def _fast_clock(monkeypatch):
     # Patch modules that use 'from time import sleep' or 'from time import time'
     monkeypatch.setattr("fluidics.merfish_operations.sleep", fake_sleep)
     monkeypatch.setattr("fluidics.open_chamber_operations.sleep", fake_sleep)
-    monkeypatch.setattr("fluidics.open_chamber_operations.time", fake_time_fn)
+    monkeypatch.setattr("fluidics.open_chamber_operations.time", fake_time_fn, raising=False)
     monkeypatch.setattr("fluidics.control.controller.sleep", fake_sleep)
     monkeypatch.setattr("fluidics.control.controller.time", fake_time_fn)
     monkeypatch.setattr("fluidics.sequence_utils.sleep", fake_sleep, raising=False)

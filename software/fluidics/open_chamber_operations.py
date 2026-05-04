@@ -1,5 +1,6 @@
-from time import sleep, time
+from time import sleep
 from .experiment_worker import AbortRequested, OperationError
+from . import sequence_utils
 
 class OpenChamberOperations():
     def __init__(self, config, syringe_pump, selector_valves, disc_pump, temperature_controller=None):
@@ -272,20 +273,5 @@ class OpenChamberOperations():
         except Exception as e:
             raise OperationError(f"Error in priming_or_clean_up: {str(e)}")
 
-    # temporary temperature control sequences for testing, using Yexian M207
-    def set_temperature(self, target, timeout=300):
-        if self.tc:
-            self.tc.set_target_temperature('TC1', target)
-            self.tc.set_target_temperature('TC2', target)
-            start_time = time()
-            while True:
-                sleep(2)
-                if abs(self.tc.t1 - target) <= 1 and abs(self.tc.t2 - target) <= 1:
-                    break
-                if self.tc.is_aborted:
-                    break
-                if time() - start_time > timeout:
-                    print(f"Temperature failed to stabilize within {timeout} seconds, t1={self.tc.t1}, t2={self.tc.t2}")
-                    break
-        else:
-            print("No temperature controller found. Skipping temperature control sequence.")
+    def set_temperature(self, target):
+        sequence_utils.set_temperature(self.tc, target)

@@ -44,5 +44,5 @@ def open_chamber_hardware(open_chamber_config):
     """Return (config, syringe_pump, selector_valves, disc_pump, temperature_controller) for open chamber."""
     fc, sp, sv = _make_sim_hardware(open_chamber_config)
     dp = DiscPump(fc)
-    tc = TCMControllerSimulation()
+    tc = TCMControllerSimulation(channels=2)
     return open_chamber_config, sp, sv, dp, tc
