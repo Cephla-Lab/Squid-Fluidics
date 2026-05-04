@@ -166,3 +166,37 @@ class TestConvertLegacyConfig:
         assert "port_1" in name_mapping
         assert "port_2" not in name_mapping
         assert "port_3" not in name_mapping
+
+
+class TestTemperatureControllerConfig:
+    def _config_with_tc(self, **tc_overrides):
+        tc = {"serial_number": "TC-X"}
+        tc.update(tc_overrides)
+        return _make_config_dict(temperature_controller=tc)
+
+    def test_defaults_populated(self):
+        cfg = FluidicsConfig(**self._config_with_tc())
+        assert cfg.temperature_controller.channels == 2
+        assert cfg.temperature_controller.tolerance_celsius == 1.0
+        assert cfg.temperature_controller.stabilization_timeout_seconds == 300
+
+    def test_explicit_values_override_defaults(self):
+        cfg = FluidicsConfig(**self._config_with_tc(
+            channels=1, tolerance_celsius=0.5, stabilization_timeout_seconds=120,
+        ))
+        tc = cfg.temperature_controller
+        assert tc.channels == 1
+        assert tc.tolerance_celsius == 0.5
+        assert tc.stabilization_timeout_seconds == 120
+
+    def test_channels_must_be_1_or_2(self):
+        with pytest.raises(ValidationError):
+            FluidicsConfig(**self._config_with_tc(channels=3))
+
+    def test_tolerance_must_be_positive(self):
+        with pytest.raises(ValidationError):
+            FluidicsConfig(**self._config_with_tc(tolerance_celsius=0))
+
+    def test_timeout_must_be_positive(self):
+        with pytest.raises(ValidationError):
+            FluidicsConfig(**self._config_with_tc(stabilization_timeout_seconds=0))

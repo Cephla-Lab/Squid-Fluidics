@@ -67,6 +67,9 @@ class SamplesConfig(BaseModel):
 
 class TemperatureControllerConfig(BaseModel):
     serial_number: str
+    channels: Literal[1, 2] = 2
+    tolerance_celsius: float = Field(default=1.0, gt=0)
+    stabilization_timeout_seconds: float = Field(default=300, gt=0)
 
 
 class FluidicsConfig(BaseModel):
