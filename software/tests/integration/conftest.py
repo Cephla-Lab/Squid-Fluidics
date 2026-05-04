@@ -46,3 +46,11 @@ def open_chamber_hardware(open_chamber_config):
     dp = DiscPump(fc)
     tc = TCMControllerSimulation(channels=2)
     return open_chamber_config, sp, sv, dp, tc
+
+
+@pytest.fixture
+def flow_cell_hardware_with_tc(flow_cell_config):
+    """Return (config, sp, sv, tc) for flow cell with a 1-channel temperature controller."""
+    _fc, sp, sv = _make_sim_hardware(flow_cell_config)
+    tc = TCMControllerSimulation(channels=1)
+    return flow_cell_config, sp, sv, tc

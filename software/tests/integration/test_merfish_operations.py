@@ -31,3 +31,21 @@ class TestProcessSequence:
         seq = {"type": "nonexistent", "fluidic_port": 1, "flow_rate": 100, "volume": 100}
         with pytest.raises(ValueError, match="Unknown sequence type"):
             ops.process_sequence(seq)
+
+
+class TestSetTemperature:
+    @pytest.fixture
+    def ops_with_tc(self, flow_cell_hardware_with_tc):
+        config, sp, sv, tc = flow_cell_hardware_with_tc
+        return MERFISHOperations(config, sp, sv, temperature_controller=tc)
+
+    def test_set_temperature(self, ops_with_tc):
+        seq = {"type": "set_temperature", "temperature": 37}
+        ops_with_tc.process_sequence(seq)
+        assert ops_with_tc.tc.target_temperatures == [37]
+
+    def test_set_temperature_without_controller_no_raise(self, flow_cell_hardware):
+        config, sp, sv = flow_cell_hardware
+        ops = MERFISHOperations(config, sp, sv)
+        seq = {"type": "set_temperature", "temperature": 37}
+        ops.process_sequence(seq)  # should not raise

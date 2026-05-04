@@ -1,11 +1,14 @@
 from time import sleep
 from .experiment_worker import AbortRequested, OperationError
+from . import sequence_utils
+
 
 class MERFISHOperations():
-    def __init__(self, config, syringe_pump, selector_valves):
+    def __init__(self, config, syringe_pump, selector_valves, temperature_controller=None):
         self.config = config
         self.sp = syringe_pump
         self.sv = selector_valves
+        self.tc = temperature_controller
         self.extract_port = self.config.syringe_pump.extract_port
         self.speed_code_limit = self.config.syringe_pump.speed_code_limit
 
@@ -25,6 +28,8 @@ class MERFISHOperations():
                 sequence['flow_rate'],
                 sequence['volume'],
                 sequence.get('use_ports'))
+        elif seq_type == "set_temperature":
+            sequence_utils.set_temperature(self.tc, sequence['temperature'])
         else:
             raise ValueError(f"Unknown sequence type: {seq_type}")
 
