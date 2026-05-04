@@ -1,5 +1,6 @@
 import os
 import sys
+import csv
 import time
 import threading
 import argparse
@@ -793,306 +794,196 @@ class MplCanvas(FigureCanvasQTAgg):
         super(MplCanvas, self).__init__(fig)
 
 
-class TemperatureControlWidget(QWidget):
+class TemperatureChannelWidget(QWidget):
+    """One channel's worth of temperature UI: target/actual readout, plot,
+    record toggle, query interval, window size."""
 
-    temperature_update_signal = pyqtSignal(float, float)
+    reading_signal = pyqtSignal(float, float)  # (temp, current_time)
 
-    def __init__(self, temperature_controller):
-        super().__init__()
-        self.temperatureController = temperature_controller
-        
-        # Setup data
-        self.temps1 = []
-        self.temps2 = []
+    def __init__(self, controller, channel, parent=None):
+        super().__init__(parent)
+        self.controller = controller
+        self.channel = channel  # 1-based
+
+        self.temps = []
         self.times = []
-        self.targets1 = []
-        self.targets2 = []
+        self.targets = []
+        self.query_interval = 2
+        self.window_size = 60
+        self.last_update = 0
+        self.file = None
+        self.writer = None
 
-        # Setup intervals and windows
-        self.query_interval1 = 2
-        self.query_interval2 = 2
-        self.window_size1 = 60
-        self.window_size2 = 60
-        self.last_update1 = 0
-        self.last_update2 = 0
+        self.reading_signal.connect(self._on_reading)
 
-        # Create update signal to handle thread safety
-        self.temperature_update_signal.connect(self.handle_temperature_update)
+        self._build_ui()
+        self.temp_input.setText(f"{self.controller.target_temperatures[channel - 1]:.2f}")
 
-        # Set the temperature callback to emit signal
-        self.temperatureController.temperature_updating_callback = self.temperature_callback
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
 
-        # Setup UI
-        self.initUI()
+        control = QGroupBox(f"Channel {self.channel} Control")
+        control_layout = QVBoxLayout()
 
-        self.temp_input1.setText(f"{self.temperatureController.target_temperature_ch1:.2f}")
-        self.temp_input2.setText(f"{self.temperatureController.target_temperature_ch2:.2f}")
-        self.temperatureController.actual_temp_updating_thread.start()
+        row = QHBoxLayout()
+        self.temp_label = QLabel("0.0°C")
+        self.temp_input = QLineEdit()
+        self.set_btn = QPushButton("Set")
+        self.save_btn = QPushButton("Save")
+        row.addWidget(QLabel("Current:"))
+        row.addWidget(self.temp_label)
+        row.addWidget(QLabel("Target:"))
+        row.addWidget(self.temp_input)
+        row.addWidget(QLabel("°C"))
+        row.addWidget(self.set_btn)
+        row.addWidget(self.save_btn)
+        control_layout.addLayout(row)
+        control.setLayout(control_layout)
 
-    def create_plot_controls(self, channel):
-        control_widget = QWidget()
-        layout = QHBoxLayout(control_widget)
+        plot_box = QGroupBox(f"Channel {self.channel} Plot")
+        plot_layout = QVBoxLayout()
 
-        # Query interval control
-        layout.addWidget(QLabel("Query Interval:"))
-        interval_input = QSpinBox()
-        interval_input.setMinimum(2)
-        interval_input.setValue(2)
-        interval_input.setSuffix(" s")
-        layout.addWidget(interval_input)
+        plot_controls = QWidget()
+        pc_layout = QHBoxLayout(plot_controls)
+        pc_layout.addWidget(QLabel("Query Interval:"))
+        self.interval_input = QSpinBox()
+        self.interval_input.setMinimum(2)
+        self.interval_input.setValue(2)
+        self.interval_input.setSuffix(" s")
+        pc_layout.addWidget(self.interval_input)
+        pc_layout.addWidget(QLabel("Window Size:"))
+        self.window_input = QSpinBox()
+        self.window_input.setMinimum(10)
+        self.window_input.setMaximum(3600)
+        self.window_input.setValue(60)
+        self.window_input.setSuffix(" s")
+        pc_layout.addWidget(self.window_input)
+        plot_layout.addWidget(plot_controls)
 
-        # Window size control
-        layout.addWidget(QLabel("Window Size:"))
-        window_input = QSpinBox()
-        window_input.setMinimum(10)
-        window_input.setMaximum(3600)  # 1 hour maximum
-        window_input.setValue(60)
-        window_input.setSuffix(" s")
-        layout.addWidget(window_input)
+        self.canvas = MplCanvas(self, width=5, height=4, dpi=100)
+        plot_layout.addWidget(self.canvas)
 
-        # Connect signals
-        if channel == 1:
-            interval_input.valueChanged.connect(self.set_interval1)
-            window_input.valueChanged.connect(self.set_window1)
-            self.interval_input1 = interval_input
-            self.window_input1 = window_input
-        else:
-            interval_input.valueChanged.connect(self.set_interval2)
-            window_input.valueChanged.connect(self.set_window2)
-            self.interval_input2 = interval_input
-            self.window_input2 = window_input
+        self.record_btn = QPushButton("Start Recording")
+        plot_layout.addWidget(self.record_btn)
+        plot_box.setLayout(plot_layout)
 
-        return control_widget
+        layout.addWidget(control)
+        layout.addWidget(plot_box)
 
-    def initUI(self):
-        main_layout = QVBoxLayout(self)
+        self.set_btn.clicked.connect(self._set_clicked)
+        self.save_btn.clicked.connect(self._save_clicked)
+        self.record_btn.clicked.connect(self._toggle_record)
+        self.interval_input.valueChanged.connect(self._set_interval)
+        self.window_input.valueChanged.connect(self._set_window)
 
-        # Create top section for temperature controls
-        temp_controls = QWidget()
-        temp_controls_layout = QHBoxLayout(temp_controls)
+    def _set_interval(self, value):
+        self.query_interval = value
 
-        # Channel 1 Controls
-        ch1_control = QGroupBox("Channel 1 Control")
-        ch1_control_layout = QVBoxLayout()
+    def _set_window(self, value):
+        self.window_size = value
+        self._refresh_plot()
 
-        temp_layout1 = QHBoxLayout()
-        self.temp_label1 = QLabel("0.0°C")
-        self.temp_input1 = QLineEdit()
-        self.set_btn1 = QPushButton("Set")
-        self.save_btn1 = QPushButton("Save")
-        temp_layout1.addWidget(QLabel("Current:"))
-        temp_layout1.addWidget(self.temp_label1)
-        temp_layout1.addWidget(QLabel("Target:"))
-        temp_layout1.addWidget(self.temp_input1)
-        temp_layout1.addWidget(QLabel("°C"))
-        temp_layout1.addWidget(self.set_btn1)
-        temp_layout1.addWidget(self.save_btn1)
-
-        ch1_control_layout.addLayout(temp_layout1)
-        ch1_control.setLayout(ch1_control_layout)
-
-        # Channel 2 Controls
-        ch2_control = QGroupBox("Channel 2 Control")
-        ch2_control_layout = QVBoxLayout()
-
-        temp_layout2 = QHBoxLayout()
-        self.temp_label2 = QLabel("0.0°C")
-        self.temp_input2 = QLineEdit()
-        self.set_btn2 = QPushButton("Set")
-        self.save_btn2 = QPushButton("Save")
-        temp_layout2.addWidget(QLabel("Current:"))
-        temp_layout2.addWidget(self.temp_label2)
-        temp_layout2.addWidget(QLabel("Target:"))
-        temp_layout2.addWidget(self.temp_input2)
-        temp_layout2.addWidget(QLabel("°C"))
-        temp_layout2.addWidget(self.set_btn2)
-        temp_layout2.addWidget(self.save_btn2)
-
-        ch2_control_layout.addLayout(temp_layout2)
-        ch2_control.setLayout(ch2_control_layout)
-
-        # Add controls to top section
-        temp_controls_layout.addWidget(ch1_control)
-        temp_controls_layout.addWidget(ch2_control)
-
-        # Add top section to main layout
-        main_layout.addWidget(temp_controls)
-
-        # Create plots section
-        plots = QWidget()
-        plots_layout = QHBoxLayout(plots)
-
-        # Channel 1 Plot
-        ch1_plot = QGroupBox("Channel 1 Plot")
-        ch1_plot_layout = QVBoxLayout()
-
-        # Add plot controls
-        ch1_plot_layout.addWidget(self.create_plot_controls(1))
-
-        self.canvas1 = MplCanvas(self, width=5, height=4, dpi=100)
-        self.record_btn1 = QPushButton("Start Recording")
-
-        ch1_plot_layout.addWidget(self.canvas1)
-        ch1_plot_layout.addWidget(self.record_btn1)
-        ch1_plot.setLayout(ch1_plot_layout)
-
-        # Channel 2 Plot
-        ch2_plot = QGroupBox("Channel 2 Plot")
-        ch2_plot_layout = QVBoxLayout()
-
-        # Add plot controls
-        ch2_plot_layout.addWidget(self.create_plot_controls(2))
-
-        self.canvas2 = MplCanvas(self, width=5, height=4, dpi=100)
-        self.record_btn2 = QPushButton("Start Recording")
-
-        ch2_plot_layout.addWidget(self.canvas2)
-        ch2_plot_layout.addWidget(self.record_btn2)
-        ch2_plot.setLayout(ch2_plot_layout)
-
-        # Add plots to plots section
-        plots_layout.addWidget(ch1_plot)
-        plots_layout.addWidget(ch2_plot)
-
-        # Add plots section to main layout
-        main_layout.addWidget(plots)
-
-        # Connect signals
-        self.set_btn1.clicked.connect(lambda: self.set_temp(1))
-        self.set_btn2.clicked.connect(lambda: self.set_temp(2))
-        self.save_btn1.clicked.connect(lambda: self.save_temp(1))
-        self.save_btn2.clicked.connect(lambda: self.save_temp(2))
-        self.record_btn1.clicked.connect(lambda: self.toggle_record(1))
-        self.record_btn2.clicked.connect(lambda: self.toggle_record(2))
-
-    def set_interval1(self, value):
-        self.query_interval1 = value
-
-    def set_interval2(self, value):
-        self.query_interval2 = value
-
-    def set_window1(self, value):
-        self.window_size1 = value
-        self._update_plot(self.canvas1, self.temps1, self.targets1, 1)
-
-    def set_window2(self, value):
-        self.window_size2 = value
-        self._update_plot(self.canvas2, self.temps2, self.targets2, 2)
-
-    def handle_temperature_update(self, temp1, temp2):
-        current_time = datetime.now().timestamp()
-
-        # Update Channel 1
-        if current_time - self.last_update1 >= self.query_interval1:
-            self.temp_label1.setText(f"{temp1:.1f}°C")
-            self.temps1.append(temp1)
-            self.targets1.append(self.temperatureController.target_temperature_ch1)
-            self.times.append(current_time)
-
-            # Write to CSV if recording
-            if hasattr(self, 'writer1') and self.record_btn1.text() == "Stop Recording":
-                target = self.temperatureController.target_temperature_ch1
-                self.writer1.writerow([datetime.fromtimestamp(current_time), temp1, target])
-
-            self._update_plot(self.canvas1, self.temps1, self.targets1, 1)
-            self.last_update1 = current_time
-
-        # Update Channel 2
-        if current_time - self.last_update2 >= self.query_interval2:
-            self.temp_label2.setText(f"{temp2:.1f}°C")
-            self.temps2.append(temp2)
-            self.targets2.append(self.temperatureController.target_temperature_ch2)
-
-            # Write to CSV if recording
-            if hasattr(self, 'writer2') and self.record_btn2.text() == "Stop Recording":
-                target = self.temperatureController.target_temperature_ch2
-                self.writer2.writerow([datetime.fromtimestamp(current_time), temp2, target])
-
-            self._update_plot(self.canvas2, self.temps2, self.targets2, 2)
-            self.last_update2 = current_time
-
-        # Cleanup old data
-        while self.times and current_time - self.times[0] > max(self.window_size1, self.window_size2):
-            self.times.pop(0)
-            if self.temps1: self.temps1.pop(0)
-            if self.temps2: self.temps2.pop(0)
-            if self.targets1: self.targets1.pop(0)
-            if self.targets2: self.targets2.pop(0)
-
-    def _update_plot(self, canvas, temps, targets, channel):
-        if not temps or not self.times:
+    def _on_reading(self, temp, current_time):
+        if current_time - self.last_update < self.query_interval:
             return
+        self.temp_label.setText(f"{temp:.1f}°C")
+        target = self.controller.target_temperatures[self.channel - 1]
+        self.temps.append(temp)
+        self.targets.append(target)
+        self.times.append(current_time)
+        if self.writer is not None:
+            self.writer.writerow([datetime.fromtimestamp(current_time), temp, target])
+        while self.times and current_time - self.times[0] > self.window_size:
+            self.times.pop(0)
+            self.temps.pop(0)
+            self.targets.pop(0)
+        self._refresh_plot()
+        self.last_update = current_time
 
-        canvas.axes.clear()
-
-        # Plot the data
-        canvas.axes.plot(self.times, temps, 'b-', label='Actual')
-        canvas.axes.plot(self.times, targets, 'r--', label='Target')
-
-        # Set y-axis limits with padding
-        y_min = min(min(temps), min(targets))
-        y_max = max(max(temps), max(targets))
+    def _refresh_plot(self):
+        if not self.temps or not self.times:
+            return
+        ax = self.canvas.axes
+        ax.clear()
+        ax.plot(self.times, self.temps, "b-", label="Actual")
+        ax.plot(self.times, self.targets, "r--", label="Target")
+        y_min = min(min(self.temps), min(self.targets))
+        y_max = max(max(self.temps), max(self.targets))
         padding = (y_max - y_min) * 0.1 if y_max != y_min else 1.0
-        canvas.axes.set_ylim([y_min - padding, y_max + padding])
-
-        # Set x-axis to show window size
-        window_size = self.window_size1 if channel == 1 else self.window_size2
+        ax.set_ylim([y_min - padding, y_max + padding])
         current_time = self.times[-1]
-        canvas.axes.set_xlim([current_time - window_size, current_time])
+        ax.set_xlim([current_time - self.window_size, current_time])
+        ax.set_xlabel("Seconds Ago")
+        ax.set_ylabel("Temperature (°C)")
+        ax.set_title(f"Channel {self.channel} Temperature")
+        ax.grid(True)
+        ax.legend()
+        ax.set_xticklabels([f"{x:.0f}" for x in current_time - ax.get_xticks()])
+        self.canvas.draw()
 
-        # Format time axis
-        canvas.axes.set_xlabel('Seconds Ago')
-        canvas.axes.set_ylabel('Temperature (°C)')
-        canvas.axes.set_title(f'Channel {channel} Temperature')
-        canvas.axes.grid(True)
-        canvas.axes.legend()
-
-        # Convert timestamps to relative time for display
-        canvas.axes.set_xticklabels([f"{x:.0f}" for x in current_time - canvas.axes.get_xticks()])
-
-        canvas.draw()
-
-    def set_temp(self, channel):
-        temp_input = self.temp_input1 if channel == 1 else self.temp_input2
+    def _set_clicked(self):
         try:
-            temp = float(temp_input.text())
-            self.temperatureController.set_target_temperature(f'TC{channel}', temp)
+            t = float(self.temp_input.text())
+            self.controller.set_target_temperature(self.channel, t)
         except ValueError:
-            print(f"Invalid temperature for channel {channel}")
+            print(f"Invalid temperature for channel {self.channel}")
 
-    def save_temp(self, channel):
-        self.temperatureController.save_target_temperature(f'TC{channel}')
+    def _save_clicked(self):
+        self.controller.save_target_temperature(self.channel)
 
-    def toggle_record(self, channel):
-        btn = self.record_btn1 if channel == 1 else self.record_btn2
-        if btn.text() == "Start Recording":
-            btn.setText("Stop Recording")
-            filename = f"temp_ch{channel}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-            if channel == 1:
-                self.file1 = open(filename, 'w', newline='')
-                self.writer1 = csv.writer(self.file1)
-                self.writer1.writerow(['Time', 'Actual Temperature', 'Target Temperature'])
-            else:
-                self.file2 = open(filename, 'w', newline='')
-                self.writer2 = csv.writer(self.file2)
-                self.writer2.writerow(['Time', 'Actual Temperature', 'Target Temperature'])
+    def _toggle_record(self):
+        if self.record_btn.text() == "Start Recording":
+            self.record_btn.setText("Stop Recording")
+            filename = f"temp_ch{self.channel}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            self.file = open(filename, "w", newline="")
+            self.writer = csv.writer(self.file)
+            self.writer.writerow(["Time", "Actual Temperature", "Target Temperature"])
         else:
-            btn.setText("Start Recording")
-            if channel == 1:
-                self.file1.close()
-            else:
-                self.file2.close()
+            self.record_btn.setText("Start Recording")
+            if self.file is not None:
+                self.file.close()
+                self.file = None
+                self.writer = None
 
-    def temperature_callback(self, temp1, temp2):
-        # This runs in the controller thread, emit signal to handle in GUI thread
-        self.temperature_update_signal.emit(temp1, temp2)
+    def close_recording(self):
+        if self.file is not None:
+            self.file.close()
+            self.file = None
+            self.writer = None
+
+
+class TemperatureControlWidget(QWidget):
+    """Container that lays out one TemperatureChannelWidget per channel."""
+
+    readings_signal = pyqtSignal(list)  # list[float] of length controller.channels
+
+    def __init__(self, controller):
+        super().__init__()
+        self.controller = controller
+
+        layout = QHBoxLayout(self)
+        self.channel_widgets = []
+        for c in range(1, controller.channels + 1):
+            cw = TemperatureChannelWidget(controller, c)
+            self.channel_widgets.append(cw)
+            layout.addWidget(cw)
+
+        self.readings_signal.connect(self._fanout)
+        self.controller.temperature_updating_callback = self._on_callback
+        self.controller.actual_temp_updating_thread.start()
+
+    def _on_callback(self, temps):
+        # Runs in the controller's polling thread; marshal to the GUI thread.
+        self.readings_signal.emit(list(temps))
+
+    def _fanout(self, temps):
+        current_time = datetime.now().timestamp()
+        for cw, t in zip(self.channel_widgets, temps):
+            cw.reading_signal.emit(t, current_time)
 
     def closeEvent(self, event):
-        # Close any open files
-        if hasattr(self, 'file1') and self.file1:
-            self.file1.close()
-        if hasattr(self, 'file2') and self.file2:
-            self.file2.close()
+        for cw in self.channel_widgets:
+            cw.close_recording()
         event.accept()
 
 
@@ -1167,9 +1058,7 @@ class FluidicsControlGUI(QMainWindow):
 
     def closeEvent(self, event):
         if self.temperatureController is not None:
-            self.temperatureController.terminate_temperature_updating_thread = True
-            self.temperatureController.actual_temp_updating_thread.join()
-            self.temperatureController.serial.close()
+            self.temperatureController.close()
 
         if self.config.application == "Open Chamber":
             self.syringePump.close()
