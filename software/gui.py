@@ -171,7 +171,7 @@ class SequencesWidget(QWidget):
         self.worker = None
 
         if self.config.application == 'Flow Cell':
-            self.experiment_ops = MERFISHOperations(self.config, self.syringePump, self.selectorValveSystem)
+            self.experiment_ops = MERFISHOperations(self.config, self.syringePump, self.selectorValveSystem, self.temperatureController)
         elif self.config.application == "Open Chamber":
             self.experiment_ops = OpenChamberOperations(self.config, self.syringePump, self.selectorValveSystem, self.discPump, self.temperatureController)
         else:
