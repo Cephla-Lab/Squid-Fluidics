@@ -1060,6 +1060,14 @@ class FluidicsControlGUI(QMainWindow):
                 except Exception as e:
                     print(f"Error initializing temperature controller: {e}")
                     self.temperatureController = None
+                    QMessageBox.warning(
+                        self,
+                        "Temperature Controller",
+                        f"Failed to initialize temperature controller: {e}\n\n"
+                        f"Check that the serial number in config.yaml matches a "
+                        f"connected device. The Temperature Control tab will not "
+                        f"be available."
+                    )
 
         self.controller.begin()
         self.controller.send_command(CMD_SET.CLEAR)
