@@ -28,7 +28,8 @@ from fluidics.open_chamber_operations import OpenChamberOperations
 from fluidics.experiment_worker import ExperimentWorker
 from fluidics.sequences import (
     load_sequences, save_sequences_yaml, get_included_sequences,
-    get_fields_for_type, SEQUENCE_TYPES, SEQUENCE_TYPE_LABELS, APPLICATION_SEQUENCES
+    get_fields_for_type, SEQUENCE_TYPES, SEQUENCE_TYPE_LABELS, APPLICATION_SEQUENCES,
+    SequenceListAdapter,
 )
 
 import matplotlib.pyplot as plt
@@ -349,7 +350,8 @@ class SequencesWidget(QWidget):
                 seq[fname] = raw_value
 
             sequences.append(seq)
-        return sequences
+        validated = SequenceListAdapter.validate_python(sequences)
+        return [s.model_dump() for s in validated]
 
     def loadSequences(self):
         fileName, _ = QFileDialog.getOpenFileName(
