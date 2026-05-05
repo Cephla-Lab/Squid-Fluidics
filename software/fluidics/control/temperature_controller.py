@@ -40,6 +40,11 @@ class TCMController:
 
         self.is_aborted = False
 
+        print(
+            f"Temperature controller initialized: serial_number={sn}, "
+            f"channels={channels}, port={port[0]}"
+        )
+
     # --- channel addressing helpers ---
 
     def _check_channel(self, channel):
@@ -143,6 +148,8 @@ class TCMControllerSimulation:
         )
 
         self.is_aborted = False
+
+        print(f"Temperature controller (simulation) initialized: channels={channels}")
 
     def _check_channel(self, channel):
         if not (1 <= channel <= self.channels):
