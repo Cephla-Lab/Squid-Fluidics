@@ -346,10 +346,10 @@ class SequencesWidget(QWidget):
                 if not raw_value:
                     continue
 
-                # Store raw strings — pydantic will coerce types during validation
                 seq[fname] = raw_value
 
             sequences.append(seq)
+        # Validate via pydantic to coerce the QLineEdit strings into ints/floats.
         validated = SequenceListAdapter.validate_python(sequences)
         return [s.model_dump() for s in validated]
 
@@ -1060,15 +1060,15 @@ class FluidicsControlGUI(QMainWindow):
                         stabilization_timeout_seconds=tc_cfg.stabilization_timeout_seconds,
                     )
                 except Exception as e:
-                    print(f"Error initializing temperature controller: {e}")
+                    msg = f"Failed to initialize temperature controller: {e}"
+                    print(msg)
                     self.temperatureController = None
                     QMessageBox.warning(
                         self,
                         "Temperature Controller",
-                        f"Failed to initialize temperature controller: {e}\n\n"
-                        f"Check that the serial number in config.yaml matches a "
-                        f"connected device. The Temperature Control tab will not "
-                        f"be available."
+                        f"{msg}\n\nCheck that the serial number in config.yaml "
+                        f"matches a connected device. The Temperature Control "
+                        f"tab will not be available."
                     )
 
         self.controller.begin()
