@@ -421,7 +421,11 @@ class SequencesWidget(QWidget):
     def runSelectedSequences(self):
         if self.tree.topLevelItemCount() == 0:
             return
-        selected = self.getSequences(selected_only=True)
+        try:
+            selected = self.getSequences(selected_only=True)
+        except Exception as e:
+            QMessageBox.critical(self, "Invalid Sequence", f"Failed to validate sequences: {str(e)}")
+            return
         self.total_sequences = sum(s.get('repeat', 1) for s in selected)
 
         if not selected:

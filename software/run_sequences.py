@@ -89,6 +89,7 @@ def main():
     args = parse_args()
 
     syringePump = None
+    temperatureController = None
     thread = None
 
     try:
@@ -134,6 +135,8 @@ def main():
         if syringePump is not None:
             syringePump.reset_abort()
             syringePump.close()
+        if temperatureController is not None:
+            temperatureController.close()
 
 if __name__ == '__main__':
     main()
