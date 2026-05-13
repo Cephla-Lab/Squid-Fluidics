@@ -836,6 +836,8 @@ class TemperatureChannelWidget(QWidget):
         self.temp_input = QLineEdit()
         self.set_btn = QPushButton("Set")
         self.save_btn = QPushButton("Save")
+        self.output_btn = QPushButton("Output OFF")
+        self.output_btn.setCheckable(True)
         row.addWidget(QLabel("Current:"))
         row.addWidget(self.temp_label)
         row.addWidget(QLabel("Target:"))
@@ -843,6 +845,7 @@ class TemperatureChannelWidget(QWidget):
         row.addWidget(QLabel("°C"))
         row.addWidget(self.set_btn)
         row.addWidget(self.save_btn)
+        row.addWidget(self.output_btn)
         control_layout.addLayout(row)
         control.setLayout(control_layout)
 
@@ -878,9 +881,12 @@ class TemperatureChannelWidget(QWidget):
 
         self.set_btn.clicked.connect(self._set_clicked)
         self.save_btn.clicked.connect(self._save_clicked)
+        self.output_btn.toggled.connect(self._on_output_toggled)
         self.record_btn.clicked.connect(self._toggle_record)
         self.interval_input.valueChanged.connect(self._set_interval)
         self.window_input.valueChanged.connect(self._set_window)
+
+        self._sync_output_button()
 
     def _set_interval(self, value):
         self.query_interval = value
@@ -936,6 +942,21 @@ class TemperatureChannelWidget(QWidget):
 
     def _save_clicked(self):
         self.controller.save_target_temperature(self.channel)
+
+    def _sync_output_button(self):
+        on = self.controller.output_enabled[self.channel - 1]
+        self.output_btn.blockSignals(True)
+        self.output_btn.setChecked(on)
+        self.output_btn.blockSignals(False)
+        self.output_btn.setText("Output ON" if on else "Output OFF")
+
+    def _on_output_toggled(self, checked):
+        try:
+            self.controller.set_output_enabled(self.channel, checked)
+        except Exception as e:
+            print(f"Failed to {'enable' if checked else 'disable'} output on "
+                  f"channel {self.channel}: {e}")
+        self._sync_output_button()
 
     def _toggle_record(self):
         if self.record_btn.text() == "Start Recording":

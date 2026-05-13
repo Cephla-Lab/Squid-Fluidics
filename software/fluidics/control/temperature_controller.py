@@ -31,6 +31,7 @@ class TCMController:
 
         self.target_temperatures = [self._read_target(c) for c in range(1, channels + 1)]
         self.actual_temperatures = [0.0] * channels
+        self.output_enabled = [self._read_output_enabled(c) for c in range(1, channels + 1)]
 
         self.temperature_updating_callback = None
         self.terminate_temperature_updating_thread = False
@@ -71,6 +72,10 @@ class TCMController:
         response = self.send_command("TCADJTEMP?", self._module(channel))
         return float(response[14:])
 
+    def _read_output_enabled(self, channel):
+        response = self.send_command("TCOE?", self._module(channel))
+        return response.rsplit("=", 1)[-1].strip() == "1"
+
     # --- public API ---
 
     def get_target_temperature(self, channel):
@@ -85,6 +90,15 @@ class TCMController:
     def save_target_temperature(self, channel):
         response = self.send_command("TCADJTEMP!", self._module(channel))
         print("Save target temperature: ", response)
+
+    def get_output_enabled(self, channel):
+        enabled = self._read_output_enabled(channel)
+        self.output_enabled[channel - 1] = enabled
+        return enabled
+
+    def set_output_enabled(self, channel, on):
+        self.send_command(f"TCOE={1 if on else 0}", self._module(channel))
+        self.output_enabled[channel - 1] = bool(on)
 
     def get_actual_temperature(self, channel):
         response = self.send_command("TCACTUALTEMP?", self._module(channel))
@@ -140,6 +154,7 @@ class TCMControllerSimulation:
 
         self.target_temperatures = [10.0] * channels
         self.actual_temperatures = [10.0] * channels
+        self.output_enabled = [False] * channels
 
         self.temperature_updating_callback = None
         self.terminate_temperature_updating_thread = False
@@ -171,6 +186,14 @@ class TCMControllerSimulation:
 
     def save_target_temperature(self, channel):
         self._check_channel(channel)
+
+    def get_output_enabled(self, channel):
+        self._check_channel(channel)
+        return self.output_enabled[channel - 1]
+
+    def set_output_enabled(self, channel, on):
+        self._check_channel(channel)
+        self.output_enabled[channel - 1] = bool(on)
 
     def get_actual_temperature(self, channel):
         self._check_channel(channel)
