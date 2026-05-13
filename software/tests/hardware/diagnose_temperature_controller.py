@@ -75,16 +75,18 @@ def set_param(ser, channel, param, value):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    g = ap.add_mutually_exclusive_group(required=True)
-    g.add_argument("--sn", help="USB serial number of the controller")
-    g.add_argument("--port", help="Direct COM/tty port (skips enumeration)")
-    ap.add_argument("--channel", type=int, default=1, help="TC channel (1 or 2)")
+    src = ap.add_mutually_exclusive_group(required=True)
+    src.add_argument("--sn", help="USB serial number of the controller")
+    src.add_argument("--port", help="Direct COM/tty port (skips enumeration)")
+    ap.add_argument("--channel", type=int, choices=[1, 2], default=1,
+                    help="TC channel")
     ap.add_argument("--baud", type=int, default=57600)
     ap.add_argument("--timeout", type=float, default=0.5)
-    ap.add_argument("--enable-output", action="store_true",
-                    help="Send TCSW=1 then re-poll to see if drive starts")
-    ap.add_argument("--disable-output", action="store_true",
-                    help="Send TCSW=0 (use to leave the unit idle when done)")
+    out = ap.add_mutually_exclusive_group()
+    out.add_argument("--enable-output", action="store_true",
+                     help="Send TCSW=1 and TCOE=1 before polling")
+    out.add_argument("--disable-output", action="store_true",
+                     help="Send TCSW=0 after polling (use to leave the unit idle)")
     ap.add_argument("--set-target", type=float, default=None,
                     help="Set target to this °C before polling")
     args = ap.parse_args()

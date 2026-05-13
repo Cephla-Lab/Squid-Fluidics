@@ -57,6 +57,33 @@ class TestTCMControllerSimulation:
         tc.save_target_temperature(1)
         tc.save_target_temperature(2)
 
+    def test_output_enabled_defaults_to_false(self):
+        tc = TCMControllerSimulation(sn=None, channels=2)
+        assert tc.output_enabled == [False, False]
+        assert tc.get_output_enabled(1) is False
+        assert tc.get_output_enabled(2) is False
+
+    def test_set_output_enabled_only_updates_named_channel(self):
+        tc = TCMControllerSimulation(sn=None, channels=2)
+        tc.set_output_enabled(1, True)
+        assert tc.output_enabled == [True, False]
+        assert tc.get_output_enabled(1) is True
+        assert tc.get_output_enabled(2) is False
+
+    def test_set_output_enabled_coerces_truthy_to_bool(self):
+        tc = TCMControllerSimulation(sn=None, channels=1)
+        tc.set_output_enabled(1, 1)
+        assert tc.output_enabled[0] is True
+        tc.set_output_enabled(1, 0)
+        assert tc.output_enabled[0] is False
+
+    def test_output_enabled_invalid_channel_raises(self):
+        tc = TCMControllerSimulation(sn=None, channels=1)
+        with pytest.raises(ValueError):
+            tc.set_output_enabled(2, True)
+        with pytest.raises(ValueError):
+            tc.get_output_enabled(2)
+
     def test_close_does_not_raise(self):
         tc = TCMControllerSimulation(sn=None, channels=1)
         tc.close()
