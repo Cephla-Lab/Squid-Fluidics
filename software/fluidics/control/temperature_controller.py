@@ -73,7 +73,7 @@ class TCMController:
         return float(response[14:])
 
     def _read_output_enabled(self, channel):
-        response = self.send_command("TCOE?", self._module(channel))
+        response = self.send_command("TCSW?", self._module(channel))
         return response.rsplit("=", 1)[-1].strip() == "1"
 
     # --- public API ---
@@ -97,7 +97,7 @@ class TCMController:
         return enabled
 
     def set_output_enabled(self, channel, on):
-        self.send_command(f"TCOE={1 if on else 0}", self._module(channel))
+        self.send_command(f"TCSW={1 if on else 0}", self._module(channel))
         self.output_enabled[channel - 1] = bool(on)
 
     def get_actual_temperature(self, channel):
