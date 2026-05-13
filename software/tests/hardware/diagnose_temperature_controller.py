@@ -84,11 +84,15 @@ def main():
     ap.add_argument("--timeout", type=float, default=0.5)
     out = ap.add_mutually_exclusive_group()
     out.add_argument("--enable-output", action="store_true",
-                     help="Send TCSW=1 and TCOE=1 before polling")
+                     help="Send TCSW=1 before polling (TCOE is read-only on "
+                          "this firmware — returns REPLY=3 on write)")
     out.add_argument("--disable-output", action="store_true",
                      help="Send TCSW=0 after polling (use to leave the unit idle)")
     ap.add_argument("--set-target", type=float, default=None,
                     help="Set target to this °C before polling")
+    ap.add_argument("--write", action="append", default=[], metavar="PARAM=VALUE",
+                    help="Write an arbitrary param before polling. Repeatable. "
+                         "Example: --write TCSETVOL=5.0 --write TCSW=1")
     args = ap.parse_args()
 
     if args.port:
@@ -111,10 +115,19 @@ def main():
             set_param(ser, args.channel, "TCADJUSTTEMP", args.set_target)
             print()
 
+        if args.write:
+            print("--- writes ---")
+            for assignment in args.write:
+                if "=" not in assignment:
+                    print(f"  skipping malformed --write {assignment!r} (expected PARAM=VALUE)")
+                    continue
+                param, value = assignment.split("=", 1)
+                set_param(ser, args.channel, param.strip(), value.strip())
+            print()
+
         if args.enable_output:
             print("--- enabling output ---")
             set_param(ser, args.channel, "TCSW", 1)
-            set_param(ser, args.channel, "TCOE", 1)
             time.sleep(0.3)  # give the loop a moment to ramp
             print()
 
