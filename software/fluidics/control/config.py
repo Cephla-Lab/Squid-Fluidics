@@ -72,6 +72,26 @@ class TemperatureControllerConfig(BaseModel):
     stabilization_timeout_seconds: float = Field(default=300, gt=0)
 
 
+class ServoAxisConfig(BaseModel):
+    slave_id: int
+
+
+class ServoMotorConfig(BaseModel):
+    serial_number: str
+    axes: Dict[str, ServoAxisConfig]
+
+
+class PeristalticPumpEntry(BaseModel):
+    slave_id: int
+    direction: Literal["clockwise", "counter_clockwise"]
+    default_speed: float = Field(gt=0, le=150.0)
+
+
+class PeristalticPumpsConfig(BaseModel):
+    serial_number: str
+    pumps: Dict[str, PeristalticPumpEntry]
+
+
 class FluidicsConfig(BaseModel):
     config_version: str
     microcontroller: MicrocontrollerConfig
@@ -80,6 +100,8 @@ class FluidicsConfig(BaseModel):
     sample_selection_inlet: Optional[SampleSelectionInletConfig] = None
     samples: Optional[SamplesConfig] = None
     temperature_controller: Optional[TemperatureControllerConfig] = None
+    servo_motor: Optional[ServoMotorConfig] = None
+    peristaltic_pumps: Optional[PeristalticPumpsConfig] = None
     application: Literal["Flow Cell", "Open Chamber"]
 
 
