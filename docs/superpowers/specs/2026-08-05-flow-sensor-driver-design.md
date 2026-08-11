@@ -41,17 +41,18 @@ Established by reading `firmware/SLF3X.{h,cpp}`, `firmware/controller_teensy41.i
 
 ## Goals
 
-1. Optional `flow_sensors` config section enabling one or two sensors on I²C indices 1 and 2.
+1. Optional `flow_sensors` config section declaring one or two sensors on I²C indices 1 and 2.
 2. A single reader thread in `FluidController` that owns the serial port, eliminating the read race.
 3. A `FlowSensor` driver exposing the live reading, with `INT16_MAX` mapped to "invalid".
-4. A `FlowMonitor` holding the fault rule as a pure, testable unit, with configurable ramp-up and tolerance.
-5. A GUI tab per configured sensor: live readout, plot, CSV recording.
-6. Simulation counterparts so `--simulation` and the test suite work without hardware.
+4. A GUI tab per configured sensor: live readout, plot, CSV recording.
+5. Simulation counterparts so `--simulation` and the test suite work without hardware.
+
+This is the observability layer: it makes flow readable, plottable, and recordable. Acting on those readings is the next piece of work.
 
 ## Non-goals
 
 - **Index 0 / the `Wire` bus.** Excluded because of the selector-valve general-call interaction above.
-- **MERFISH operations changes.** Designed separately; see "Next" below.
+- **Draw protection — the fault rule, its tolerances, and which sensor guards which operation.** All of it belongs to the MERFISH operations design; see "Next" below. A sensor's role is a property of the operation using it, not of the device, so none of it appears in `FlowSensorConfig`.
 - **Transmitting the signaling flags.** Phase 2 at the earliest; requires the read consolidation.
 - **Changing `SLF3X_MAX_VAL_uL_MIN`** (3520 vs the datasheet's 3250). Firmware `:1244` multiplies by it and `controller.py:678` divides by it, so it cancels on the round trip and only bounds the maximum representable `FLUID_OUT_PID` setpoint — which the sensor cannot reach anyway. Cosmetic; leave it.
 - **Making `medium` or `crc` configurable.** Both hardcoded — see §1.
@@ -61,24 +62,15 @@ Established by reading `firmware/SLF3X.{h,cpp}`, `firmware/controller_teensy41.i
 
 ### 1. Config schema
 
-Two new optional sections in `fluidics/control/config.py`:
+One new optional section in `fluidics/control/config.py`:
 
 ```python
 class FlowSensorConfig(BaseModel):
     index: Literal[1, 2]
     name: str
-
-class FlowMonitorConfig(BaseModel):
-    mode: Literal["off", "warn", "stop"] = "warn"
-    sensor: str
-    ramp_up_seconds: float = Field(default=3.0, gt=0)
-    tolerance_fraction: float = Field(default=0.3, gt=0, le=1)
-    max_flow_rate_ul_min: float = Field(default=2000, gt=0)
 ```
 
-On `FluidicsConfig`: `flow_sensors: Optional[List[FlowSensorConfig]] = None` and `flow_monitor: Optional[FlowMonitorConfig] = None`.
-
-The full (Phase 2) shape, showing both sensors:
+On `FluidicsConfig`: `flow_sensors: Optional[List[FlowSensorConfig]] = None`.
 
 ```yaml
 flow_sensors:
@@ -86,38 +78,17 @@ flow_sensors:
     name: syringe_draw
   - index: 2
     name: waste_line
-
-flow_monitor:            # omit entirely to disable
-  mode: warn             # off | warn | stop
-  sensor: syringe_draw
-  ramp_up_seconds: 3.0
-  tolerance_fraction: 0.3
-  max_flow_rate_ul_min: 2000
 ```
 
-Phase 1 accepts a single entry, so the config that ships first looks like:
+**The schema declares hardware and nothing else.** A flow sensor is a flow sensor; two of them may end up with different roles or the same role, and the schema takes no position on that. Which sensor guards a syringe draw — and the tolerances that go with it — is a property of the *operation*, not of the device, so it is specified where the operation lives. That keeps `FlowSensorConfig` reusable by any consumer, and it means adding a sensor is a purely additive, read-only act with no behavioural consequence anywhere.
 
-```yaml
-flow_sensors:
-  - index: 1
-    name: syringe_draw
+`name` labels the GUI tab and the CSV filename, and gives the operations layer a stable handle to select a sensor by. `index` matches the "I2C index" wording at `controller.py:380` and the `idx` convention `INITIALIZE_ROTARY` uses.
 
-flow_monitor:
-  mode: warn
-  sensor: syringe_draw
-```
-
-with the remaining `flow_monitor` fields taking their schema defaults.
-
-Validation: indices unique; `name`s unique; `flow_monitor.sensor` must match a configured `name`; `flow_monitor` without `flow_sensors` is an error. **Phase 1 additionally rejects more than one entry**, with a message stating that two sensors require the Phase 2 firmware.
-
-`index` matches the "I2C index" wording at `controller.py:380` and the `idx` convention `INITIALIZE_ROTARY` uses.
+Validation: indices unique; `name`s unique. **Phase 1 additionally rejects more than one entry**, with a message stating that two sensors require the Phase 2 firmware.
 
 **Why `medium` is not configurable.** It selects the on-chip calibration field (`0x3608` water / `0x3615` IPA). Datasheet Tables 1 and 2 give both an identical ±2000 µL/min full scale and ±3250 µL/min output limit — identical range confirms an identical scale factor, so the firmware's hardcoded ÷10 is right either way. Only the error characteristics differ (±5% water vs ±10% IPA). These reagents are aqueous and `clean_up` uses water, so the driver hardcodes water. One line to add back if a solvent step ever appears.
 
 **Why `crc` is not configurable.** It changes nothing that reaches the host (see Findings). The driver hardcodes `do_crc = True`, matching the intent of the dead `PERFORM_CRC` constant.
-
-**`max_flow_rate_ul_min` default of 2000** is exactly the datasheet's full-scale figure, above which accuracy degrades toward the ±3250 saturation point.
 
 ### 2. Serial ownership in `FluidController`
 
@@ -159,61 +130,33 @@ class FlowSensor:
 - **Phase 1:** the firmware has one sensor object and always transmits it in bytes 23–24, whichever bus it is on. Slot is `0` regardless of index.
 - **Phase 2:** slot is `index - 1`, so index 1 → bytes 23–24 and index 2 → bytes 25–26. Deterministic, independent of config ordering.
 
-`FlowSensorSimulation` mirrors the API and runs its own thread, since `FluidControllerSimulation` has no packet stream. It publishes a settable `simulated_flow_ul_min` attribute (default: whatever rate the syringe pump was last asked for, so the nominal path passes). Tests drive that attribute directly to exercise the low-flow, dropout, and sentinel paths — the simulation holds no reference to the monitor, keeping the dependency one-way.
+`FlowSensorSimulation` mirrors the API and runs its own thread, since `FluidControllerSimulation` has no packet stream. It publishes a settable `simulated_flow_ul_min` attribute, defaulting to a plausible steady value. Tests drive that attribute directly to produce low-flow, dropout, and sentinel streams, so the simulation stays a dumb source with no knowledge of any consumer.
 
-### 4. `FlowMonitor`
+### 4. GUI
 
-Pure fault logic, fed `(flow, timestamp)` samples. Armed around a draw via a context manager:
-
-```python
-with monitor.guard(expected_ul_min):
-    sp.execute()
-```
-
-Rules:
-
-- **Out of range** — if `expected > max_flow_rate_ul_min`, do not arm; log a warning naming the operation and rate. Under the current sample sequences this means the 5000 and 10000 µL/min steps run unmonitored.
-- **Ramp-up** — for `ramp_up_seconds` after arming, accumulate samples but never fault.
-- **Fault** — after ramp-up, `abs(measured)` outside `expected × (1 ± tolerance_fraction)` for 3 consecutive samples (≈180 ms at the 60 ms cadence).
-- **Invalid** — sentinel samples also count toward a fault once past ramp-up: a sensor that died mid-draw means nothing can be verified.
-
-Comparison uses magnitude, so sensor orientation in the line does not matter. `dispense_to_waste()` exits via the waste port while only `extract()` pulls through the extract port, so the sensor between selector valve and syringe sees draws only.
-
-`mode` selects the consequence:
-
-| mode | reads + plots | fault rule runs | acts on fault |
-|---|---|---|---|
-| `off` | yes | no | no |
-| `warn` | yes | yes | logs "would have triggered", pump untouched |
-| `stop` | yes | yes | stops the pump, raises `OperationError` |
-
-`warn` exists because tolerance and ramp-up have to be tuned against real hardware before enforcement can be trusted, and reading a log beats eyeballing a chart.
-
-### 5. GUI
-
-`FlowSensorWidget`, built on the existing `MplCanvas` and modelled on `TemperatureChannelWidget`: live readout, plot with query-interval and window-size spin boxes, CSV record toggle. The expected rate draws as a dashed reference line while armed, invalid samples render as gaps rather than 3276.7 spikes, and faults are marked.
+`FlowSensorWidget`, built on the existing `MplCanvas` and modelled on `TemperatureChannelWidget`: live readout, plot with query-interval and window-size spin boxes, CSV record toggle. Invalid samples render as gaps rather than 3276.7 spikes.
 
 A `FlowSensorControlWidget` container fans out one child per configured sensor, exactly as `TemperatureControlWidget` does per channel, and the tab is added only when `config.flow_sensors` is present — the same conditional as the temperature tab at `gui.py:1048`.
 
-### 6. Wiring
+The widget subscribes through `FlowSensor.subscribe()` and knows nothing about draws or expected rates. Overlays that belong to draw protection — an expected-rate reference line, fault markers — are added with that work, not here.
+
+### 5. Wiring
 
 `gui.py` and `run_sequences.py` both construct sensors after `controller.begin()`, call `begin()` on each, then `controller.start_reading()`. Teardown closes sensors and stops the reader thread. `run_sequences.py` gets no new CLI flags — config drives everything.
 
-### 7. Tests
+### 6. Tests
 
-**Unit — `tests/unit/control/test_config.py`:** `flow_sensors` / `flow_monitor` load and validate; defaults populate when omitted; `index: 0` and `index: 3` rejected; duplicate index and duplicate name rejected; `flow_monitor.sensor` naming an unknown sensor rejected; `flow_monitor` without `flow_sensors` rejected; two entries rejected in Phase 1. Existing legacy-conversion tests stay green.
+**Unit — `tests/unit/control/test_config.py`:** `flow_sensors` loads and validates; `index: 0` and `index: 3` rejected; duplicate index and duplicate name rejected; two entries rejected in Phase 1; a config with no `flow_sensors` section still loads. Existing legacy-conversion tests stay green.
 
-**Unit — `tests/unit/control/test_flow_sensor.py`:** raw 32767 → `None`; raw 32500 → 3250.0 (saturated but valid); negative values scale correctly; `begin()` raises on `CMD_EXECUTION_ERROR`.
+**Unit — `tests/unit/control/test_flow_sensor.py`:** raw 32767 → `None`; raw 32500 → 3250.0 (saturated but valid); negative values scale correctly; `begin()` raises on `CMD_EXECUTION_ERROR`; subscribers receive each packet.
 
-**Unit — `tests/unit/control/test_flow_monitor.py`:** the fault rule against synthetic sample streams — steady-good never faults; sustained-low faults after ramp-up; a dropout shorter than the debounce does not fault; a fault during ramp-up is suppressed; sentinel runs fault after ramp-up; `expected > max_flow_rate_ul_min` never arms; `warn` does not act while `stop` does.
+**Unit — `tests/unit/control/test_controller.py`:** `wait_for_completion()` ignores a stale packet carrying the previous UID; accepts the matching one; raises on timeout; `cmd_uid` is 0 on both sides after `CMD_SET.CLEAR`, so the first wait after a clear can match.
 
-**Unit — `tests/unit/control/test_controller.py`:** `wait_for_completion()` ignores a stale packet carrying the previous UID; accepts the matching one; raises on timeout.
-
-**Integration:** a simulated fault stops a draw and surfaces as `OperationError` — added with the MERFISH work.
+**Integration:** simulation-mode startup constructs sensors, starts the reader thread, and shuts down cleanly.
 
 ## Phasing
 
-**Phase 1 — software only, no reflash.** Everything above, limited to one sensor on index 1 or 2, reading packet slot 0. Fully useful today, and it is what produces the `warn`-mode logs needed to tune `tolerance_fraction` and `ramp_up_seconds`.
+**Phase 1 — software only, no reflash.** Everything above, limited to one sensor on index 1 or 2, reading packet slot 0. Fully useful today: it gives live plots and CSV traces of real sequences, which is the raw material for choosing the tolerance and ramp-up values that draw protection will need.
 
 **Phase 2 — firmware.** Sensor array following the existing `SSCX_QTY`/`SSCX_MAX` and `SELECTORVALVE_QTY`/`SELECTORVALVE_MAX` pattern; index maps to `Wire1`/`Wire2`; transmit loop fills bytes 23–24 and 25–26. **The packet stays 30 bytes** — two sensors fit the slots that already exist, so `MCU_MSG_LENGTH` is unchanged and there is no protocol bump. Also folds in the read consolidation (single read per cycle into globals, so the averaging window is consistent), CRC-failure sentinel substitution, and the `SLF3X_SMOOTHING_ON` bit fix (`_defs.h:45` has `1 << 4`; datasheet Table 9 says bit 5). Optionally transmits the flags word, which would need new bytes and *would* be a protocol bump — deferred, and only worth it if above-range detection proves necessary.
 
@@ -221,12 +164,29 @@ Phase 2's read consolidation retargets `:133` and `:294`, which feed the bang-ba
 
 ## Next: MERFISH operations
 
-Designed separately. One constraint already established: `sp.abort()` latches `is_aborted` until `reset_abort()`, and `flow_reagent` checks `if self.sp.is_aborted: return` after each `execute()` — so reusing the abort path would make a flow fault **silently return** rather than raise. The pump needs a non-latching `stop()` that terminates the current chain and lets `wait_for_stop()` exit, so the fault surfaces as an `OperationError` with a real diagnostic. Open: which operations to guard (`flow_reagent` alone, or `priming_or_clean_up` too, where air in the lines is expected and false positives are likely).
+Draw protection is designed separately, since a sensor's role belongs to the operation that uses it. Carried forward from this discussion:
+
+**A `FlowMonitor` holding the fault rule** as a pure function of `(flow, timestamp)` samples — no controller, no thread, no clock — so it is unit-testable in isolation. Armed around a draw, probably as a context manager wrapping `sp.execute()`. The rule as sketched so far:
+
+- **Out of range** — if the expected rate exceeds the sensor's usable range, do not arm; log a warning naming the operation and rate. The natural default for that ceiling is 2000 µL/min, the datasheet's full-scale figure, above which accuracy degrades toward the ±3250 saturation point. Under the current sample sequences the 5000 and 10000 µL/min steps therefore run unmonitored.
+- **Ramp-up** — for a configurable window after arming, accumulate samples but never fault.
+- **Fault** — after ramp-up, `abs(measured)` outside `expected × (1 ± tolerance)` for 3 consecutive samples (≈180 ms at the 60 ms cadence).
+- **Invalid** — sentinel samples count toward a fault once past ramp-up; a sensor that died mid-draw means nothing can be verified.
+
+Comparison uses magnitude, so sensor orientation in the line does not matter. `dispense_to_waste()` exits via the waste port while only `extract()` pulls through the extract port, so a sensor between selector valve and syringe sees draws only.
+
+**The three-state mode stays:** `off | warn | stop`. `warn` runs the full rule and logs what *would* have fired without touching the pump, which is how tolerance and ramp-up get tuned against real hardware before enforcement is trusted. Reading a log beats eyeballing a chart.
+
+**Expected rate comes from the speed code,** not the sequence: `sp.get_flow_rate(speed_code) * 1000`, per the units finding above.
+
+**A non-latching pump stop is required.** `sp.abort()` latches `is_aborted` until `reset_abort()`, and `flow_reagent` checks `if self.sp.is_aborted: return` after each `execute()` — so reusing the abort path would make a flow fault **silently return** rather than raise. The pump needs a `stop()` that terminates the current chain and lets `wait_for_stop()` exit without latching, so the fault surfaces as an `OperationError` with a real diagnostic.
+
+**Open questions:** where the mode and tolerances live in config now that they are not on the sensor; how an operation names the sensor it wants; and which operations to guard — `flow_reagent` alone, or `priming_or_clean_up` too, where air in the lines is expected and false positives are likely.
 
 ## Risk and rollback
 
 - **`wait_for_completion()` UID matching** is the highest-risk change: every command path depends on it. Mitigated by dedicated unit tests and by the timeout converting a hang into a clear error.
 - **Always-on reader thread** changes serial timing for all existing operations. It removes a race rather than adding one, but it touches every command path and wants a hardware smoke test.
-- Config sections are optional and absent from existing YAML, so current configs load unchanged.
-- `mode: warn` is the recommended starting point; nothing stops a pump until someone sets `stop`.
+- The `flow_sensors` section is optional and absent from existing YAML, so current configs load unchanged.
+- Nothing in this change can stop a pump or fail a sequence — the sensor is read-only until draw protection lands. The blast radius is confined to the two serial-path items above.
 - Rollback: drop the branch. Phase 1 requires no firmware change, so there is nothing to un-flash.
