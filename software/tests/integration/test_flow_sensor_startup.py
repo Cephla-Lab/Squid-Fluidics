@@ -25,5 +25,26 @@ class TestBuildFlowSensors:
         sensors = build_flow_sensors(fc, flow_cell_config, simulation=True)
         for s in sensors:
             s.begin()
+
+        seen = []
+        for s in sensors:
+            s.subscribe(lambda flow, ts: seen.append(flow))
+
         for s in sensors:
             s.close()
+
+        # FlowSensorSimulation.close() clears its own subscriber list and sets
+        # terminate_reading_thread; it never touches fc.packet_callback (only
+        # the real FlowSensor's __init__ installs that wiring, which these
+        # simulation instances never go through), so there is nothing to
+        # assert on fc here. _subscribers == [] is the actual mechanism by
+        # which a closed sensor "stops being called": _reading_loop's only
+        # notification step iterates that exact list, so clearing it is
+        # equivalent to no registered callback ever firing again. We can't
+        # start reading_thread to observe this end-to-end (constructors/tests
+        # must never start a background thread in this suite), so this
+        # asserts the real, documented effects of close() instead of a no-op.
+        for s in sensors:
+            assert s._subscribers == []
+            assert s.terminate_reading_thread is True
+        assert seen == []

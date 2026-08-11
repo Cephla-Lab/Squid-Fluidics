@@ -1274,6 +1274,7 @@ class FluidicsControlGUI(QMainWindow):
             try:
                 sensor.begin()
             except Exception as e:
+                sensor.close()  # release the packet_callback slot it grabbed in __init__
                 msg = f"Failed to initialize flow sensor '{sensor.name}': {e}"
                 print(msg)
                 self.flowSensors = []
