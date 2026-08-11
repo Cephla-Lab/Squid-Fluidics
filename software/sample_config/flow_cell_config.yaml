@@ -85,4 +85,21 @@ reagent_selection:
       port_27: 900
       port_28: 900
   common_tubing_fluid_amount_ul: 800
+# Optional -- omit the whole section if no flow sensor is fitted.
+# index is the I2C bus the sensor sits on: 1 = Wire1, 2 = Wire2. Bus 0 is not
+# supported; it is shared with the selector valves, whose driver emits a
+# general-call transaction after every command.
+# Only one sensor is accepted for now. A second needs firmware that populates
+# packet bytes 25-26.
+flow_sensors:
+- index: 1
+  name: syringe_draw
+  # Reserved for draw protection, which is not implemented yet, so "off" is the
+  # only accepted value today. Keep it quoted -- bare off is a YAML boolean.
+  # The three fields below are read by that same future feature; shown here at
+  # their defaults, and all optional.
+  monitor: "off"
+  ramp_up_seconds: 3.0
+  tolerance_fraction: 0.3
+  max_flow_rate_ul_min: 2000
 application: Flow Cell

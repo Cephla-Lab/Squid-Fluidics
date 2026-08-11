@@ -1,3 +1,9 @@
 .DS_Store
 *.pyc
 **/.idea/
+
+# Per-machine hardware config: serial numbers, tubing volumes and reagent port
+# names are specific to one rig. gui.py loads ./config.yaml automatically when
+# present, so a committed copy would silently override every other machine's
+# setup. Shareable examples belong in software/sample_config/.
+software/config.yaml
