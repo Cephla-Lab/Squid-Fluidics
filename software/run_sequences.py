@@ -93,6 +93,7 @@ def on_estimate(time_to_finish, n_sequences):
 def main():
     args = parse_args()
 
+    controller = None
     syringePump = None
     temperatureController = None
     flowSensors = []
@@ -145,6 +146,11 @@ def main():
             sensor.close()
         if temperatureController is not None:
             temperatureController.close()
+        # Last: the reader thread owns the MCU port for the whole run, so stop
+        # it and release the port rather than leaving that to __del__. Sensors
+        # detach from the controller above, so nothing is left subscribed.
+        if controller is not None:
+            controller.close()
 
 if __name__ == '__main__':
     main()

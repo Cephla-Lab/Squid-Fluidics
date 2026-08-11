@@ -212,22 +212,32 @@ class FluidController(Microcontroller):
 
         return
 
-    def __del__(self):
-        '''Close the logfile if it's being used, reset, and disconnect.
+    def close(self):
+        '''Stop the reader thread, flush the log, and release the serial port.
 
-        Defensive attribute lookups: if __init__ raised partway through (e.g.
-        the log file failed to open, before _init_status_state() or
+        Callers should invoke this explicitly rather than leaving the port to
+        __del__: the reader thread owns the port for the process's lifetime, so
+        without an orderly stop the device can stay busy and a second run in the
+        same process cannot reopen it.
+
+        Idempotent, and safe on a partially-constructed object. Defensive
+        attribute lookups matter because if __init__ raised partway through
+        (e.g. the log file failed to open, before _init_status_state() or
         Microcontroller.__init__() ran), GC still calls __del__ on the
-        half-built object. Plain attribute access would raise AttributeError
+        half-built object; plain attribute access would raise AttributeError
         here and mask whatever error __init__ originally raised.
         '''
         if getattr(self, '_reader_thread', None) is not None:
             self.stop_reading()
         if getattr(self, 'measurement_file', None) is not None:
             self.measurement_file.close()
+            self.measurement_file = None
         if getattr(self, 'serial', None) is not None:
             self.serial.close()
-        return
+            self.serial = None
+
+    def __del__(self):
+        self.close()
 
     def begin(self):
         '''Connect to the microcontroller, then start the reader thread that owns the port.'''
@@ -895,6 +905,9 @@ class FluidControllerSimulation():
         pass
 
     def stop_reading(self):
+        pass
+
+    def close(self):
         pass
 
     def send_command(self, command, *args):

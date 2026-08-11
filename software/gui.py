@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import csv
 import time
@@ -36,6 +37,7 @@ from fluidics.sequences import (
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
+from matplotlib.ticker import FuncFormatter
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -794,6 +796,12 @@ class ManualControlWidget(QWidget):
         super().closeEvent(event)
 
 
+def _safe_filename_part(text):
+    """Reduce free-form text to something safe to embed in a filename."""
+    cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", text).strip("._")
+    return cleaned or "sensor"
+
+
 class MplCanvas(FigureCanvasQTAgg):
     def __init__(self, parent=None, width=5, height=4, dpi=100):
         fig = Figure(figsize=(width, height), dpi=dpi)
@@ -908,7 +916,13 @@ class TimeSeriesPlotWidget(QWidget):
         ax.set_ylabel(ylabel)
         ax.set_title(title)
         ax.grid(True)
-        ax.set_xticklabels([f"{x:.0f}" for x in current_time - ax.get_xticks()])
+        # The x axis holds absolute timestamps but reads as "seconds ago", so
+        # relabel through a formatter rather than set_xticklabels(): the latter
+        # pins fixed strings to whatever ticks existed at call time, which
+        # desynchronizes on resize or zoom and warns about a FixedFormatter
+        # without a matching FixedLocator.
+        ax.xaxis.set_major_formatter(
+            FuncFormatter(lambda x, _pos: f"{current_time - x:.0f}"))
         self.canvas.draw()
 
     @staticmethod
@@ -1117,7 +1131,9 @@ class FlowSensorWidget(TimeSeriesPlotWidget):
         return [self.flows]
 
     def _record_filename(self):
-        return f"flow_{self.sensor.name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        # sensor.name is free-form config text; keep it out of the path itself
+        # so a name containing a separator writes here rather than elsewhere.
+        return f"flow_{_safe_filename_part(self.sensor.name)}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
 
     def _record_header(self):
         return ["Time", "Flow Rate (uL/min)"]
@@ -1323,7 +1339,7 @@ class FluidicsControlGUI(QMainWindow):
             tab.close_recordings()
         for sensor in self.flowSensors:
             sensor.close()
-        self.controller.stop_reading()
+        self.controller.close()
 
         if self.config.application == "Open Chamber":
             self.syringePump.close()
