@@ -6,7 +6,7 @@ import pytest
 
 import fluidics.control.controller as controller_module
 from fluidics.control.controller import split_byte, uint_to_bytes
-from fluidics.control._def import MCU_CONSTANTS
+from fluidics.control._def import MCU_CONSTANTS, CMD_SET
 
 
 class TestSplitByte:
@@ -113,12 +113,16 @@ def _set_be16(msg, index, value):
 def _bare_controller():
     """A FluidController with no serial port, for testing pure logic.
 
-    __init__ is bypassed, so the two flags _log_packet reads must be set by
-    hand — otherwise _publish_status raises AttributeError.
+    __init__ is bypassed, so attributes it would normally set must be filled
+    in by hand: log_measurements/debug because _publish_status reads them,
+    and cmd_sent (mirroring __init__'s CMD_SET.CLEAR default) because
+    wait_for_completion's timeout message reads it. Otherwise these raise
+    AttributeError instead of exercising the behavior under test.
     """
     fc = FluidController.__new__(FluidController)
     fc.log_measurements = False
     fc.debug = False
+    fc.cmd_sent = CMD_SET.CLEAR
     return fc
 
 
@@ -379,3 +383,68 @@ class TestDelDefensive:
         # Verify the object is cleaned up (no side effects from trying to close)
         # by checking the method completed
         assert True
+
+
+class TestWaitForCompletion:
+    def test_returns_when_uid_matches(self):
+        fc = _bare_controller()
+        fc._init_status_state()
+        fc.cmd_uid = 7
+        fc._publish_status(fc._parse_packet(
+            _make_packet(uid=7, status=COMMAND_STATUS.COMPLETED_WITHOUT_ERRORS)))
+        assert fc.wait_for_completion() == COMMAND_STATUS.COMPLETED_WITHOUT_ERRORS
+
+    def test_ignores_stale_packet_from_previous_command(self):
+        fc = _bare_controller()
+        fc._init_status_state()
+        fc.cmd_uid = 8
+        # The packet still in flight carries the *previous* command, completed.
+        fc._publish_status(fc._parse_packet(
+            _make_packet(uid=7, status=COMMAND_STATUS.COMPLETED_WITHOUT_ERRORS)))
+        with pytest.raises(TimeoutError):
+            fc.wait_for_completion(timeout=1)
+
+    def test_waits_through_in_progress(self):
+        fc = _bare_controller()
+        fc._init_status_state()
+        fc.cmd_uid = 9
+        fc._publish_status(fc._parse_packet(
+            _make_packet(uid=9, status=COMMAND_STATUS.IN_PROGRESS)))
+        with pytest.raises(TimeoutError):
+            fc.wait_for_completion(timeout=1)
+
+    def test_returns_error_status_without_raising(self):
+        fc = _bare_controller()
+        fc._init_status_state()
+        fc.cmd_uid = 10
+        fc._publish_status(fc._parse_packet(
+            _make_packet(uid=10, status=COMMAND_STATUS.CMD_EXECUTION_ERROR)))
+        assert fc.wait_for_completion() == COMMAND_STATUS.CMD_EXECUTION_ERROR
+
+    def test_timeout_message_names_the_command(self):
+        fc = _bare_controller()
+        fc._init_status_state()
+        fc.cmd_uid = 11
+        fc.cmd_sent = 3
+        fc._publish_status(fc._parse_packet(_make_packet(uid=10)))
+        with pytest.raises(TimeoutError, match="11"):
+            fc.wait_for_completion(timeout=1)
+
+
+class TestClearResetsUid:
+    """CMD_SET.CLEAR resets cmd_uid to 0, and send_command writes the UID into
+    the outgoing array *after* that reset. So the command goes out with UID 0
+    and self.cmd_uid == 0, and the subsequent wait can match. This is correct
+    by accident of statement order — pin it.
+    """
+
+    def test_clear_leaves_cmd_uid_at_zero(self):
+        fc = _bare_controller()
+        fc._init_status_state()
+        fc.cmd_uid = 57
+        fc.serial = None
+        sent = []
+        fc.send_mcu_command = sent.append
+        fc.send_command(CMD_SET.CLEAR)
+        assert fc.cmd_uid == 0
+        assert sent[0][0] == 0 and sent[0][1] == 0

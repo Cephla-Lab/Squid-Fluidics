@@ -206,15 +206,26 @@ class FluidController(Microcontroller):
         super().begin()
         self.start_reading()
     
-    def wait_for_completion(self):
-        '''Keep polling for status until it is no longer IN_PROGRESS, return the status'''
-        mcu_data = self.get_mcu_status()
-        status = mcu_data['MCU_command_execution_status']
-        while status == COMMAND_STATUS.IN_PROGRESS:
-            mcu_data = self.get_mcu_status()
-            status = mcu_data['MCU_command_execution_status']
-        
-        return status
+    def wait_for_completion(self, timeout=30):
+        '''Block until the MCU reports a terminal status for the command we just sent.
+
+        Matching on the UID matters: a packet already in flight when the command
+        went out still carries the previous command's status, and accepting it
+        would return before the firmware had even started.
+        '''
+        deadline = time() + timeout
+        while True:
+            data = self.get_mcu_status()
+            if data['MCU_received_command_UID'] == self.cmd_uid:
+                status = data['MCU_command_execution_status']
+                if status != COMMAND_STATUS.IN_PROGRESS:
+                    return status
+            if time() > deadline:
+                raise TimeoutError(
+                    f"MCU did not complete command {self.cmd_sent} "
+                    f"(uid {self.cmd_uid}) within {timeout}s"
+                )
+            sleep(0.005)
     
     def add_uid_to_cmd(self, cmd):
         '''Break cmd_uid into two bytes and overwrite the first two bytes of the command array with the uid'''
