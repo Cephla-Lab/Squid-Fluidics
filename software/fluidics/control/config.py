@@ -72,6 +72,24 @@ class TemperatureControllerConfig(BaseModel):
     stabilization_timeout_seconds: float = Field(default=300, gt=0)
 
 
+class FlowSensorConfig(BaseModel):
+    """One SLF3X flow sensor on the Teensy's I2C bus.
+
+    index is the I2C bus the sensor sits on (1 = Wire1, 2 = Wire2). Bus 0
+    is excluded: it is shared with the selector valves, whose driver emits
+    a general-call transaction after every command.
+
+    The monitor fields are per-sensor tuning consumed by draw protection in
+    the operations layer. Nothing reads them yet.
+    """
+    index: Literal[1, 2]
+    name: str
+    monitor: Literal["off", "warn", "stop"] = "off"
+    ramp_up_seconds: float = Field(default=3.0, gt=0)
+    tolerance_fraction: float = Field(default=0.3, gt=0, le=1)
+    max_flow_rate_ul_min: float = Field(default=2000, gt=0)
+
+
 class FluidicsConfig(BaseModel):
     config_version: str
     microcontroller: MicrocontrollerConfig
@@ -80,7 +98,28 @@ class FluidicsConfig(BaseModel):
     sample_selection_inlet: Optional[SampleSelectionInletConfig] = None
     samples: Optional[SamplesConfig] = None
     temperature_controller: Optional[TemperatureControllerConfig] = None
+    flow_sensors: Optional[List[FlowSensorConfig]] = Field(default=None, min_length=1)
     application: Literal["Flow Cell", "Open Chamber"]
+
+    @model_validator(mode='after')
+    def _check_flow_sensors(self):
+        if self.flow_sensors is None:
+            return self
+
+        indices = [s.index for s in self.flow_sensors]
+        if len(set(indices)) != len(indices):
+            raise ValueError("flow_sensors entries must have unique index values")
+
+        names = [s.name for s in self.flow_sensors]
+        if len(set(names)) != len(names):
+            raise ValueError("flow_sensors entries must have unique name values")
+
+        if len(self.flow_sensors) > 1:
+            raise ValueError(
+                "only one flow sensor is supported; a second requires firmware "
+                "that populates packet bytes 25-26"
+            )
+        return self
 
 
 # --- Legacy JSON to v2.0 YAML Conversion ---
