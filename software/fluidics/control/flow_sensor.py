@@ -40,12 +40,22 @@ class FlowSensor:
         self._lock = threading.Lock()
         self._subscribers = []
 
-        self.fc.packet_callback = self._on_packet
+        # Stored once so close() can find it again: a bound method is a new
+        # object on every attribute access (a.m is a.m is False in CPython),
+        # so re-deriving self._on_packet in close() and comparing with `is`
+        # would never match what was assigned here.
+        self._packet_handler = self._on_packet
+        self.fc.packet_callback = self._packet_handler
 
     def begin(self):
         """Initialize the sensor on the MCU. Raises if the MCU reports failure."""
         status = self.fc.send_command_blocking(
             CMD_SET.INITIALIZE_FLOW_SENSOR, self.index, MEDIUM_WATER, PERFORM_CRC)
+        # A real FluidController's send_command_blocking always returns an int
+        # (wait_for_completion() returns a status or raises TimeoutError), so
+        # this branch is unreachable on hardware. FluidControllerSimulation has
+        # no MCU to report a status and returns None; treat that as success
+        # rather than "unknown" so begin() works against the simulation too.
         if status is not None and status != COMMAND_STATUS.COMPLETED_WITHOUT_ERRORS:
             raise RuntimeError(
                 f"Flow sensor '{self.name}' on index {self.index} failed to "
@@ -66,7 +76,7 @@ class FlowSensor:
 
     def close(self):
         self._subscribers = []
-        if getattr(self.fc, "packet_callback", None) is self._on_packet:
+        if getattr(self.fc, "packet_callback", None) is self._packet_handler:
             self.fc.packet_callback = None
 
     def _on_packet(self, parsed):

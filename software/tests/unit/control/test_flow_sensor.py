@@ -115,6 +115,46 @@ class TestFlowSensorBegin:
         with pytest.raises(RuntimeError, match="index 1"):
             sensor.begin()
 
+    def test_none_status_is_treated_as_success(self):
+        # FluidControllerSimulation's send_command_blocking returns None
+        # (no real MCU to report a status). begin() must not raise.
+        fc = FakeController(status=None)
+        sensor = FlowSensor(fc, index=1, name="s")
+        sensor.begin()
+
+
+class TestFlowSensorClose:
+    def test_close_clears_controller_callback(self):
+        fc = FakeController()
+        sensor = FlowSensor(fc, index=1, name="s")
+        sensor.close()
+        assert fc.packet_callback is None
+
+    def test_close_stops_updating_latest_reading(self):
+        fc = FakeController()
+        sensor = FlowSensor(fc, index=1, name="s")
+        fc.publish(100)
+        sensor.close()
+        fc.publish(200)
+        assert sensor.latest_flow_ul_min == pytest.approx(10.0)
+
+    def test_close_stops_notifying_subscribers(self):
+        fc = FakeController()
+        sensor = FlowSensor(fc, index=1, name="s")
+        seen = []
+        sensor.subscribe(lambda flow, ts: seen.append(flow))
+        sensor.close()
+        fc.publish(100)
+        assert seen == []
+
+    def test_close_leaves_other_callback_intact(self):
+        fc = FakeController()
+        sensor = FlowSensor(fc, index=1, name="s")
+        other_callback = lambda parsed: None
+        fc.packet_callback = other_callback
+        sensor.close()
+        assert fc.packet_callback is other_callback
+
 
 class TestFlowSensorPacketSlot:
     def test_slot_one_reads_bytes_25_26(self):
