@@ -343,3 +343,39 @@ class TestReaderLifecycle:
 
         assert fc._reader_thread is None
         assert fc._terminate_reader is True
+
+
+class TestDelDefensive:
+    """__del__ must be defensive against partial __init__. If __init__ raises
+    partway through (e.g. log file open fails before measurement_file is
+    assigned), GC still calls __del__ on the half-built object. The old guard
+    `if getattr(self, 'log_measurements', False)` would pass if the flag was
+    set but the file was never opened, then the next line would raise and mask
+    the original __init__ error. The new guard checks the attribute that's
+    actually dereferenced on the next line.
+    """
+
+    def test_del_with_log_measurements_true_but_no_file_does_not_raise(self):
+        """Regression test for the bug fixed in the code edit.
+
+        Scenario: __init__ sets `log_measurements = True` but then the
+        `open()` call for the log file raises. The flag exists and is `True`,
+        but `measurement_file` was never assigned. With the old guard
+        `if getattr(self, 'log_measurements', False)`, __del__ would try to
+        close a non-existent attribute and raise AttributeError, masking the
+        original error that __init__ raised.
+
+        With the new guard `if getattr(self, 'measurement_file', None) is not None`,
+        __del__ detects the file was never created and skips the close safely.
+        """
+        fc = FluidController.__new__(FluidController)
+        fc.log_measurements = True  # flag is set
+        # deliberately NOT setting measurement_file, mimicking __init__ raising after the flag
+        fc.debug = False
+
+        # This must not raise
+        fc.__del__()
+
+        # Verify the object is cleaned up (no side effects from trying to close)
+        # by checking the method completed
+        assert True

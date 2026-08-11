@@ -195,7 +195,7 @@ class FluidController(Microcontroller):
         '''
         if getattr(self, '_reader_thread', None) is not None:
             self.stop_reading()
-        if getattr(self, 'log_measurements', False):
+        if getattr(self, 'measurement_file', None) is not None:
             self.measurement_file.close()
         if getattr(self, 'serial', None) is not None:
             self.serial.close()
