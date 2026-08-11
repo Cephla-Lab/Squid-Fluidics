@@ -5,16 +5,7 @@ from fluidics.control.controller import FluidController
 from fluidics.control.flow_sensor import FlowSensor, FlowSensorSimulation, INVALID_RAW
 from fluidics.control._def import CMD_SET, COMMAND_STATUS
 
-
-def _make_packet(flow_raw=1000, uid=1, status=COMMAND_STATUS.COMPLETED_WITHOUT_ERRORS):
-    msg = [0] * 30
-    msg[0] = (uid >> 8) & 0xFF
-    msg[1] = uid & 0xFF
-    msg[3] = status
-    unsigned = flow_raw & 0xFFFF
-    msg[23] = (unsigned >> 8) & 0xFF
-    msg[24] = unsigned & 0xFF
-    return msg
+from .packet_helpers import make_status_packet as _make_packet
 
 
 class FakeController:

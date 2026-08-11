@@ -11,6 +11,27 @@ from time import time, sleep
 
 SERIAL_NUMBER_DEBUGGING = '11972480'
 
+# How long the reader thread naps when the port has nothing waiting. The MCU
+# transmits every 60 ms, so anything well under that adds no meaningful latency
+# while keeping idle wakeups down.
+READER_IDLE_SLEEP_S = 0.005
+
+
+def to_int16(raw):
+    '''Reinterpret an unsigned 16-bit value as signed int16.
+
+    Equivalent to np.int16(raw) for raw in [0, 65535], but numpy's out-of-range
+    cast is deprecated (warns) on this NumPy version and raises OverflowError on
+    NumPy 2.x — every negative flow/volume/valve-mask reading has the high bit
+    set and would hit that path.
+    '''
+    return raw - 65536 if raw > 32767 else raw
+
+
+def raw_to_psi(raw_pressure):
+    '''Convert a raw SSCX pressure count to psi.'''
+    return (raw_pressure - MCU_CONSTANTS._output_min) * (MCU_CONSTANTS._p_max - MCU_CONSTANTS._p_min) / (MCU_CONSTANTS._output_max - MCU_CONSTANTS._output_min) + MCU_CONSTANTS._p_min
+
 def print_message(msg):
     '''
     Print message with timestamp prepended
@@ -129,8 +150,15 @@ class Microcontroller():
                 return None
             # If it is 0, we have a full packet to decode. Clear the read buffer
             else:
-                output = cobs.decode(bytearray(self.read_buffer))
-                self.read_buffer = []
+                try:
+                    output = cobs.decode(bytearray(self.read_buffer))
+                finally:
+                    # Clear on failure as well as success. The byte loop above
+                    # always consumes through a delimiter, so a corrupt frame is
+                    # fully drained by the time we get here — keeping its bytes
+                    # would prepend them to the next frame and make every later
+                    # decode fail too, until a spurious 0x00 happened to resync.
+                    self.read_buffer = []
 
         # If we aren't using COBS, use fixed-length command rx
         else:
@@ -283,16 +311,6 @@ class FluidController(Microcontroller):
         selector_valve_4_pos = msg[9]
         selector_valve_5_pos = msg[10]
 
-        def to_int16(raw):
-            '''Reinterpret an unsigned 16-bit value as signed int16.
-
-            Equivalent to np.int16(raw) for raw in [0, 65535], but numpy's
-            out-of-range cast is deprecated (warns) on this NumPy version and
-            raises OverflowError on NumPy 2.x — every negative flow/volume/
-            valve-mask reading has the high bit set and would hit that path.
-            '''
-            return raw - 65536 if raw > 32767 else raw
-
         solenoid_valves = to_int16((int(msg[11]) << 8) + msg[12])
 
         measurement_pump_power = MCU_CONSTANTS.TTP_MAX_PW * float((int(msg[13]) << 8) + msg[14]) / np.iinfo(np.uint16).max
@@ -301,9 +319,6 @@ class FluidController(Microcontroller):
         _pressure_2_raw = (int(msg[17]) << 8) + msg[18]
         _pressure_3_raw = (int(msg[19]) << 8) + msg[20]
         _pressure_4_raw = (int(msg[21]) << 8) + msg[22]
-
-        def raw_to_psi(raw_pressure):
-            return (raw_pressure - MCU_CONSTANTS._output_min) * (MCU_CONSTANTS._p_max - MCU_CONSTANTS._p_min) / (MCU_CONSTANTS._output_max - MCU_CONSTANTS._output_min) + MCU_CONSTANTS._p_min
 
         pressure_1 = raw_to_psi(_pressure_1_raw)
         pressure_2 = raw_to_psi(_pressure_2_raw)
@@ -368,7 +383,7 @@ class FluidController(Microcontroller):
             try:
                 msg = self.read_received_packet_nowait()
                 if msg is None:
-                    sleep(0.001)
+                    sleep(READER_IDLE_SLEEP_S)
                     continue
                 if len(msg) != MCU_MSG_LENGTH:
                     continue
@@ -377,20 +392,11 @@ class FluidController(Microcontroller):
                 # A corrupt COBS frame raises from cobs.decode, and the port
                 # raises during shutdown. Neither should kill the only thread
                 # feeding every consumer — drop the frame and carry on.
-                #
-                # Clearing read_buffer here is what makes that recovery
-                # deterministic. read_received_packet_nowait only clears it on
-                # a successful decode; left alone after a decode failure, the
-                # corrupt bytes stay in the buffer forever and every later
-                # frame gets appended onto them, so cobs.decode keeps failing
-                # until a spurious 0x00 happens to resync it -- observed to
-                # take up to hundreds of frames. Since the byte loop always
-                # consumes through a delimiter before decoding, dropping the
-                # buffer guarantees the very next frame decodes cleanly.
-                self.read_buffer = []
+                # read_received_packet_nowait clears its own buffer on a failed
+                # decode, so the next frame resyncs deterministically.
                 if not self._terminate_reader:
                     print_message(f"Reader thread error: {e}")
-                sleep(0.001)
+                sleep(READER_IDLE_SLEEP_S)
 
     def start_reading(self):
         '''Begin consuming packets. The reader thread owns the serial port.'''

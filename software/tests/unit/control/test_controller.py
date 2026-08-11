@@ -3,10 +3,11 @@ import warnings
 
 import numpy as np
 import pytest
+from cobs import cobs
 
 import fluidics.control.controller as controller_module
 from fluidics.control.controller import split_byte, uint_to_bytes
-from fluidics.control._def import MCU_CONSTANTS, CMD_SET
+from fluidics.control._def import MCU_CONSTANTS, CMD_SET, MCU_MSG_LENGTH
 
 
 class TestSplitByte:
@@ -89,18 +90,7 @@ from fluidics.control.controller import FluidController
 from fluidics.control._def import COMMAND_STATUS
 
 
-def _make_packet(uid=1, cmd=3, status=COMMAND_STATUS.COMPLETED_WITHOUT_ERRORS,
-                 flow_raw=1000):
-    """Build a 30-byte MCU status packet with the given flow sensor 1 value."""
-    msg = [0] * 30
-    msg[0] = (uid >> 8) & 0xFF
-    msg[1] = uid & 0xFF
-    msg[2] = cmd
-    msg[3] = status
-    unsigned = flow_raw & 0xFFFF
-    msg[23] = (unsigned >> 8) & 0xFF
-    msg[24] = unsigned & 0xFF
-    return msg
+from .packet_helpers import make_status_packet as _make_packet
 
 
 def _set_be16(msg, index, value):
@@ -235,6 +225,59 @@ class TestNegativeRawDecoding:
         assert parsed["vol_ul"] == pytest.approx(expected)
 
 
+class _FakeSerial:
+    """Serial stub that hands out a fixed byte script one byte at a time."""
+
+    def __init__(self, script):
+        self._buf = bytearray(script)
+
+    @property
+    def in_waiting(self):
+        return len(self._buf)
+
+    def read(self):
+        return bytes([self._buf.pop(0)])
+
+    def close(self):
+        """Called by FluidController.__del__ during GC."""
+
+
+class TestReadPacketResync:
+    """A corrupt COBS frame must not poison every frame after it.
+
+    read_received_packet_nowait accumulates bytes into self.read_buffer until a
+    0x00 delimiter, then decodes. It clears the buffer on success; if it did not
+    also clear on a decode failure, the corrupt bytes would stay and every later
+    frame would be appended onto them, so cobs.decode would keep failing until a
+    spurious 0x00 happened to resync it.
+    """
+
+    @staticmethod
+    def _controller(script):
+        fc = FluidController.__new__(FluidController)
+        fc.use_cobs = True
+        fc.rx_buffer_length = MCU_MSG_LENGTH
+        fc.read_buffer = []
+        fc.serial = _FakeSerial(script)
+        return fc
+
+    def test_corrupt_frame_raises_but_leaves_no_residue(self):
+        # 0x05 claims four more bytes follow; only one does, so decode fails.
+        fc = self._controller([0x05, 0x01, 0x00])
+        with pytest.raises(Exception):
+            fc.read_received_packet_nowait()
+        assert fc.read_buffer == []
+
+    def test_next_frame_decodes_after_a_corrupt_one(self):
+        good = cobs.encode(bytes([0xAA, 0xBB, 0xCC]))
+        fc = self._controller([0x05, 0x01, 0x00] + list(good) + [0x00])
+
+        with pytest.raises(Exception):
+            fc.read_received_packet_nowait()
+
+        assert list(fc.read_received_packet_nowait()) == [0xAA, 0xBB, 0xCC]
+
+
 class TestReaderLoop:
     """_reader_loop is the thread body; these call it directly (synchronously,
     in the test thread) so no real thread is ever started. Each double's
@@ -292,34 +335,6 @@ class TestReaderLoop:
         assert len(calls) == 2
         assert fc._latest_status is None
         assert fc._status_seq == 0
-
-    def test_decode_failure_clears_read_buffer_for_next_frame(self):
-        """Without clearing read_buffer on the exception path, one corrupt
-        COBS frame leaves stale bytes behind permanently: every later frame
-        gets appended onto them and cobs.decode keeps failing (recovery only
-        happens by chance, when a spurious 0x00 lines up). Clearing the
-        buffer here guarantees the very next frame decodes cleanly instead.
-
-        This double doesn't go through the real cobs.decode -- it fakes the
-        failure directly on read_received_packet_nowait -- but the fix under
-        test is entirely in _reader_loop's except block, which doesn't care
-        what raised; it must clear self.read_buffer regardless.
-        """
-        fc = _bare_controller()
-        fc._init_status_state()
-        fc.read_buffer = [1, 2, 3, 4]  # bytes stranded by a prior decode failure
-        calls = []
-
-        def flaky_read(discard_buffer=False):
-            calls.append(1)
-            fc._terminate_reader = True
-            raise RuntimeError("simulated COBS decode failure")
-
-        fc.read_received_packet_nowait = flaky_read
-
-        fc._reader_loop()
-
-        assert fc.read_buffer == []
 
     def test_valid_packet_is_published(self):
         fc = _bare_controller()
@@ -418,12 +433,9 @@ class TestDelDefensive:
         # deliberately NOT setting measurement_file, mimicking __init__ raising after the flag
         fc.debug = False
 
-        # This must not raise
+        # The assertion is that this does not raise; pytest enforces that
+        # without an explicit assert.
         fc.__del__()
-
-        # Verify the object is cleaned up (no side effects from trying to close)
-        # by checking the method completed
-        assert True
 
 
 class TestWaitForCompletion:

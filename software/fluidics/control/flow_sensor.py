@@ -21,6 +21,21 @@ MEDIUM_WATER = MCU_CONSTANTS.MEDIUM_WATER
 PERFORM_CRC = True
 
 
+def _notify(subscribers, flow):
+    """Dispatch a reading to subscribers, isolating each from the others.
+
+    Iterates a snapshot so a subscriber that unsubscribes mid-dispatch cannot
+    disturb the walk, and swallows per-subscriber failures so one bad consumer
+    cannot stop the rest — or, for the real sensor, kill the reader thread.
+    """
+    timestamp = time.time()
+    for callback in list(subscribers):
+        try:
+            callback(flow, timestamp)
+        except Exception as e:
+            print(f"Flow sensor subscriber failed: {e}")
+
+
 class FlowSensor:
     """One SLF3X flow sensor.
 
@@ -59,20 +74,31 @@ class FlowSensor:
         self.fc.packet_callback = self._packet_handler
 
     def begin(self):
-        """Initialize the sensor on the MCU. Raises if the MCU reports failure."""
-        status = self.fc.send_command_blocking(
-            CMD_SET.INITIALIZE_FLOW_SENSOR, self.index, MEDIUM_WATER, PERFORM_CRC)
-        # A real FluidController's send_command_blocking always returns an int
-        # (wait_for_completion() returns a status or raises TimeoutError), so
-        # this branch is unreachable on hardware. FluidControllerSimulation has
-        # no MCU to report a status and returns None; treat that as success
-        # rather than "unknown" so begin() works against the simulation too.
-        if status is not None and status != COMMAND_STATUS.COMPLETED_WITHOUT_ERRORS:
-            raise RuntimeError(
-                f"Flow sensor '{self.name}' on index {self.index} failed to "
-                f"initialize (MCU status {status}). Check that the sensor is "
-                f"connected to the matching I2C bus."
-            )
+        """Initialize the sensor on the MCU. Raises if the MCU reports failure.
+
+        On failure the sensor releases the packet_callback slot it claimed in
+        __init__ before re-raising, so a caller that discards a failed sensor
+        cannot strand a dead handler on the controller. Cleaning up here rather
+        than at each call site means every caller gets it without remembering.
+        """
+        try:
+            status = self.fc.send_command_blocking(
+                CMD_SET.INITIALIZE_FLOW_SENSOR, self.index, MEDIUM_WATER, PERFORM_CRC)
+            # A real FluidController's send_command_blocking always returns an
+            # int (wait_for_completion() returns a status or raises
+            # TimeoutError), so this branch is unreachable on hardware.
+            # FluidControllerSimulation has no MCU to report a status and
+            # returns None; treat that as success rather than "unknown" so
+            # begin() works against the simulation too.
+            if status is not None and status != COMMAND_STATUS.COMPLETED_WITHOUT_ERRORS:
+                raise RuntimeError(
+                    f"Flow sensor '{self.name}' on index {self.index} failed to "
+                    f"initialize (MCU status {status}). Check that the sensor is "
+                    f"connected to the matching I2C bus."
+                )
+        except Exception:
+            self.close()
+            raise
         print(f"Flow sensor '{self.name}' initialized on I2C index {self.index}.")
 
     @property
@@ -97,12 +123,7 @@ class FlowSensor:
         with self._lock:
             self._latest = flow
 
-        timestamp = time.time()
-        for callback in list(self._subscribers):
-            try:
-                callback(flow, timestamp)
-            except Exception as e:
-                print(f"Flow sensor subscriber failed: {e}")
+        _notify(self._subscribers, flow)
 
 
 class FlowSensorSimulation:
@@ -147,12 +168,7 @@ class FlowSensorSimulation:
     def _reading_loop(self):
         while not self.terminate_reading_thread:
             time.sleep(0.06)
-            timestamp = time.time()
-            for callback in list(self._subscribers):
-                try:
-                    callback(self.simulated_flow_ul_min, timestamp)
-                except Exception as e:
-                    print(f"Flow sensor subscriber failed: {e}")
+            _notify(self._subscribers, self.simulated_flow_ul_min)
 
 
 def build_flow_sensors(fluid_controller, config, simulation=False):
