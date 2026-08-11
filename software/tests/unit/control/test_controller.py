@@ -80,3 +80,104 @@ class TestRawToPsi:
     def test_midpoint_gives_zero_psi(self):
         result = self.raw_to_psi(16383 / 2)
         assert result == pytest.approx(0.0, abs=0.01)
+
+
+from fluidics.control.controller import FluidController
+from fluidics.control._def import COMMAND_STATUS
+
+
+def _make_packet(uid=1, cmd=3, status=COMMAND_STATUS.COMPLETED_WITHOUT_ERRORS,
+                 flow_raw=1000):
+    """Build a 30-byte MCU status packet with the given flow sensor 1 value."""
+    msg = [0] * 30
+    msg[0] = (uid >> 8) & 0xFF
+    msg[1] = uid & 0xFF
+    msg[2] = cmd
+    msg[3] = status
+    unsigned = flow_raw & 0xFFFF
+    msg[23] = (unsigned >> 8) & 0xFF
+    msg[24] = unsigned & 0xFF
+    return msg
+
+
+def _bare_controller():
+    """A FluidController with no serial port, for testing pure logic.
+
+    __init__ is bypassed, so the two flags _log_packet reads must be set by
+    hand — otherwise _publish_status raises AttributeError.
+    """
+    fc = FluidController.__new__(FluidController)
+    fc.log_measurements = False
+    fc.debug = False
+    return fc
+
+
+class TestParsePacket:
+    def test_positive_flow_scales_by_ten(self):
+        fc = _bare_controller()
+        parsed = fc._parse_packet(_make_packet(flow_raw=1000))
+        assert parsed["flowrates"][0] == pytest.approx(100.0)
+        assert parsed["flowrates_raw"][0] == 1000
+
+    def test_negative_flow_scales_by_ten(self):
+        fc = _bare_controller()
+        parsed = fc._parse_packet(_make_packet(flow_raw=-1000))
+        assert parsed["flowrates"][0] == pytest.approx(-100.0)
+        assert parsed["flowrates_raw"][0] == -1000
+
+    def test_sentinel_survives_as_raw(self):
+        fc = _bare_controller()
+        parsed = fc._parse_packet(_make_packet(flow_raw=32767))
+        assert parsed["flowrates_raw"][0] == 32767
+
+    def test_saturation_is_distinct_from_sentinel(self):
+        fc = _bare_controller()
+        parsed = fc._parse_packet(_make_packet(flow_raw=32500))
+        assert parsed["flowrates_raw"][0] == 32500
+        assert parsed["flowrates"][0] == pytest.approx(3250.0)
+
+    def test_uid_and_status_round_trip(self):
+        fc = _bare_controller()
+        parsed = fc._parse_packet(_make_packet(uid=513, status=COMMAND_STATUS.IN_PROGRESS))
+        assert parsed["MCU_received_command_UID"] == 513
+        assert parsed["MCU_command_execution_status"] == COMMAND_STATUS.IN_PROGRESS
+
+
+class TestPublishStatus:
+    def test_publish_makes_status_readable(self):
+        fc = _bare_controller()
+        fc._init_status_state()
+        fc._publish_status(fc._parse_packet(_make_packet(flow_raw=250)))
+        assert fc.get_mcu_status()["flowrates"][0] == pytest.approx(25.0)
+
+    def test_publish_increments_sequence(self):
+        fc = _bare_controller()
+        fc._init_status_state()
+        fc._publish_status(fc._parse_packet(_make_packet()))
+        first = fc._status_seq
+        fc._publish_status(fc._parse_packet(_make_packet()))
+        assert fc._status_seq == first + 1
+
+    def test_packet_callback_fires_with_parsed_dict(self):
+        fc = _bare_controller()
+        fc._init_status_state()
+        seen = []
+        fc.packet_callback = seen.append
+        fc._publish_status(fc._parse_packet(_make_packet(flow_raw=400)))
+        assert len(seen) == 1
+        assert seen[0]["flowrates"][0] == pytest.approx(40.0)
+
+    def test_callback_exception_does_not_break_publishing(self):
+        fc = _bare_controller()
+        fc._init_status_state()
+        fc.packet_callback = lambda _: 1 / 0
+        fc._publish_status(fc._parse_packet(_make_packet(flow_raw=400)))
+        assert fc.get_mcu_status()["flowrates"][0] == pytest.approx(40.0)
+
+    def test_snapshot_is_a_copy(self):
+        fc = _bare_controller()
+        fc._init_status_state()
+        fc._publish_status(fc._parse_packet(_make_packet()))
+        snapshot = fc.get_mcu_status()
+        snapshot["flowrates"] = "clobbered"
+        assert fc.get_mcu_status()["flowrates"] != "clobbered"

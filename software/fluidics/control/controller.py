@@ -6,6 +6,7 @@ from datetime import datetime
 import os
 from pathlib import Path
 import numpy as np
+import threading
 from time import time, sleep
 
 SERIAL_NUMBER_DEBUGGING = '11972480'
@@ -177,17 +178,25 @@ class FluidController(Microcontroller):
 
         self.recorded_data = {}
 
+        self._init_status_state()
+
         super().__init__(self.serial_number, self.use_cobs)
 
         return
 
     def __del__(self):
         '''Close the logfile if it's being used, reset, and disconnect'''
+        self.stop_reading()
         if self.log_measurements:
             self.measurement_file.close()
         if self.serial is not None:
             self.serial.close()
         return
+
+    def begin(self):
+        '''Connect to the microcontroller, then start the reader thread that owns the port.'''
+        super().begin()
+        self.start_reading()
     
     def wait_for_completion(self):
         '''Keep polling for status until it is no longer IN_PROGRESS, return the status'''
@@ -205,16 +214,9 @@ class FluidController(Microcontroller):
         cmd[1] = self.cmd_uid & 0xFF
         return cmd
     
-    def get_mcu_status(self):
-        '''
-        Read a fixed-length packet from the microcontroller. If there is data available, unpack it. If in debug mode, print out the data. If we are aving logs, write to disc
-        '''
-        msg = None
-        while msg is None:
-            msg = self.read_received_packet_nowait(discard_buffer=True)
-        assert (len(msg) == MCU_MSG_LENGTH), f"Expected message of len {MCU_CMD_LENGTH}, got len {len(msg)}"
+    def _parse_packet(self, msg):
+        '''Decode a 30-byte MCU status packet into a dict. Pure — no I/O.
 
-        '''
         #########################################################
         #########   MCU -> Computer message structure   #########
         #########################################################
@@ -234,12 +236,8 @@ class FluidController(Microcontroller):
         byte 25-26  : flow sensor 2 reading
         byte 27     : elapsed time since the start of the last internal program (in seconds)
         byte 28-29  : total volume (ul), range: 0 - 5000
-
         '''
-        if self.debug:
-            print(str(list(msg)))
-
-        MCU_received_command_UID = (msg[0] << 8) + msg[1] 
+        MCU_received_command_UID = (msg[0] << 8) + msg[1]
         MCU_received_command = msg[2]
         MCU_command_execution_status = msg[3]
         MCU_interal_program = msg[4]
@@ -252,15 +250,15 @@ class FluidController(Microcontroller):
         selector_valve_4_pos = msg[9]
         selector_valve_5_pos = msg[10]
 
-        solenoid_valves = np.int16((int(msg[11])<<8) + msg[12])
+        solenoid_valves = np.int16((int(msg[11]) << 8) + msg[12])
 
-        measurement_pump_power = MCU_CONSTANTS.TTP_MAX_PW * float((int(msg[13])<<8)+msg[14])/np.iinfo(np.uint16).max
+        measurement_pump_power = MCU_CONSTANTS.TTP_MAX_PW * float((int(msg[13]) << 8) + msg[14]) / np.iinfo(np.uint16).max
 
-        _pressure_1_raw = (int(msg[15])<<8) + msg[16]
-        _pressure_2_raw = (int(msg[17])<<8) + msg[18]
-        _pressure_3_raw = (int(msg[19])<<8) + msg[20]
-        _pressure_4_raw = (int(msg[21])<<8) + msg[22]
-        
+        _pressure_1_raw = (int(msg[15]) << 8) + msg[16]
+        _pressure_2_raw = (int(msg[17]) << 8) + msg[18]
+        _pressure_3_raw = (int(msg[19]) << 8) + msg[20]
+        _pressure_4_raw = (int(msg[21]) << 8) + msg[22]
+
         def raw_to_psi(raw_pressure):
             return (raw_pressure - MCU_CONSTANTS._output_min) * (MCU_CONSTANTS._p_max - MCU_CONSTANTS._p_min) / (MCU_CONSTANTS._output_max - MCU_CONSTANTS._output_min) + MCU_CONSTANTS._p_min
 
@@ -268,63 +266,19 @@ class FluidController(Microcontroller):
         pressure_2 = raw_to_psi(_pressure_2_raw)
         pressure_3 = raw_to_psi(_pressure_3_raw)
         pressure_4 = raw_to_psi(_pressure_4_raw)
-        
-        flow_1 = float(np.int16((int(msg[23])<<8)+msg[24]))/MCU_CONSTANTS.SCALE_FACTOR_FLOW
-        flow_2 = float(np.int16((int(msg[25])<<8)+msg[26]))/MCU_CONSTANTS.SCALE_FACTOR_FLOW
+
+        # Keep the raw int16 alongside the scaled value: 32767 is the SLF3X
+        # "no reading" sentinel, and comparing raw ints beats comparing floats.
+        flow_1_raw = int(np.int16((int(msg[23]) << 8) + msg[24]))
+        flow_2_raw = int(np.int16((int(msg[25]) << 8) + msg[26]))
+        flow_1 = float(flow_1_raw) / MCU_CONSTANTS.SCALE_FACTOR_FLOW
+        flow_2 = float(flow_2_raw) / MCU_CONSTANTS.SCALE_FACTOR_FLOW
+
         MCU_CMD_time_elapsed = msg[27]
 
-        vol_ul = (float(np.int16((int(msg[28])<<8)+msg[29]))/np.iinfo(np.int16).max)*MCU_CONSTANTS.VOLUME_UL_MAX
+        vol_ul = (float(np.int16((int(msg[28]) << 8) + msg[29])) / np.iinfo(np.int16).max) * MCU_CONSTANTS.VOLUME_UL_MAX
 
-        # Write the data to file
-        if self.log_measurements or self.debug:
-            line = (f"{datetime.now().strftime('%m/%d %H:%M:%S')},"
-                    f"{MCU_received_command_UID},"
-                    f"{MCU_received_command},"
-                    f"{MCU_command_execution_status},"
-                    f"{MCU_interal_program},"
-                    f"{bubble_sensor_1_state:>04b},"
-                    f"{bubble_sensor_2_state:>04b},"
-                    f"{MCU_CMD_time_elapsed},"
-                    f"{selector_valve_1_pos},"
-                    f"{selector_valve_2_pos},"
-                    f"{selector_valve_3_pos},"
-                    f"{selector_valve_4_pos},"
-                    f"{selector_valve_5_pos},"
-                    f"{solenoid_valves:>016b},"
-                    f"{measurement_pump_power:.2f},"
-                    f"{pressure_1:.2f},"
-                    f"{pressure_2:.2f},"
-                    f"{pressure_3:.2f},"
-                    f"{pressure_4:.2f},"
-                    f"{flow_1:.2f},"
-                    f"{flow_2:.2f},"
-                    f"{vol_ul:.2f}\n")
-            if self.log_measurements:
-                self.measurement_file.write(line)
-                self.counter_measurement_file_flush += 1
-                if self.counter_measurement_file_flush >= 500:
-                    self.counter_measurement_file_flush = 0
-                    self.measurement_file.flush()
-            if self.debug:
-                print(line)
-
-        # this block of code should only be used when get_mcu_status is executed at fixed interval (< 1s)
-        '''
-        # Check for mismatch between received command and transmitted command
-        if (MCU_received_command != self.cmd_sent) or (MCU_received_command_UID != self.cmd_uid):
-            if self.timestamp_last_mismatch is None:
-                self.timestamp_last_mismatch = time()
-            else:
-                dt = time() - self.timestamp_last_mismatch
-                assert (dt < T_DIFF_COMPUTER_MCU_MISMATCH_FAULT_THRESHOLD_SECONDS), f"Command mismatch for {dt} seconds"
-                print((MCU_received_command, self.cmd_sent))
-                print((MCU_received_command_UID, self.cmd_uid))
-        else:
-            self.timestamp_last_mismatch = None
-        '''
-
-        # Load latest data into a shared dict
-        self.recorded_data = {
+        return {
             "MCU_received_command_UID": MCU_received_command_UID,
             "MCU_received_command": MCU_received_command,
             "MCU_command_execution_status": MCU_command_execution_status,
@@ -336,10 +290,103 @@ class FluidController(Microcontroller):
             "measurement_pump_power": measurement_pump_power,
             "pressures": [pressure_1, pressure_2, pressure_3, pressure_4],
             "flowrates": [flow_1, flow_2],
-            "vol_ul": vol_ul
+            "flowrates_raw": [flow_1_raw, flow_2_raw],
+            "vol_ul": vol_ul,
         }
 
-        return self.recorded_data
+    def _init_status_state(self):
+        '''Set up shared packet state. Called from __init__ and by tests.'''
+        self._status_lock = threading.Lock()
+        self._latest_status = None
+        self._status_seq = 0
+        self._reader_thread = None
+        self._terminate_reader = False
+        self.packet_callback = None
+
+    def _publish_status(self, parsed):
+        '''Store a parsed packet, bump the sequence, notify the subscriber.'''
+        with self._status_lock:
+            self._latest_status = parsed
+            self._status_seq += 1
+            self.recorded_data = parsed
+
+        self._log_packet(parsed)
+
+        callback = self.packet_callback
+        if callback is not None:
+            try:
+                callback(parsed)
+            except Exception as e:
+                print_message(f"Packet callback failed: {e}")
+
+    def _reader_loop(self):
+        while not self._terminate_reader:
+            try:
+                msg = self.read_received_packet_nowait()
+                if msg is None:
+                    sleep(0.001)
+                    continue
+                if len(msg) != MCU_MSG_LENGTH:
+                    continue
+                self._publish_status(self._parse_packet(msg))
+            except Exception as e:
+                # A corrupt COBS frame raises from cobs.decode, and the port
+                # raises during shutdown. Neither should kill the only thread
+                # feeding every consumer — drop the frame and carry on.
+                if not self._terminate_reader:
+                    print_message(f"Reader thread error: {e}")
+                sleep(0.001)
+
+    def start_reading(self):
+        '''Begin consuming packets. The reader thread owns the serial port.'''
+        if self._reader_thread is not None:
+            return
+        self._terminate_reader = False
+        self._reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
+        self._reader_thread.start()
+
+    def stop_reading(self):
+        self._terminate_reader = True
+        if self._reader_thread is not None:
+            self._reader_thread.join(timeout=2)
+            self._reader_thread = None
+
+    def _log_packet(self, d):
+        if not (self.log_measurements or self.debug):
+            return
+        b1, b2 = d["bubble_sensor_states"]
+        sv = d["selector_valves_pos"]
+        p = d["pressures"]
+        f = d["flowrates"]
+        line = (f"{datetime.now().strftime('%m/%d %H:%M:%S')},"
+                f"{d['MCU_received_command_UID']},"
+                f"{d['MCU_received_command']},"
+                f"{d['MCU_command_execution_status']},"
+                f"{d['MCU_interal_program']},"
+                f"{b1:>04b},{b2:>04b},"
+                f"{d['MCU_CMD_time_elapsed']},"
+                f"{sv[0]},{sv[1]},{sv[2]},{sv[3]},{sv[4]},"
+                f"{d['solenoid_valves']:>016b},"
+                f"{d['measurement_pump_power']:.2f},"
+                f"{p[0]:.2f},{p[1]:.2f},{p[2]:.2f},{p[3]:.2f},"
+                f"{f[0]:.2f},{f[1]:.2f},"
+                f"{d['vol_ul']:.2f}\n")
+        if self.log_measurements:
+            self.measurement_file.write(line)
+            self.counter_measurement_file_flush += 1
+            if self.counter_measurement_file_flush >= 500:
+                self.counter_measurement_file_flush = 0
+                self.measurement_file.flush()
+        if self.debug:
+            print(line)
+
+    def get_mcu_status(self):
+        '''Return the most recent packet as a dict, waiting for the first one.'''
+        while True:
+            with self._status_lock:
+                if self._latest_status is not None:
+                    return dict(self._latest_status)
+            sleep(0.001)
 
     def send_command(self, command, *args):
         '''
@@ -745,10 +792,17 @@ class FluidControllerSimulation():
         self.data = {
             'selector_valves_pos': {0: 1, 1: 1, 2: 1, 3: 1, 4: 1}
         }
+        self.packet_callback = None
         return
 
     def begin(self):
         print("Simulated fluid controller.")
+
+    def start_reading(self):
+        pass
+
+    def stop_reading(self):
+        pass
 
     def send_command(self, command, *args):
         sleep(1)
