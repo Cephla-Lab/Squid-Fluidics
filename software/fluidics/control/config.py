@@ -114,6 +114,15 @@ class FluidicsConfig(BaseModel):
         if len(set(names)) != len(names):
             raise ValueError("flow_sensors entries must have unique name values")
 
+        for s in self.flow_sensors:
+            if s.monitor != "off":
+                raise ValueError(
+                    f"flow_sensors[{s.name!r}].monitor={s.monitor!r} is not "
+                    "supported: draw protection is not implemented yet. The "
+                    "field is reserved for it -- set monitor: off until it "
+                    "lands."
+                )
+
         if len(self.flow_sensors) > 1:
             raise ValueError(
                 "only one flow sensor is supported; a second requires firmware "

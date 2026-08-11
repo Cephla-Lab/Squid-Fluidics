@@ -1093,6 +1093,14 @@ class FlowSensorWidget(QWidget):
         self.reading_signal.emit(flow, timestamp)
 
     def _on_reading(self, flow, current_time):
+        # Write every sample to CSV regardless of the plot's query interval:
+        # interval_input bottoms out at 1 Hz, which is roughly one sample in
+        # every 17 at the 60 ms packet cadence and would erase anything the
+        # recording is actually meant to catch (e.g. a ~180 ms dropout).
+        if self.writer is not None:
+            self.writer.writerow([datetime.fromtimestamp(current_time),
+                                  "" if flow is None else f"{flow:.2f}"])
+
         if current_time - self.last_update < self.query_interval:
             return
 
@@ -1105,10 +1113,6 @@ class FlowSensorWidget(QWidget):
         # what an invalid reading should look like rather than a 3276.7 spike.
         self.flows.append(flow)
         self.times.append(current_time)
-
-        if self.writer is not None:
-            self.writer.writerow([datetime.fromtimestamp(current_time),
-                                  "" if flow is None else f"{flow:.2f}"])
 
         while self.times and current_time - self.times[0] > self.window_size:
             self.times.pop(0)
@@ -1168,11 +1172,6 @@ class FlowSensorControlWidget(QWidget):
             sw = FlowSensorWidget(sensor)
             self.sensor_widgets.append(sw)
             layout.addWidget(sw)
-
-    def closeEvent(self, event):
-        for sw in self.sensor_widgets:
-            sw.close_recording()
-        event.accept()
 
 
 class FluidicsControlGUI(QMainWindow):

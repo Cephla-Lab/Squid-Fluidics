@@ -28,12 +28,19 @@ python -m pytest tests/unit            # Unit tests only
 python -m pytest tests/integration     # Integration tests (simulation classes)
 python -m pytest -v                    # Verbose
 
-# Hardware test scripts (require connected hardware, run from software/)
+# Hardware test scripts -- currently stale and unrunnable, see note below
 python tests/hardware/startup.py
 python tests/hardware/demo.py
 ```
 
 Uses pytest. Hardware tests in `tests/hardware/` are excluded from the default test run. Use `--simulation` for software-only CLI testing.
+
+**`tests/hardware/startup.py` and `tests/hardware/demo.py` are currently stale and will not run**, independent of anything in this change:
+- Both do `from control.controller import ...`, but `software/control/` was renamed to `software/fluidics/control/` before the flow-sensor-driver branch. `python3 -c "import control.controller"` raises `ModuleNotFoundError`.
+- `demo.py` also calls `read_received_packet_nowait()` directly in a loop. That now races the background reader thread that owns the serial port (`FluidController.start_reading()`), since both would be reading the same port concurrently.
+- `startup.py` also has several `send_command_blocking()` call sites (e.g. `CLEAR_LINES`, `UNLOAD_FLUID_VOLUME`) whose firmware-side timeout parameters run 35-50s; they need the matching `timeout=` kwarg on `send_command_blocking()` or it will raise `TimeoutError` at the 30s default before the firmware finishes.
+
+Fixing only the import would leave both scripts unrunnable in a different way, so none of the above has been repaired here -- it's tracked as separate work.
 
 **Dependencies:** PyQt5, pandas, matplotlib, pyserial, cobs, numpy, pydantic, pyyaml
 
@@ -117,4 +124,4 @@ Speed codes (0–40) map to stroke times via `SPEED_SEC_MAPPING`. Use `flow_rate
 - Config files in `sample_config/` (YAML), sequence files in `sample_sequences/` (YAML preferred, CSV supported for legacy)
 - The `abort` pattern: hardware classes expose `abort()` / `reset_abort()` and check `is_aborted` before operations
 - `send_command_blocking()` = `send_command()` + `wait_for_completion()` (polls MCU status until not `IN_PROGRESS`)
-- `tests/hardware/startup.py` imports from `control.` not `fluidics.control.` — must be run from `software/` directory
+- `tests/hardware/startup.py` and `tests/hardware/demo.py` still import from `control.`, a stale path from before `software/control/` was renamed to `fluidics/control/` — both are currently broken and unrunnable (see the note under Commands)

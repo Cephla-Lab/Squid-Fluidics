@@ -88,5 +88,5 @@ reagent_selection:
 flow_sensors:
   - index: 1
     name: syringe_draw
-    monitor: warn
+    monitor: "off"
 application: Flow Cell

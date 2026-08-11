@@ -40,6 +40,17 @@ class FlowSensor:
         self._lock = threading.Lock()
         self._subscribers = []
 
+        # Config caps at one sensor today, so this slot is never contended in
+        # practice -- but if Phase 2 lifts that cap, a second sensor claiming
+        # it here would silently steal it, leaving the first sensor's
+        # subscribers permanently dead with no error. Raise instead.
+        if self.fc.packet_callback is not None:
+            raise RuntimeError(
+                f"FlowSensor '{name}' cannot claim fc.packet_callback: it is "
+                "already held by another handler (only one flow sensor is "
+                "supported per controller today)."
+            )
+
         # Stored once so close() can find it again: a bound method is a new
         # object on every attribute access (a.m is a.m is False in CPython),
         # so re-deriving self._on_packet in close() and comparing with `is`

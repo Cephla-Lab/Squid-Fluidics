@@ -261,6 +261,19 @@ class TestReaderLoop:
         assert fc._latest_status is None  # nothing was ever published
 
     def test_wrong_length_message_is_skipped_without_publishing(self):
+        """Regression guard for a mutant that replaces the length guard with
+        `pass`. A 10-byte message alone doesn't distinguish the guard from no
+        guard at all: _parse_packet indexes up to msg[29], so a too-short
+        message raises IndexError either way, and that IndexError is caught
+        by the same except block that a real COBS failure would hit --
+        _latest_status stays None regardless of whether the explicit length
+        check ever ran.
+
+        A message *longer* than MCU_MSG_LENGTH (31, not 10) closes that gap:
+        _parse_packet only reads indices 0-29, so it parses successfully and
+        would publish if the guard were removed. Only the real guard prevents
+        that.
+        """
         fc = _bare_controller()
         fc._init_status_state()
         calls = []
@@ -270,7 +283,7 @@ class TestReaderLoop:
             if len(calls) >= 2:
                 fc._terminate_reader = True
                 return None
-            return [0] * 10  # not MCU_MSG_LENGTH (30) bytes
+            return [0] * 31  # not MCU_MSG_LENGTH (30), but long enough to parse cleanly
 
         fc.read_received_packet_nowait = bad_length_read
 
@@ -279,6 +292,34 @@ class TestReaderLoop:
         assert len(calls) == 2
         assert fc._latest_status is None
         assert fc._status_seq == 0
+
+    def test_decode_failure_clears_read_buffer_for_next_frame(self):
+        """Without clearing read_buffer on the exception path, one corrupt
+        COBS frame leaves stale bytes behind permanently: every later frame
+        gets appended onto them and cobs.decode keeps failing (recovery only
+        happens by chance, when a spurious 0x00 lines up). Clearing the
+        buffer here guarantees the very next frame decodes cleanly instead.
+
+        This double doesn't go through the real cobs.decode -- it fakes the
+        failure directly on read_received_packet_nowait -- but the fix under
+        test is entirely in _reader_loop's except block, which doesn't care
+        what raised; it must clear self.read_buffer regardless.
+        """
+        fc = _bare_controller()
+        fc._init_status_state()
+        fc.read_buffer = [1, 2, 3, 4]  # bytes stranded by a prior decode failure
+        calls = []
+
+        def flaky_read(discard_buffer=False):
+            calls.append(1)
+            fc._terminate_reader = True
+            raise RuntimeError("simulated COBS decode failure")
+
+        fc.read_received_packet_nowait = flaky_read
+
+        fc._reader_loop()
+
+        assert fc.read_buffer == []
 
     def test_valid_packet_is_published(self):
         fc = _bare_controller()
@@ -506,3 +547,109 @@ class TestSequenceGuardsAgainstUidReuse:
         fc._publish_status(fc._parse_packet(
             _make_packet(uid=0, status=COMMAND_STATUS.COMPLETED_WITHOUT_ERRORS)))
         assert fc.wait_for_completion() == COMMAND_STATUS.COMPLETED_WITHOUT_ERRORS
+
+
+class TestSeqAtSendCapturedAfterWrite:
+    """_seq_at_send must be captured after send_mcu_command() returns, not
+    before. The write is synchronous, so anything published before it
+    returns is unambiguously stale. Capturing before it leaves a window (lock
+    release -> bytes actually on the wire) during which the reader thread
+    could consume one of the firmware's unconditional 60 ms idle packets and
+    bump _status_seq -- making a packet that predates the command satisfy
+    `seq > _seq_at_send`.
+    """
+
+    def test_publish_during_the_write_is_not_treated_as_post_send(self):
+        fc = _bare_controller()
+        fc._init_status_state()
+        fc.cmd_uid = 5  # CLEAR resets this to 0 regardless
+        fc.serial = None
+
+        # A stale terminal packet is already published *before* send_command
+        # is even called -- e.g. the previous CLEAR's terminal packet, same
+        # UID 0 due to CLEAR's UID reuse (see TestSequenceGuardsAgainstUidReuse).
+        fc._publish_status(fc._parse_packet(
+            _make_packet(uid=0, status=COMMAND_STATUS.COMPLETED_WITHOUT_ERRORS)))
+
+        # Simulate the reader thread consuming one more (idle) packet *during*
+        # the synchronous send_mcu_command() call -- i.e. between releasing
+        # the lock and the bytes actually leaving the host.
+        def send_mcu_command_that_races(cmd):
+            fc._publish_status(fc._parse_packet(
+                _make_packet(uid=0, status=COMMAND_STATUS.COMPLETED_WITHOUT_ERRORS)))
+
+        fc.send_mcu_command = send_mcu_command_that_races
+
+        fc.send_command(CMD_SET.CLEAR)
+
+        # That packet predates the command reaching the wire. If _seq_at_send
+        # were captured before send_mcu_command(), it would already be stale
+        # by the time the racing publish happens, so seq > _seq_at_send would
+        # hold and wait_for_completion would return immediately -- wrongly.
+        # Captured after, the racing publish is folded into _seq_at_send, so
+        # nothing published so far can satisfy the check and this must time
+        # out.
+        with pytest.raises(TimeoutError):
+            fc.wait_for_completion(timeout=1)
+
+
+class TestBeginStartsReader:
+    """begin() starting the reader thread is the premise of the whole
+    always-on-reader design -- without it, every command hangs on hardware
+    waiting for a packet that never gets read.
+    """
+
+    def test_begin_calls_start_reading(self, monkeypatch):
+        fc = _bare_controller()
+        fc._init_status_state()
+        monkeypatch.setattr(controller_module.Microcontroller, "begin", lambda self: None)
+        calls = []
+        fc.start_reading = lambda: calls.append(1)
+
+        fc.begin()
+
+        assert calls == [1]
+
+
+class TestSendCommandBlockingPassesTimeout:
+    """send_command_blocking's timeout kwarg must reach wait_for_completion.
+    Firmware operations like CLEAR_LINES/UNLOAD_FLUID_VOLUME routinely run
+    35-50s; if the kwarg silently gets dropped, callers passing a matching
+    timeout would still time out at the 30s default.
+    """
+
+    def test_custom_timeout_reaches_wait_for_completion(self):
+        fc = _bare_controller()
+        fc._init_status_state()
+        fc.cmd_uid = 0
+        fc.serial = None
+        fc.send_mcu_command = lambda cmd: None
+
+        captured = {}
+
+        def fake_wait_for_completion(timeout=30):
+            captured['timeout'] = timeout
+            return COMMAND_STATUS.COMPLETED_WITHOUT_ERRORS
+
+        fc.wait_for_completion = fake_wait_for_completion
+
+        fc.send_command_blocking(CMD_SET.CLEAR, timeout=45)
+
+        assert captured['timeout'] == 45
+
+
+class TestPublishStatusSetsRecordedData:
+    """_publish_status must update recorded_data -- it's the attribute every
+    hardware script and blocking loop (e.g. tests/hardware/startup.py's
+    pressure_vacuum_test) reads directly, outside of get_mcu_status().
+    """
+
+    def test_publish_status_sets_recorded_data(self):
+        fc = _bare_controller()
+        fc._init_status_state()
+        fc.recorded_data = {}
+        parsed = fc._parse_packet(_make_packet(flow_raw=123))
+
+        fc._publish_status(parsed)
+
+        assert fc.recorded_data == parsed

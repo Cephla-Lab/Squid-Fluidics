@@ -377,6 +377,17 @@ class FluidController(Microcontroller):
                 # A corrupt COBS frame raises from cobs.decode, and the port
                 # raises during shutdown. Neither should kill the only thread
                 # feeding every consumer — drop the frame and carry on.
+                #
+                # Clearing read_buffer here is what makes that recovery
+                # deterministic. read_received_packet_nowait only clears it on
+                # a successful decode; left alone after a decode failure, the
+                # corrupt bytes stay in the buffer forever and every later
+                # frame gets appended onto them, so cobs.decode keeps failing
+                # until a spurious 0x00 happens to resync it -- observed to
+                # take up to hundreds of frames. Since the byte loop always
+                # consumes through a delimiter before decoding, dropping the
+                # buffer guarantees the very next frame decodes cleanly.
+                self.read_buffer = []
                 if not self._terminate_reader:
                     print_message(f"Reader thread error: {e}")
                 sleep(0.001)
@@ -835,12 +846,18 @@ class FluidController(Microcontroller):
             raise Exception("Command not recognized")
 
         self.add_uid_to_cmd(command_array)
-        # Record the publish sequence right before transmitting, so
-        # wait_for_completion can require a packet published after this
-        # point -- see its docstring for why UID matching alone isn't enough.
+        self.send_mcu_command(command_array)
+        # Record the publish sequence right after transmitting -- the write is
+        # synchronous, so anything published before it returns is unambiguously
+        # stale. Capturing this before send_mcu_command() would leave a window
+        # between releasing the lock and the bytes actually leaving the host,
+        # during which the reader thread could consume one of the firmware's
+        # unconditional 60 ms idle packets and bump _status_seq, making a
+        # packet that predates this command satisfy `seq > _seq_at_send`. See
+        # wait_for_completion's docstring for why UID matching alone isn't
+        # enough to catch that.
         with self._status_lock:
             self._seq_at_send = self._status_seq
-        self.send_mcu_command(command_array)
         pass
 
     def send_command_blocking(self, command, *args, timeout=30):
@@ -855,13 +872,6 @@ class FluidController(Microcontroller):
         '''
         self.send_command(command, *args)
         return self.wait_for_completion(timeout=timeout)
-
-    def delay(self, dt):
-        '''Keep logging data for time t'''
-        tf = time() + dt
-        while time() <= tf:
-            self.get_mcu_status()
-        pass
 
 
 class FluidControllerSimulation():

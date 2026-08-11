@@ -164,6 +164,27 @@ class TestFlowSensorPacketSlot:
         assert sensor.latest_flow_ul_min == pytest.approx(0.0)
 
 
+class TestFlowSensorPacketCallbackGuard:
+    """Config caps at one sensor today, so this collision can't happen via
+    normal wiring -- but if Phase 2 lifts that cap, a second FlowSensor
+    claiming the same fc.packet_callback slot would silently steal it and
+    leave the first sensor's subscribers permanently dead with no error.
+    """
+
+    def test_second_sensor_on_same_controller_raises(self):
+        fc = FakeController()
+        FlowSensor(fc, index=1, name="first")
+        with pytest.raises(RuntimeError, match="second"):
+            FlowSensor(fc, index=2, name="second")
+
+    def test_first_sensor_keeps_its_callback_after_failed_second(self):
+        fc = FakeController()
+        first = FlowSensor(fc, index=1, name="first")
+        with pytest.raises(RuntimeError):
+            FlowSensor(fc, index=2, name="second")
+        assert fc.packet_callback is first._packet_handler
+
+
 class TestFlowSensorSimulation:
     def test_default_reading_is_available(self):
         sim = FlowSensorSimulation()
