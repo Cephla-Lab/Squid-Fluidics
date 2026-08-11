@@ -1,7 +1,10 @@
 # tests/unit/control/test_controller.py
+import warnings
+
 import numpy as np
 import pytest
 
+import fluidics.control.controller as controller_module
 from fluidics.control.controller import split_byte, uint_to_bytes
 from fluidics.control._def import MCU_CONSTANTS
 
@@ -100,6 +103,13 @@ def _make_packet(uid=1, cmd=3, status=COMMAND_STATUS.COMPLETED_WITHOUT_ERRORS,
     return msg
 
 
+def _set_be16(msg, index, value):
+    """Write a signed 16-bit value into msg[index:index+2], big-endian."""
+    unsigned = value & 0xFFFF
+    msg[index] = (unsigned >> 8) & 0xFF
+    msg[index + 1] = unsigned & 0xFF
+
+
 def _bare_controller():
     """A FluidController with no serial port, for testing pure logic.
 
@@ -181,3 +191,155 @@ class TestPublishStatus:
         snapshot = fc.get_mcu_status()
         snapshot["flowrates"] = "clobbered"
         assert fc.get_mcu_status()["flowrates"] != "clobbered"
+
+
+class TestNegativeRawDecoding:
+    """Every reading with the sign bit set (negative flow, backwards volume,
+    or valve-mask bit 15) used to round-trip through np.int16(), which warns
+    today and raises OverflowError on NumPy 2.x. _parse_packet now reinterprets
+    these fields with a pure-Python two's-complement helper instead. Running
+    each decode with warnings promoted to errors proves the numpy cast is
+    gone, not just that the numbers happen to still match.
+    """
+
+    def test_flow_negative_high_bit_no_numpy_warning(self):
+        fc = _bare_controller()
+        msg = _make_packet(flow_raw=-1000)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            parsed = fc._parse_packet(msg)
+        assert parsed["flowrates_raw"][0] == -1000
+        assert parsed["flowrates"][0] == pytest.approx(-100.0)
+
+    def test_solenoid_valves_negative_high_bit_no_numpy_warning(self):
+        fc = _bare_controller()
+        msg = _make_packet()
+        _set_be16(msg, 11, -1)  # all 16 valves on -> 0xFFFF -> -1 signed
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            parsed = fc._parse_packet(msg)
+        assert parsed["solenoid_valves"] == -1
+
+    def test_vol_ul_negative_high_bit_no_numpy_warning(self):
+        fc = _bare_controller()
+        msg = _make_packet()
+        _set_be16(msg, 28, -1000)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            parsed = fc._parse_packet(msg)
+        expected = (float(-1000) / np.iinfo(np.int16).max) * MCU_CONSTANTS.VOLUME_UL_MAX
+        assert parsed["vol_ul"] == pytest.approx(expected)
+
+
+class TestReaderLoop:
+    """_reader_loop is the thread body; these call it directly (synchronously,
+    in the test thread) so no real thread is ever started. Each double's
+    read_received_packet_nowait flips _terminate_reader after a fixed number
+    of calls so the loop is guaranteed to return.
+    """
+
+    def test_raising_read_does_not_escape_loop(self):
+        fc = _bare_controller()
+        fc._init_status_state()
+        calls = []
+
+        def flaky_read(discard_buffer=False):
+            calls.append(1)
+            if len(calls) >= 3:
+                fc._terminate_reader = True
+            raise RuntimeError("simulated COBS decode failure")
+
+        fc.read_received_packet_nowait = flaky_read
+
+        fc._reader_loop()  # must return normally, not raise
+
+        assert len(calls) == 3
+        assert fc._latest_status is None  # nothing was ever published
+
+    def test_wrong_length_message_is_skipped_without_publishing(self):
+        fc = _bare_controller()
+        fc._init_status_state()
+        calls = []
+
+        def bad_length_read():
+            calls.append(1)
+            if len(calls) >= 2:
+                fc._terminate_reader = True
+                return None
+            return [0] * 10  # not MCU_MSG_LENGTH (30) bytes
+
+        fc.read_received_packet_nowait = bad_length_read
+
+        fc._reader_loop()
+
+        assert len(calls) == 2
+        assert fc._latest_status is None
+        assert fc._status_seq == 0
+
+    def test_valid_packet_is_published(self):
+        fc = _bare_controller()
+        fc._init_status_state()
+        calls = []
+
+        def good_read():
+            calls.append(1)
+            if len(calls) >= 2:
+                fc._terminate_reader = True
+                return None
+            return _make_packet(flow_raw=300)
+
+        fc.read_received_packet_nowait = good_read
+
+        fc._reader_loop()
+
+        assert fc.get_mcu_status()["flowrates"][0] == pytest.approx(30.0)
+
+
+class _FakeThreadingNamespace:
+    """Stand-in for the `threading` module as seen from inside controller.py.
+
+    Lets start_reading()/stop_reading() be tested without ever spawning a
+    real OS thread -- a live thread under the autouse _fast_clock fixture
+    (which makes time.sleep/Event.wait non-blocking) would spin unboundedly.
+    Only the module *name* inside controller.py is swapped (via monkeypatch,
+    restored after the test); the real threading module is untouched.
+    """
+
+    class Thread:
+        def __init__(self, target=None, daemon=None):
+            self.target = target
+            self.daemon = daemon
+            self.started = False
+
+        def start(self):
+            self.started = True
+
+        def join(self, timeout=None):
+            pass
+
+
+class TestReaderLifecycle:
+    def test_start_reading_twice_creates_one_thread(self, monkeypatch):
+        fc = _bare_controller()
+        fc._init_status_state()  # uses the real threading.Lock, fine synchronously
+        monkeypatch.setattr(controller_module, "threading", _FakeThreadingNamespace)
+
+        fc.start_reading()
+        first_thread = fc._reader_thread
+        fc.start_reading()
+
+        assert fc._reader_thread is first_thread
+        assert isinstance(first_thread, _FakeThreadingNamespace.Thread)
+        assert first_thread.started
+        assert first_thread.target == fc._reader_loop
+
+    def test_stop_reading_resets_thread_and_sets_terminate_flag(self, monkeypatch):
+        fc = _bare_controller()
+        fc._init_status_state()
+        monkeypatch.setattr(controller_module, "threading", _FakeThreadingNamespace)
+
+        fc.start_reading()
+        fc.stop_reading()
+
+        assert fc._reader_thread is None
+        assert fc._terminate_reader is True

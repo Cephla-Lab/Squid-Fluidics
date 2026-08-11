@@ -185,11 +185,19 @@ class FluidController(Microcontroller):
         return
 
     def __del__(self):
-        '''Close the logfile if it's being used, reset, and disconnect'''
-        self.stop_reading()
-        if self.log_measurements:
+        '''Close the logfile if it's being used, reset, and disconnect.
+
+        Defensive attribute lookups: if __init__ raised partway through (e.g.
+        the log file failed to open, before _init_status_state() or
+        Microcontroller.__init__() ran), GC still calls __del__ on the
+        half-built object. Plain attribute access would raise AttributeError
+        here and mask whatever error __init__ originally raised.
+        '''
+        if getattr(self, '_reader_thread', None) is not None:
+            self.stop_reading()
+        if getattr(self, 'log_measurements', False):
             self.measurement_file.close()
-        if self.serial is not None:
+        if getattr(self, 'serial', None) is not None:
             self.serial.close()
         return
 
@@ -250,7 +258,17 @@ class FluidController(Microcontroller):
         selector_valve_4_pos = msg[9]
         selector_valve_5_pos = msg[10]
 
-        solenoid_valves = np.int16((int(msg[11]) << 8) + msg[12])
+        def to_int16(raw):
+            '''Reinterpret an unsigned 16-bit value as signed int16.
+
+            Equivalent to np.int16(raw) for raw in [0, 65535], but numpy's
+            out-of-range cast is deprecated (warns) on this NumPy version and
+            raises OverflowError on NumPy 2.x — every negative flow/volume/
+            valve-mask reading has the high bit set and would hit that path.
+            '''
+            return raw - 65536 if raw > 32767 else raw
+
+        solenoid_valves = to_int16((int(msg[11]) << 8) + msg[12])
 
         measurement_pump_power = MCU_CONSTANTS.TTP_MAX_PW * float((int(msg[13]) << 8) + msg[14]) / np.iinfo(np.uint16).max
 
@@ -269,14 +287,14 @@ class FluidController(Microcontroller):
 
         # Keep the raw int16 alongside the scaled value: 32767 is the SLF3X
         # "no reading" sentinel, and comparing raw ints beats comparing floats.
-        flow_1_raw = int(np.int16((int(msg[23]) << 8) + msg[24]))
-        flow_2_raw = int(np.int16((int(msg[25]) << 8) + msg[26]))
+        flow_1_raw = to_int16((int(msg[23]) << 8) + msg[24])
+        flow_2_raw = to_int16((int(msg[25]) << 8) + msg[26])
         flow_1 = float(flow_1_raw) / MCU_CONSTANTS.SCALE_FACTOR_FLOW
         flow_2 = float(flow_2_raw) / MCU_CONSTANTS.SCALE_FACTOR_FLOW
 
         MCU_CMD_time_elapsed = msg[27]
 
-        vol_ul = (float(np.int16((int(msg[28]) << 8) + msg[29])) / np.iinfo(np.int16).max) * MCU_CONSTANTS.VOLUME_UL_MAX
+        vol_ul = (float(to_int16((int(msg[28]) << 8) + msg[29])) / np.iinfo(np.int16).max) * MCU_CONSTANTS.VOLUME_UL_MAX
 
         return {
             "MCU_received_command_UID": MCU_received_command_UID,
