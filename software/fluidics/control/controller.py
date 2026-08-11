@@ -209,14 +209,28 @@ class FluidController(Microcontroller):
     def wait_for_completion(self, timeout=30):
         '''Block until the MCU reports a terminal status for the command we just sent.
 
-        Matching on the UID matters: a packet already in flight when the command
-        went out still carries the previous command's status, and accepting it
-        would return before the firmware had even started.
+        Matches on both the command UID and the publish sequence number
+        (`_status_seq`, bumped by `_publish_status`), not UID alone. UID is not
+        enough: CMD_SET.CLEAR resets both the host's and the firmware's UID
+        counter to 0 (controller_teensy41.ino), so two consecutive CLEAR
+        commands share UID 0. Without the sequence check, the terminal packet
+        still sitting there from the *first* CLEAR -- same UID, already
+        published -- would be accepted for the second one before it had even
+        reached the firmware. Requiring seq > seq-at-send restricts acceptance
+        to a packet the reader thread published after this command went out,
+        which is the guarantee this method's contract actually needs.
+
+        Bounded even if the MCU has never sent a single packet (unplugged,
+        crashed, wrong serial port): this polls a non-blocking snapshot
+        (`_peek_status`) rather than `get_mcu_status()`, which would block
+        forever waiting for the first packet and defeat the timeout entirely.
         '''
         deadline = time() + timeout
         while True:
-            data = self.get_mcu_status()
-            if data['MCU_received_command_UID'] == self.cmd_uid:
+            data, seq = self._peek_status()
+            if (data is not None
+                    and data['MCU_received_command_UID'] == self.cmd_uid
+                    and seq > self._seq_at_send):
                 status = data['MCU_command_execution_status']
                 if status != COMMAND_STATUS.IN_PROGRESS:
                     return status
@@ -328,6 +342,7 @@ class FluidController(Microcontroller):
         self._status_lock = threading.Lock()
         self._latest_status = None
         self._status_seq = 0
+        self._seq_at_send = 0
         self._reader_thread = None
         self._terminate_reader = False
         self.packet_callback = None
@@ -409,12 +424,32 @@ class FluidController(Microcontroller):
         if self.debug:
             print(line)
 
+    def _peek_status(self):
+        '''Non-blocking: return (parsed packet copy, publish sequence number),
+        or (None, None) if the reader thread has not published anything yet.
+
+        Both values are read from a single lock acquisition so they describe
+        the same packet -- reading them separately could interleave with the
+        reader thread publishing a new one in between. Used by callers (like
+        wait_for_completion) that must enforce their own timeout instead of
+        blocking indefinitely, unlike get_mcu_status().
+        '''
+        with self._status_lock:
+            if self._latest_status is not None:
+                return dict(self._latest_status), self._status_seq
+        return None, None
+
     def get_mcu_status(self):
-        '''Return the most recent packet as a dict, waiting for the first one.'''
+        '''Return the most recent packet as a dict, waiting for the first one.
+
+        Blocks indefinitely if no packet has ever been published (e.g. called
+        before the MCU has sent anything). Callers that need a bound on that
+        wait -- such as wait_for_completion -- must use _peek_status() instead.
+        '''
         while True:
-            with self._status_lock:
-                if self._latest_status is not None:
-                    return dict(self._latest_status)
+            data, _ = self._peek_status()
+            if data is not None:
+                return data
             sleep(0.001)
 
     def send_command(self, command, *args):
@@ -800,13 +835,26 @@ class FluidController(Microcontroller):
             raise Exception("Command not recognized")
 
         self.add_uid_to_cmd(command_array)
+        # Record the publish sequence right before transmitting, so
+        # wait_for_completion can require a packet published after this
+        # point -- see its docstring for why UID matching alone isn't enough.
+        with self._status_lock:
+            self._seq_at_send = self._status_seq
         self.send_mcu_command(command_array)
         pass
 
-    def send_command_blocking(self, command, *args):
-        '''Send a command, then write logs while waiting for it to complete'''
+    def send_command_blocking(self, command, *args, timeout=30):
+        '''Send a command, then write logs while waiting for it to complete.
+
+        timeout is keyword-only (falls out naturally after *args) and passed
+        straight through to wait_for_completion. The 30 s default suits fast
+        commands, but several firmware operations (e.g. CLEAR_LINES,
+        UNLOAD_FLUID_VOLUME) take a caller-supplied timeout parameter of their
+        own that routinely runs 35-50 s; callers issuing those must pass a
+        matching timeout here or this will raise before the firmware finishes.
+        '''
         self.send_command(command, *args)
-        return self.wait_for_completion()
+        return self.wait_for_completion(timeout=timeout)
 
     def delay(self, dt):
         '''Keep logging data for time t'''
@@ -839,13 +887,13 @@ class FluidControllerSimulation():
             self.data['selector_valves_pos'][args[0]] = args[1]
         return
 
-    def send_command_blocking(self, command, *args):
+    def send_command_blocking(self, command, *args, timeout=30):
         sleep(2)
         if command == CMD_SET.SET_ROTARY_VALVE:
             self.data['selector_valves_pos'][args[0]] = args[1]
         return
 
-    def wait_for_completion(self):
+    def wait_for_completion(self, timeout=30):
         pass
 
     def get_mcu_status(self):

@@ -421,14 +421,32 @@ class TestWaitForCompletion:
             _make_packet(uid=10, status=COMMAND_STATUS.CMD_EXECUTION_ERROR)))
         assert fc.wait_for_completion() == COMMAND_STATUS.CMD_EXECUTION_ERROR
 
+    def test_times_out_if_no_packet_ever_arrives(self):
+        """Regression guard: get_mcu_status() blocks forever waiting for the
+        first packet, so wait_for_completion must not route through it. If it
+        did, this test would hang instead of failing -- unplugged hardware,
+        a crashed MCU, or the wrong serial port would hang forever too.
+        """
+        fc = _bare_controller()
+        fc._init_status_state()
+        fc.cmd_uid = 12
+        # No packet is ever published -- _latest_status stays None throughout.
+        with pytest.raises(TimeoutError):
+            fc.wait_for_completion(timeout=1)
+
     def test_timeout_message_names_the_command(self):
         fc = _bare_controller()
         fc._init_status_state()
         fc.cmd_uid = 11
         fc.cmd_sent = 3
         fc._publish_status(fc._parse_packet(_make_packet(uid=10)))
-        with pytest.raises(TimeoutError, match="11"):
+        with pytest.raises(TimeoutError) as excinfo:
             fc.wait_for_completion(timeout=1)
+        # Pin both pieces individually -- match="11" alone stays green even if
+        # "{self.cmd_sent}" is deleted from the f-string, since "1" is a
+        # substring of "11" and of "within 1s".
+        assert "command 3" in str(excinfo.value)
+        assert "uid 11" in str(excinfo.value)
 
 
 class TestClearResetsUid:
@@ -448,3 +466,43 @@ class TestClearResetsUid:
         fc.send_command(CMD_SET.CLEAR)
         assert fc.cmd_uid == 0
         assert sent[0][0] == 0 and sent[0][1] == 0
+
+
+class TestSequenceGuardsAgainstUidReuse:
+    """CMD_SET.CLEAR resets cmd_uid to 0 on the host, and the firmware resets
+    its own UID counter to 0 too (controller_teensy41.ino). So two consecutive
+    CLEAR commands share UID 0: the terminal packet for the first CLEAR is
+    still the "latest" packet, still carrying UID 0, when the second CLEAR is
+    sent. UID matching alone would accept it immediately -- before the second
+    CLEAR had even reached the firmware, let alone finished homing every
+    selector valve. The publish-sequence check (seq > seq at send time) is
+    what actually distinguishes "the stale packet from before" from "a fresh
+    packet published after this command went out."
+    """
+
+    def test_second_clear_ignores_first_clears_stale_terminal_packet(self):
+        fc = _bare_controller()
+        fc._init_status_state()
+        fc.cmd_uid = 0
+        fc.serial = None
+        fc.send_mcu_command = lambda cmd: None
+
+        # First CLEAR goes out (UID 0), and its terminal packet (UID 0) is
+        # published afterward -- a normal, correct completion.
+        fc.send_command(CMD_SET.CLEAR)
+        fc._publish_status(fc._parse_packet(
+            _make_packet(uid=0, status=COMMAND_STATUS.COMPLETED_WITHOUT_ERRORS)))
+        assert fc.wait_for_completion() == COMMAND_STATUS.COMPLETED_WITHOUT_ERRORS
+
+        # Second CLEAR also goes out with UID 0. The first CLEAR's terminal
+        # packet is still the latest one published and still carries UID 0 --
+        # UID matching alone would accept it here, immediately, wrongly.
+        fc.send_command(CMD_SET.CLEAR)
+        with pytest.raises(TimeoutError):
+            fc.wait_for_completion(timeout=1)
+
+        # Only once a packet published *after* the second send arrives
+        # (UID 0 again -- same reused UID) does it return.
+        fc._publish_status(fc._parse_packet(
+            _make_packet(uid=0, status=COMMAND_STATUS.COMPLETED_WITHOUT_ERRORS)))
+        assert fc.wait_for_completion() == COMMAND_STATUS.COMPLETED_WITHOUT_ERRORS
