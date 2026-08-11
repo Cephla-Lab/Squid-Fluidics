@@ -20,6 +20,7 @@ from fluidics.control.syringe_pump import SyringePump, SyringePumpSimulation
 from fluidics.control.selector_valve import SelectorValveSystem
 from fluidics.control.disc_pump import DiscPump
 from fluidics.control.temperature_controller import TCMController, TCMControllerSimulation
+from fluidics.control.flow_sensor import build_flow_sensors
 
 from fluidics.control._def import CMD_SET
 from fluidics.control.tecancavro.tecanapi import TecanAPITimeout
@@ -1180,6 +1181,8 @@ class FluidicsControlGUI(QMainWindow):
         self.config = load_config_file()
         self.simulation = is_simulation
         self.temperatureController = None
+        self.flowSensors = []
+        self.flowSensorTab = None
 
         self.initialize_hardware(self.simulation, self.config)
         self.selectorValveSystem = SelectorValveSystem(self.controller, self.config)
@@ -1208,6 +1211,13 @@ class FluidicsControlGUI(QMainWindow):
         if self.temperatureController is not None:
             temperatureControlTab = TemperatureControlWidget(self.temperatureController)
             self.tabWidget.addTab(temperatureControlTab, "Temperature Control")
+
+        if self.flowSensors:
+            self.flowSensorTab = FlowSensorControlWidget(self.flowSensors)
+            self.tabWidget.addTab(self.flowSensorTab, "Flow Sensors")
+            for sensor in self.flowSensors:
+                if hasattr(sensor, "reading_thread"):
+                    sensor.reading_thread.start()
 
         self.setCentralWidget(self.tabWidget)
         runExperimentsTab.sequence_running.connect(self.set_manual_control_tab_state)
@@ -1259,6 +1269,21 @@ class FluidicsControlGUI(QMainWindow):
         self.controller.begin()
         self.controller.send_command(CMD_SET.CLEAR)
 
+        self.flowSensors = build_flow_sensors(self.controller, config, simulation)
+        for sensor in self.flowSensors:
+            try:
+                sensor.begin()
+            except Exception as e:
+                msg = f"Failed to initialize flow sensor '{sensor.name}': {e}"
+                print(msg)
+                self.flowSensors = []
+                QMessageBox.warning(
+                    self, "Flow Sensor",
+                    f"{msg}\n\nCheck that the sensor is connected to I2C index "
+                    f"{sensor.index}. The Flow Sensor tab will not be available."
+                )
+                break
+
     def set_manual_control_tab_state(self, is_running):
         manual_control_tab_index = 1
         self.tabWidget.setTabEnabled(manual_control_tab_index, not is_running)
@@ -1266,6 +1291,17 @@ class FluidicsControlGUI(QMainWindow):
     def closeEvent(self, event):
         if self.temperatureController is not None:
             self.temperatureController.close()
+
+        # FlowSensorControlWidget.closeEvent is never delivered here: Qt only
+        # sends QCloseEvent to top-level windows, and the widget is embedded
+        # in self.tabWidget. Close its CSV recordings explicitly so quitting
+        # mid-recording doesn't leave a file handle dangling.
+        if self.flowSensorTab is not None:
+            for sensor_widget in self.flowSensorTab.sensor_widgets:
+                sensor_widget.close_recording()
+        for sensor in self.flowSensors:
+            sensor.close()
+        self.controller.stop_reading()
 
         if self.config.application == "Open Chamber":
             self.syringePump.close()

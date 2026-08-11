@@ -142,3 +142,20 @@ class FlowSensorSimulation:
                     callback(self.simulated_flow_ul_min, timestamp)
                 except Exception as e:
                     print(f"Flow sensor subscriber failed: {e}")
+
+
+def build_flow_sensors(fluid_controller, config, simulation=False):
+    """Construct FlowSensor instances from config. Does not call begin().
+
+    Phase 1: the firmware has a single sensor object and always transmits it
+    in packet slot 0, whichever I2C bus it sits on. When the firmware grows a
+    sensor array this becomes `index - 1`.
+    """
+    if not config.flow_sensors:
+        return []
+
+    cls = FlowSensorSimulation if simulation else FlowSensor
+    return [
+        cls(fluid_controller, index=cfg.index, name=cfg.name, packet_slot=0)
+        for cfg in config.flow_sensors
+    ]
