@@ -1014,6 +1014,166 @@ class TemperatureControlWidget(QWidget):
         event.accept()
 
 
+class FlowSensorWidget(QWidget):
+    """One flow sensor's readout, plot, and CSV recording."""
+
+    reading_signal = pyqtSignal(object, float)  # (flow_ul_min or None, timestamp)
+
+    def __init__(self, sensor, parent=None):
+        super().__init__(parent)
+        self.sensor = sensor
+
+        self.flows = []
+        self.times = []
+        self.query_interval = 1
+        self.window_size = 60
+        self.last_update = 0
+        self.file = None
+        self.writer = None
+
+        self.reading_signal.connect(self._on_reading)
+        self._build_ui()
+        self.sensor.subscribe(self._on_callback)
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+
+        readout = QGroupBox(f"{self.sensor.name} (I2C index {self.sensor.index})")
+        readout_layout = QHBoxLayout()
+        self.flow_label = QLabel("--")
+        readout_layout.addWidget(QLabel("Flow rate:"))
+        readout_layout.addWidget(self.flow_label)
+        readout_layout.addStretch()
+        readout.setLayout(readout_layout)
+
+        plot_box = QGroupBox("Plot")
+        plot_layout = QVBoxLayout()
+
+        plot_controls = QWidget()
+        pc_layout = QHBoxLayout(plot_controls)
+        pc_layout.addWidget(QLabel("Query Interval:"))
+        self.interval_input = QSpinBox()
+        self.interval_input.setMinimum(1)
+        self.interval_input.setValue(1)
+        self.interval_input.setSuffix(" s")
+        pc_layout.addWidget(self.interval_input)
+        pc_layout.addWidget(QLabel("Window Size:"))
+        self.window_input = QSpinBox()
+        self.window_input.setMinimum(10)
+        self.window_input.setMaximum(3600)
+        self.window_input.setValue(60)
+        self.window_input.setSuffix(" s")
+        pc_layout.addWidget(self.window_input)
+        plot_layout.addWidget(plot_controls)
+
+        self.canvas = MplCanvas(self, width=5, height=4, dpi=100)
+        plot_layout.addWidget(self.canvas)
+
+        self.record_btn = QPushButton("Start Recording")
+        plot_layout.addWidget(self.record_btn)
+        plot_box.setLayout(plot_layout)
+
+        layout.addWidget(readout)
+        layout.addWidget(plot_box)
+
+        self.record_btn.clicked.connect(self._toggle_record)
+        self.interval_input.valueChanged.connect(self._set_interval)
+        self.window_input.valueChanged.connect(self._set_window)
+
+    def _set_interval(self, value):
+        self.query_interval = value
+
+    def _set_window(self, value):
+        self.window_size = value
+        self._refresh_plot()
+
+    def _on_callback(self, flow, timestamp):
+        # Runs in the controller's reader thread; marshal to the GUI thread.
+        self.reading_signal.emit(flow, timestamp)
+
+    def _on_reading(self, flow, current_time):
+        if current_time - self.last_update < self.query_interval:
+            return
+
+        if flow is None:
+            self.flow_label.setText("invalid")
+        else:
+            self.flow_label.setText(f"{flow:.1f} µL/min")
+
+        # None is appended as-is: matplotlib renders it as a gap, which is
+        # what an invalid reading should look like rather than a 3276.7 spike.
+        self.flows.append(flow)
+        self.times.append(current_time)
+
+        if self.writer is not None:
+            self.writer.writerow([datetime.fromtimestamp(current_time),
+                                  "" if flow is None else f"{flow:.2f}"])
+
+        while self.times and current_time - self.times[0] > self.window_size:
+            self.times.pop(0)
+            self.flows.pop(0)
+
+        self._refresh_plot()
+        self.last_update = current_time
+
+    def _refresh_plot(self):
+        if not self.times:
+            return
+        ax = self.canvas.axes
+        ax.clear()
+        ax.plot(self.times, self.flows, "b-")
+
+        valid = [f for f in self.flows if f is not None]
+        if valid:
+            y_min, y_max = min(valid), max(valid)
+            padding = (y_max - y_min) * 0.1 if y_max != y_min else 1.0
+            ax.set_ylim([y_min - padding, y_max + padding])
+
+        current_time = self.times[-1]
+        ax.set_xlim([current_time - self.window_size, current_time])
+        ax.set_xlabel("Seconds Ago")
+        ax.set_ylabel("Flow Rate (µL/min)")
+        ax.set_title(self.sensor.name)
+        ax.grid(True)
+        ax.set_xticklabels([f"{x:.0f}" for x in current_time - ax.get_xticks()])
+        self.canvas.draw()
+
+    def _toggle_record(self):
+        if self.record_btn.text() == "Start Recording":
+            self.record_btn.setText("Stop Recording")
+            filename = f"flow_{self.sensor.name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            self.file = open(filename, "w", newline="")
+            self.writer = csv.writer(self.file)
+            self.writer.writerow(["Time", "Flow Rate (uL/min)"])
+        else:
+            self.record_btn.setText("Start Recording")
+            self.close_recording()
+
+    def close_recording(self):
+        if self.file is not None:
+            self.file.close()
+            self.file = None
+            self.writer = None
+
+
+class FlowSensorControlWidget(QWidget):
+    """Container laying out one FlowSensorWidget per configured sensor."""
+
+    def __init__(self, sensors):
+        super().__init__()
+        layout = QHBoxLayout(self)
+        self.sensor_widgets = []
+        for sensor in sensors:
+            sw = FlowSensorWidget(sensor)
+            self.sensor_widgets.append(sw)
+            layout.addWidget(sw)
+
+    def closeEvent(self, event):
+        for sw in self.sensor_widgets:
+            sw.close_recording()
+        event.accept()
+
+
 class FluidicsControlGUI(QMainWindow):
     def __init__(self, is_simulation):
         super().__init__()
