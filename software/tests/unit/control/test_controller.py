@@ -233,7 +233,10 @@ class TestPacketSubscribers:
         fc._init_status_state()
         fc.unsubscribe_packets(lambda _: None)
 
-    def test_unsubscribe_drops_one_of_two_identical_registrations(self):
+    def test_unsubscribe_removes_every_registration_of_a_callback(self):
+        """No caller double-subscribes, so removal is all-or-nothing rather
+        than counted -- simpler, and there is no semantics to get wrong.
+        """
         fc = _bare_controller()
         fc._init_status_state()
         seen = []
@@ -242,7 +245,7 @@ class TestPacketSubscribers:
         fc.subscribe_packets(cb)
         fc.unsubscribe_packets(cb)
         fc._publish_status(fc._parse_packet(_make_packet()))
-        assert len(seen) == 1
+        assert seen == []
 
     def test_subscriber_may_unsubscribe_itself_during_dispatch(self):
         """Dispatch runs outside the lock, so re-entrant removal must not
@@ -250,17 +253,18 @@ class TestPacketSubscribers:
         """
         fc = _bare_controller()
         fc._init_status_state()
-        seen = []
+        once_calls, persistent = [], []
 
         def once(parsed):
-            seen.append(parsed)
+            once_calls.append(parsed)
             fc.unsubscribe_packets(once)
 
         fc.subscribe_packets(once)
-        fc.subscribe_packets(seen.append)
+        fc.subscribe_packets(persistent.append)
         fc._publish_status(fc._parse_packet(_make_packet()))
         fc._publish_status(fc._parse_packet(_make_packet()))
-        assert len(seen) == 3   # once + append, then append only
+        assert len(once_calls) == 1     # removed itself after the first
+        assert len(persistent) == 2     # never skipped
 
 
 class TestNegativeRawDecoding:

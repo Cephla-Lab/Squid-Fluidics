@@ -656,13 +656,7 @@ void onPacketReceived(const uint8_t* buffer, size_t size) {
           return;
         }
         uint8_t slot = bus - SLF3X_FIRST_BUS;
-
-        if (bus == 1) {
-          result = flowsensors[slot].begin(SLF3X_WIRE1, medium, do_crc);
-        }
-        else {
-          result = flowsensors[slot].begin(SLF3X_WIRE2, medium, do_crc);
-        }
+        result = flowsensors[slot].begin(*SLF3X_BUS_BY_SLOT[slot], medium, do_crc);
 
         if (result) {
           execution_status = COMPLETED_WITHOUT_ERRORS;

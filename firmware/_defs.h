@@ -50,6 +50,10 @@ const uint8_t SELECTORVALVE_ADDRS[] = {0x0E, 0x10, 0x12, 0x00, 0x00}; // 0x00 is
 // integration and the CLEAR_LINES guard. Slot 1 is telemetry.
 #define SLF3X_MAX          2
 #define SLF3X_FIRST_BUS    1   // bus index of slot 0
+// Slot -> bus, in one place. Same shape as PRESSURE_CS above: the mapping is a
+// table rather than a branch, so widening SLF3X_MAX cannot leave a dispatch
+// arm behind.
+TwoWire* const SLF3X_BUS_BY_SLOT[SLF3X_MAX] = {&SLF3X_WIRE1, &SLF3X_WIRE2};
 
 #define SSCX_SPI     SPI
 #define SSCX_QTY      0 // 0 are installed here

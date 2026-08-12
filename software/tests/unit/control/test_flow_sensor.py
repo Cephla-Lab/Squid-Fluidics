@@ -124,7 +124,7 @@ class TestFlowSensorClose:
         sensor = FlowSensor(fc, index=1, name="s")
         assert len(fc._packet_subscribers) == 1
         sensor.close()
-        assert fc._packet_subscribers == []
+        assert len(fc._packet_subscribers) == 0
 
     def test_close_stops_updating_latest_reading(self):
         fc = FakeController()
@@ -149,12 +149,12 @@ class TestFlowSensorClose:
         sensor = FlowSensor(fc, index=1, name="s")
         sensor.close()
         sensor.close()
-        assert fc._packet_subscribers == []
+        assert len(fc._packet_subscribers) == 0
 
     def test_close_leaves_other_subscribers_intact(self):
         fc = FakeController()
         first = FlowSensor(fc, index=1, name="first")
-        second = FlowSensor(fc, index=2, name="second", packet_slot=1)
+        second = FlowSensor(fc, index=2, name="second")
         second.close()
         fc.publish(1000, flow_2_raw=2000)
         assert first.latest_flow_ul_min == pytest.approx(100.0)
@@ -167,7 +167,7 @@ class TestTwoSensorsOnOneController:
     def test_each_sensor_reads_its_own_slot(self):
         fc = FakeController()
         first = FlowSensor(fc, index=1, name="first")
-        second = FlowSensor(fc, index=2, name="second", packet_slot=1)
+        second = FlowSensor(fc, index=2, name="second")
         fc.publish(1000, flow_2_raw=-2000)
         assert first.latest_flow_ul_min == pytest.approx(100.0)
         assert second.latest_flow_ul_min == pytest.approx(-200.0)
@@ -175,7 +175,7 @@ class TestTwoSensorsOnOneController:
     def test_slot_1_sentinel_is_independent_of_slot_0(self):
         fc = FakeController()
         first = FlowSensor(fc, index=1, name="first")
-        second = FlowSensor(fc, index=2, name="second", packet_slot=1)
+        second = FlowSensor(fc, index=2, name="second")
         fc.publish(1000, flow_2_raw=INVALID_RAW)
         assert first.latest_flow_ul_min == pytest.approx(100.0)
         assert second.latest_flow_ul_min is None
@@ -186,14 +186,14 @@ class TestTwoSensorsOnOneController:
         configuration, not an error.
         """
         fc = FakeController()
-        lone = FlowSensor(fc, index=2, name="waste_line", packet_slot=1)
+        lone = FlowSensor(fc, index=2, name="waste_line")
         fc.publish(INVALID_RAW, flow_2_raw=1500)
         assert lone.latest_flow_ul_min == pytest.approx(150.0)
 
     def test_a_raising_sensor_does_not_starve_the_other(self):
         fc = FakeController()
         first = FlowSensor(fc, index=1, name="first")
-        second = FlowSensor(fc, index=2, name="second", packet_slot=1)
+        second = FlowSensor(fc, index=2, name="second")
         first.subscribe(lambda flow, ts: 1 / 0)
         seen = []
         second.subscribe(lambda flow, ts: seen.append(flow))

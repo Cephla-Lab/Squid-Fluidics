@@ -56,50 +56,48 @@ def uint_to_bytes(uint, n_bytes):
         out.append(np.uint8(shifted & 0xFF))
     return out
 
-class PacketSubscribers:
-    '''Fan-out for parsed status packets.
+class Subscribers:
+    '''A callback list with isolated dispatch.
 
-    One reader thread produces packets; any number of consumers subscribe. Two
-    flow sensors is the case that forced this — a single callback slot meant the
-    second sensor silently displaced the first.
+    Producers here run on a background thread while consumers register and
+    deregister from another, and one bad consumer must not take out the rest.
+    Used for the controller's packet stream and, one layer up, for a flow
+    sensor's scaled readings — the two differ only in payload.
     '''
 
-    def _init_packet_subscribers(self):
-        self._packet_subscriber_lock = threading.Lock()
-        self._packet_subscribers = []
+    def __init__(self, label):
+        self._label = label          # names the producer in failure messages
+        self._lock = threading.Lock()
+        self._callbacks = []
 
-    def subscribe_packets(self, callback):
-        '''Register callback(parsed_packet), called once per received packet.
-
-        Callbacks run on the reader thread, so they must not block: a slow
-        subscriber delays every other consumer of the stream.
+    def subscribe(self, callback):
+        '''Register a callback. Runs on the producer's thread, so it must not
+        block — a slow subscriber delays every other consumer.
         '''
-        with self._packet_subscriber_lock:
-            self._packet_subscribers.append(callback)
+        with self._lock:
+            self._callbacks.append(callback)
 
-    def unsubscribe_packets(self, callback):
-        '''Remove one registration, matched by identity. A no-op if absent.
+    def unsubscribe(self, callback):
+        '''Deregister by identity. A no-op if absent, and idempotent.
 
-        Rebuilds the list rather than calling list.remove(), which matches with
-        __eq__ — that would invoke arbitrary subscriber comparison and raise
-        ValueError for a callback already gone. Absence has to be tolerated
-        because close() is legitimately reachable twice: begin() calls it on its
+        Filters rather than calling list.remove(), which matches with __eq__ —
+        that would invoke arbitrary subscriber comparison and raise ValueError
+        for a callback already gone. Absence has to be tolerated because
+        close() is legitimately reachable twice: begin() calls it on its
         failure path, and teardown calls it again.
-
-        Drops a single registration, so a callback subscribed twice needs
-        unsubscribing twice.
         '''
-        with self._packet_subscriber_lock:
-            kept = []
-            dropped = False
-            for existing in self._packet_subscribers:
-                if not dropped and existing is callback:
-                    dropped = True
-                    continue
-                kept.append(existing)
-            self._packet_subscribers = kept
+        with self._lock:
+            self._callbacks = [c for c in self._callbacks if c is not callback]
 
-    def _notify_packet_subscribers(self, parsed):
+    def clear(self):
+        with self._lock:
+            self._callbacks = []
+
+    def __len__(self):
+        with self._lock:
+            return len(self._callbacks)
+
+    def notify(self, *args):
         '''Dispatch to every subscriber, isolating each from the others.
 
         The snapshot is taken under the lock but dispatched outside it, so a
@@ -108,14 +106,35 @@ class PacketSubscribers:
         the loop as a whole: with one try around the loop, a raising subscriber
         would starve every subscriber after it, forever, at 17 packets/second.
         '''
-        with self._packet_subscriber_lock:
-            subscribers = list(self._packet_subscribers)
+        with self._lock:
+            callbacks = list(self._callbacks)
 
-        for callback in subscribers:
+        for callback in callbacks:
             try:
-                callback(parsed)
+                callback(*args)
             except Exception as e:
-                print_message(f"Packet subscriber failed: {e}")
+                print_message(f"{self._label} subscriber failed: {e}")
+
+
+class PacketSubscribers:
+    '''Mixin giving a controller a packet-stream subscriber list.
+
+    Two flow sensors is the case that forced this — a single callback slot
+    meant the second sensor silently displaced the first.
+    '''
+
+    def _init_packet_subscribers(self):
+        self._packet_subscribers = Subscribers("Packet")
+
+    def subscribe_packets(self, callback):
+        '''Register callback(parsed_packet), called once per received packet.'''
+        self._packet_subscribers.subscribe(callback)
+
+    def unsubscribe_packets(self, callback):
+        self._packet_subscribers.unsubscribe(callback)
+
+    def _notify_packet_subscribers(self, parsed):
+        self._packet_subscribers.notify(parsed)
 
 
 # Define basic input/output from the microcontroller

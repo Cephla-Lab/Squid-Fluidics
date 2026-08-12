@@ -45,7 +45,7 @@ class TestBuildFlowSensors:
         # must never start a background thread in this suite), so this
         # asserts the real, documented effects of close() instead of a no-op.
         for s in sensors:
-            assert s._subscribers == []
+            assert len(s._subscribers) == 0
             assert s.terminate_reading_thread is True
         assert seen == []
 

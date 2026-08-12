@@ -7,3 +7,6 @@
 # present, so a committed copy would silently override every other machine's
 # setup. Shareable examples belong in software/sample_config/.
 software/config.yaml
+# Local test sequence, swept in by a directory-wide git add. Belongs to the
+# temperature-controller work, not here; add it deliberately if it should ship.
+software/sample_sequences/temperature-test.yaml

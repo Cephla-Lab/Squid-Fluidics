@@ -828,10 +828,6 @@ class TimeSeriesPlotWidget(QWidget):
 
     # --- subclass hooks ---
 
-    def _series(self):
-        """The data lists kept parallel to self.times, trimmed alongside it."""
-        raise NotImplementedError
-
     def _record_filename(self):
         """Filename for a new CSV recording."""
         raise NotImplementedError
@@ -896,14 +892,15 @@ class TimeSeriesPlotWidget(QWidget):
 
     # --- shared plotting ---
 
-    def _append_sample(self, current_time, *values):
-        """Append one sample and drop anything now outside the window."""
-        self.times.append(current_time)
-        series = self._series()
-        for data, value in zip(series, values):
-            data.append(value)
+    def _trim_window(self, *series):
+        """Drop samples now outside the window, keeping series aligned to times.
 
-        while self.times and current_time - self.times[0] > self.window_size:
+        The caller appends to self.times and its own lists, then names those
+        lists here. Keeping the append and the trim at one call site is why
+        there is no _series() hook: a hook would split the correspondence
+        across two methods, where a wrong order silently misfiles values.
+        """
+        while self.times and self.times[-1] - self.times[0] > self.window_size:
             self.times.pop(0)
             for data in series:
                 data.pop(0)
@@ -989,9 +986,6 @@ class TemperatureChannelWidget(TimeSeriesPlotWidget):
         self._build_ui()
         self.temp_input.setText(f"{self.controller.target_temperatures[channel - 1]:.2f}")
 
-    def _series(self):
-        return [self.temps, self.targets]
-
     def _record_filename(self):
         return f"temp_ch{self.channel}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
 
@@ -1039,7 +1033,10 @@ class TemperatureChannelWidget(TimeSeriesPlotWidget):
             return
         self.temp_label.setText(f"{temp:.1f}°C")
         target = self.controller.target_temperatures[self.channel - 1]
-        self._append_sample(current_time, temp, target)
+        self.times.append(current_time)
+        self.temps.append(temp)
+        self.targets.append(target)
+        self._trim_window(self.temps, self.targets)
         if self.writer is not None:
             self.writer.writerow([datetime.fromtimestamp(current_time), temp, target])
         self._refresh_plot()
@@ -1127,9 +1124,6 @@ class FlowSensorWidget(TimeSeriesPlotWidget):
         self._build_ui()
         self.sensor.subscribe(self._on_callback)
 
-    def _series(self):
-        return [self.flows]
-
     def _record_filename(self):
         # sensor.name is free-form config text; keep it out of the path itself
         # so a name containing a separator writes here rather than elsewhere.
@@ -1177,7 +1171,9 @@ class FlowSensorWidget(TimeSeriesPlotWidget):
 
         # None is appended as-is: matplotlib renders it as a gap, which is
         # what an invalid reading should look like rather than a 3276.7 spike.
-        self._append_sample(current_time, flow)
+        self.times.append(current_time)
+        self.flows.append(flow)
+        self._trim_window(self.flows)
 
         self._refresh_plot()
         self.last_update = current_time
