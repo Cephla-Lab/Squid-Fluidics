@@ -55,31 +55,20 @@ class FlowSensor:
         self._lock = threading.Lock()
         self._subscribers = []
 
-        # Config caps at one sensor today, so this slot is never contended in
-        # practice -- but if Phase 2 lifts that cap, a second sensor claiming
-        # it here would silently steal it, leaving the first sensor's
-        # subscribers permanently dead with no error. Raise instead.
-        if self.fc.packet_callback is not None:
-            raise RuntimeError(
-                f"FlowSensor '{name}' cannot claim fc.packet_callback: it is "
-                "already held by another handler (only one flow sensor is "
-                "supported per controller today)."
-            )
-
-        # Stored once so close() can find it again: a bound method is a new
-        # object on every attribute access (a.m is a.m is False in CPython),
-        # so re-deriving self._on_packet in close() and comparing with `is`
-        # would never match what was assigned here.
+        # Stored once so close() can unsubscribe the same object: a bound method
+        # is a new object on every attribute access (a.m is a.m is False in
+        # CPython), so re-deriving self._on_packet later and matching by
+        # identity would never find what was registered here.
         self._packet_handler = self._on_packet
-        self.fc.packet_callback = self._packet_handler
+        self.fc.subscribe_packets(self._packet_handler)
 
     def begin(self):
         """Initialize the sensor on the MCU. Raises if the MCU reports failure.
 
-        On failure the sensor releases the packet_callback slot it claimed in
-        __init__ before re-raising, so a caller that discards a failed sensor
-        cannot strand a dead handler on the controller. Cleaning up here rather
-        than at each call site means every caller gets it without remembering.
+        On failure the sensor unsubscribes itself before re-raising, so a caller
+        that discards a failed sensor cannot leave a dead handler on the packet
+        stream. Cleaning up here rather than at each call site means every
+        caller gets it without remembering.
         """
         try:
             status = self.fc.send_command_blocking(
@@ -112,9 +101,14 @@ class FlowSensor:
         self._subscribers.append(callback)
 
     def close(self):
+        """Detach from the packet stream and drop our own subscribers.
+
+        Idempotent: unsubscribe_packets tolerates a handler that is already
+        gone, which matters because begin()'s failure path calls close() and
+        teardown calls it again.
+        """
         self._subscribers = []
-        if getattr(self.fc, "packet_callback", None) is self._packet_handler:
-            self.fc.packet_callback = None
+        self.fc.unsubscribe_packets(self._packet_handler)
 
     def _on_packet(self, parsed):
         raw = parsed["flowrates_raw"][self.packet_slot]

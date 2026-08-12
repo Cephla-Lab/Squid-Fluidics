@@ -56,6 +56,68 @@ def uint_to_bytes(uint, n_bytes):
         out.append(np.uint8(shifted & 0xFF))
     return out
 
+class PacketSubscribers:
+    '''Fan-out for parsed status packets.
+
+    One reader thread produces packets; any number of consumers subscribe. Two
+    flow sensors is the case that forced this — a single callback slot meant the
+    second sensor silently displaced the first.
+    '''
+
+    def _init_packet_subscribers(self):
+        self._packet_subscriber_lock = threading.Lock()
+        self._packet_subscribers = []
+
+    def subscribe_packets(self, callback):
+        '''Register callback(parsed_packet), called once per received packet.
+
+        Callbacks run on the reader thread, so they must not block: a slow
+        subscriber delays every other consumer of the stream.
+        '''
+        with self._packet_subscriber_lock:
+            self._packet_subscribers.append(callback)
+
+    def unsubscribe_packets(self, callback):
+        '''Remove one registration, matched by identity. A no-op if absent.
+
+        Rebuilds the list rather than calling list.remove(), which matches with
+        __eq__ — that would invoke arbitrary subscriber comparison and raise
+        ValueError for a callback already gone. Absence has to be tolerated
+        because close() is legitimately reachable twice: begin() calls it on its
+        failure path, and teardown calls it again.
+
+        Drops a single registration, so a callback subscribed twice needs
+        unsubscribing twice.
+        '''
+        with self._packet_subscriber_lock:
+            kept = []
+            dropped = False
+            for existing in self._packet_subscribers:
+                if not dropped and existing is callback:
+                    dropped = True
+                    continue
+                kept.append(existing)
+            self._packet_subscribers = kept
+
+    def _notify_packet_subscribers(self, parsed):
+        '''Dispatch to every subscriber, isolating each from the others.
+
+        The snapshot is taken under the lock but dispatched outside it, so a
+        subscriber may unsubscribe itself re-entrantly and a slow consumer
+        cannot block registration. Each call is wrapped separately rather than
+        the loop as a whole: with one try around the loop, a raising subscriber
+        would starve every subscriber after it, forever, at 17 packets/second.
+        '''
+        with self._packet_subscriber_lock:
+            subscribers = list(self._packet_subscribers)
+
+        for callback in subscribers:
+            try:
+                callback(parsed)
+            except Exception as e:
+                print_message(f"Packet subscriber failed: {e}")
+
+
 # Define basic input/output from the microcontroller
 class Microcontroller():
     def __init__(self, serial_number, use_cobs = True, cmd_len = MCU_CMD_LENGTH, buffer_len = MCU_MSG_LENGTH):
@@ -179,7 +241,7 @@ class Microcontroller():
         return output
     
 
-class FluidController(Microcontroller):
+class FluidController(Microcontroller, PacketSubscribers):
     def __init__(self, serial_number, use_cobs = True, log_measurements = False, debug = False):
         '''
         Initialize logging and microcontroller connection. This class inherits from Microcontroller
@@ -370,23 +432,17 @@ class FluidController(Microcontroller):
         self._seq_at_send = 0
         self._reader_thread = None
         self._terminate_reader = False
-        self.packet_callback = None
+        self._init_packet_subscribers()
 
     def _publish_status(self, parsed):
-        '''Store a parsed packet, bump the sequence, notify the subscriber.'''
+        '''Store a parsed packet, bump the sequence, notify subscribers.'''
         with self._status_lock:
             self._latest_status = parsed
             self._status_seq += 1
             self.recorded_data = parsed
 
         self._log_packet(parsed)
-
-        callback = self.packet_callback
-        if callback is not None:
-            try:
-                callback(parsed)
-            except Exception as e:
-                print_message(f"Packet callback failed: {e}")
+        self._notify_packet_subscribers(parsed)
 
     def _reader_loop(self):
         while not self._terminate_reader:
@@ -890,12 +946,15 @@ class FluidController(Microcontroller):
         return self.wait_for_completion(timeout=timeout)
 
 
-class FluidControllerSimulation():
+class FluidControllerSimulation(PacketSubscribers):
     def __init__(self, serial_number, use_cobs = True, log_measurements = False, debug = False):
         self.data = {
             'selector_valves_pos': {0: 1, 1: 1, 2: 1, 3: 1, 4: 1}
         }
-        self.packet_callback = None
+        # Never fires — this class has no packet stream — but a real FlowSensor
+        # against a simulated controller is a supported combination, so it must
+        # offer the same subscribe/unsubscribe surface.
+        self._init_packet_subscribers()
         return
 
     def begin(self):

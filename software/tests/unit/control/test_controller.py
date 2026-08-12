@@ -162,19 +162,19 @@ class TestPublishStatus:
         fc._publish_status(fc._parse_packet(_make_packet()))
         assert fc._status_seq == first + 1
 
-    def test_packet_callback_fires_with_parsed_dict(self):
+    def test_subscriber_receives_the_parsed_dict(self):
         fc = _bare_controller()
         fc._init_status_state()
         seen = []
-        fc.packet_callback = seen.append
+        fc.subscribe_packets(seen.append)
         fc._publish_status(fc._parse_packet(_make_packet(flow_raw=400)))
         assert len(seen) == 1
         assert seen[0]["flowrates"][0] == pytest.approx(40.0)
 
-    def test_callback_exception_does_not_break_publishing(self):
+    def test_subscriber_exception_does_not_break_publishing(self):
         fc = _bare_controller()
         fc._init_status_state()
-        fc.packet_callback = lambda _: 1 / 0
+        fc.subscribe_packets(lambda _: 1 / 0)
         fc._publish_status(fc._parse_packet(_make_packet(flow_raw=400)))
         assert fc.get_mcu_status()["flowrates"][0] == pytest.approx(40.0)
 
@@ -185,6 +185,82 @@ class TestPublishStatus:
         snapshot = fc.get_mcu_status()
         snapshot["flowrates"] = "clobbered"
         assert fc.get_mcu_status()["flowrates"] != "clobbered"
+
+
+class TestPacketSubscribers:
+    """Fan-out replaced a single callback slot, which two flow sensors made
+    untenable -- the second silently displaced the first.
+    """
+
+    def test_every_subscriber_receives_each_packet(self):
+        fc = _bare_controller()
+        fc._init_status_state()
+        a, b = [], []
+        fc.subscribe_packets(a.append)
+        fc.subscribe_packets(b.append)
+        fc._publish_status(fc._parse_packet(_make_packet(flow_raw=100)))
+        assert len(a) == 1 and len(b) == 1
+
+    def test_one_raising_subscriber_does_not_starve_the_others(self):
+        """A single try around the loop would let subscriber 0 permanently
+        starve subscriber 1 at 17 packets/second.
+        """
+        fc = _bare_controller()
+        fc._init_status_state()
+        seen = []
+        fc.subscribe_packets(lambda _: 1 / 0)
+        fc.subscribe_packets(seen.append)
+        fc._publish_status(fc._parse_packet(_make_packet(flow_raw=100)))
+        assert len(seen) == 1
+
+    def test_unsubscribe_removes_only_that_subscriber(self):
+        fc = _bare_controller()
+        fc._init_status_state()
+        a, b = [], []
+        # Bound methods are fresh objects per access (a.append is not a.append),
+        # so identity removal requires holding the object that was registered --
+        # the same reason FlowSensor stores _packet_handler.
+        cb_a, cb_b = a.append, b.append
+        fc.subscribe_packets(cb_a)
+        fc.subscribe_packets(cb_b)
+        fc.unsubscribe_packets(cb_a)
+        fc._publish_status(fc._parse_packet(_make_packet()))
+        assert a == [] and len(b) == 1
+
+    def test_unsubscribe_is_a_noop_when_absent(self):
+        """close() is reachable twice: begin()'s failure path and teardown."""
+        fc = _bare_controller()
+        fc._init_status_state()
+        fc.unsubscribe_packets(lambda _: None)
+
+    def test_unsubscribe_drops_one_of_two_identical_registrations(self):
+        fc = _bare_controller()
+        fc._init_status_state()
+        seen = []
+        cb = seen.append
+        fc.subscribe_packets(cb)
+        fc.subscribe_packets(cb)
+        fc.unsubscribe_packets(cb)
+        fc._publish_status(fc._parse_packet(_make_packet()))
+        assert len(seen) == 1
+
+    def test_subscriber_may_unsubscribe_itself_during_dispatch(self):
+        """Dispatch runs outside the lock, so re-entrant removal must not
+        deadlock or skip the remaining subscribers.
+        """
+        fc = _bare_controller()
+        fc._init_status_state()
+        seen = []
+
+        def once(parsed):
+            seen.append(parsed)
+            fc.unsubscribe_packets(once)
+
+        fc.subscribe_packets(once)
+        fc.subscribe_packets(seen.append)
+        fc._publish_status(fc._parse_packet(_make_packet()))
+        fc._publish_status(fc._parse_packet(_make_packet()))
+        assert len(seen) == 3   # once + append, then append only
 
 
 class TestNegativeRawDecoding:

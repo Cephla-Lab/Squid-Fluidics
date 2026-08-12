@@ -1,18 +1,22 @@
 # tests/unit/control/test_flow_sensor.py
 import pytest
 
-from fluidics.control.controller import FluidController
+from fluidics.control.controller import FluidController, PacketSubscribers
 from fluidics.control.flow_sensor import FlowSensor, FlowSensorSimulation, INVALID_RAW
 from fluidics.control._def import CMD_SET, COMMAND_STATUS
 
 from .packet_helpers import make_status_packet as _make_packet
 
 
-class FakeController:
-    """Minimal stand-in that can publish packets to a FlowSensor."""
+class FakeController(PacketSubscribers):
+    """Minimal stand-in that can publish packets to any number of FlowSensors.
+
+    Uses the real PacketSubscribers mixin rather than reimplementing fan-out,
+    so these tests exercise the production dispatch path.
+    """
 
     def __init__(self, status=COMMAND_STATUS.COMPLETED_WITHOUT_ERRORS):
-        self.packet_callback = None
+        self._init_packet_subscribers()
         self.commands = []
         self._status = status
 
@@ -20,10 +24,10 @@ class FakeController:
         self.commands.append((command, args))
         return self._status
 
-    def publish(self, flow_raw):
-        parsed = FluidController._parse_packet(self, _make_packet(flow_raw=flow_raw))
-        if self.packet_callback is not None:
-            self.packet_callback(parsed)
+    def publish(self, flow_raw, flow_2_raw=0):
+        parsed = FluidController._parse_packet(
+            self, _make_packet(flow_raw=flow_raw, flow_2_raw=flow_2_raw))
+        self._notify_packet_subscribers(parsed)
 
 
 class TestFlowSensorReadings:
@@ -115,11 +119,12 @@ class TestFlowSensorBegin:
 
 
 class TestFlowSensorClose:
-    def test_close_clears_controller_callback(self):
+    def test_close_unsubscribes_from_the_controller(self):
         fc = FakeController()
         sensor = FlowSensor(fc, index=1, name="s")
+        assert len(fc._packet_subscribers) == 1
         sensor.close()
-        assert fc.packet_callback is None
+        assert fc._packet_subscribers == []
 
     def test_close_stops_updating_latest_reading(self):
         fc = FakeController()
@@ -138,42 +143,62 @@ class TestFlowSensorClose:
         fc.publish(100)
         assert seen == []
 
-    def test_close_leaves_other_callback_intact(self):
+    def test_close_is_idempotent(self):
+        """begin()'s failure path calls close(), and teardown calls it again."""
         fc = FakeController()
         sensor = FlowSensor(fc, index=1, name="s")
-        other_callback = lambda parsed: None
-        fc.packet_callback = other_callback
         sensor.close()
-        assert fc.packet_callback is other_callback
+        sensor.close()
+        assert fc._packet_subscribers == []
 
-
-class TestFlowSensorPacketSlot:
-    def test_slot_one_reads_bytes_25_26(self):
-        fc = FakeController()
-        sensor = FlowSensor(fc, index=2, name="s", packet_slot=1)
-        fc.publish(1000)   # writes bytes 23-24 only; slot 1 stays zero
-        assert sensor.latest_flow_ul_min == pytest.approx(0.0)
-
-
-class TestFlowSensorPacketCallbackGuard:
-    """Config caps at one sensor today, so this collision can't happen via
-    normal wiring -- but if Phase 2 lifts that cap, a second FlowSensor
-    claiming the same fc.packet_callback slot would silently steal it and
-    leave the first sensor's subscribers permanently dead with no error.
-    """
-
-    def test_second_sensor_on_same_controller_raises(self):
-        fc = FakeController()
-        FlowSensor(fc, index=1, name="first")
-        with pytest.raises(RuntimeError, match="second"):
-            FlowSensor(fc, index=2, name="second")
-
-    def test_first_sensor_keeps_its_callback_after_failed_second(self):
+    def test_close_leaves_other_subscribers_intact(self):
         fc = FakeController()
         first = FlowSensor(fc, index=1, name="first")
-        with pytest.raises(RuntimeError):
-            FlowSensor(fc, index=2, name="second")
-        assert fc.packet_callback is first._packet_handler
+        second = FlowSensor(fc, index=2, name="second", packet_slot=1)
+        second.close()
+        fc.publish(1000, flow_2_raw=2000)
+        assert first.latest_flow_ul_min == pytest.approx(100.0)
+        assert second.latest_flow_ul_min is None
+
+
+class TestTwoSensorsOnOneController:
+    """The configuration the single-callback slot used to make impossible."""
+
+    def test_each_sensor_reads_its_own_slot(self):
+        fc = FakeController()
+        first = FlowSensor(fc, index=1, name="first")
+        second = FlowSensor(fc, index=2, name="second", packet_slot=1)
+        fc.publish(1000, flow_2_raw=-2000)
+        assert first.latest_flow_ul_min == pytest.approx(100.0)
+        assert second.latest_flow_ul_min == pytest.approx(-200.0)
+
+    def test_slot_1_sentinel_is_independent_of_slot_0(self):
+        fc = FakeController()
+        first = FlowSensor(fc, index=1, name="first")
+        second = FlowSensor(fc, index=2, name="second", packet_slot=1)
+        fc.publish(1000, flow_2_raw=INVALID_RAW)
+        assert first.latest_flow_ul_min == pytest.approx(100.0)
+        assert second.latest_flow_ul_min is None
+
+    def test_empty_slot_0_does_not_disturb_a_lone_slot_1_sensor(self):
+        """One sensor in board slot 2: index 2, reading bytes 25-26, while
+        bytes 23-24 carry the no-sensor sentinel. Must be a normal
+        configuration, not an error.
+        """
+        fc = FakeController()
+        lone = FlowSensor(fc, index=2, name="waste_line", packet_slot=1)
+        fc.publish(INVALID_RAW, flow_2_raw=1500)
+        assert lone.latest_flow_ul_min == pytest.approx(150.0)
+
+    def test_a_raising_sensor_does_not_starve_the_other(self):
+        fc = FakeController()
+        first = FlowSensor(fc, index=1, name="first")
+        second = FlowSensor(fc, index=2, name="second", packet_slot=1)
+        first.subscribe(lambda flow, ts: 1 / 0)
+        seen = []
+        second.subscribe(lambda flow, ts: seen.append(flow))
+        fc.publish(1000, flow_2_raw=2000)
+        assert seen == [pytest.approx(200.0)]
 
 
 class TestFlowSensorSimulation:
