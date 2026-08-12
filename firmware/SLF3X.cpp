@@ -96,7 +96,12 @@ SLF3X::SLF3X() {
   -----------------------------------------------------------------------------
 */
 bool SLF3X::begin(TwoWire &W, uint8_t medium, bool do_crc) {
-  init = true;
+  // Cleared here and set only on the success path below. It used to be set
+  // true as the first statement, before any I2C traffic, and neither failure
+  // return cleared it -- so a sensor that failed to initialize still reported
+  // itself present, and guards keyed on init (e.g. the CLEAR_LINES check)
+  // passed on a rig whose flow sensor was absent or unresponsive.
+  init = false;
   uint16_t n = 0;
   int8_t ret = 0;
   uint16_t n_tries = SLF3X_N_TRIES;
@@ -140,6 +145,7 @@ bool SLF3X::begin(TwoWire &W, uint8_t medium, bool do_crc) {
 
   // If we get here, that means setup was a success
   delay(100); // at least 60 ms needed for reliable measurements to begin
+  init = true;
   return true;
 }
 

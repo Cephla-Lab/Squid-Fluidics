@@ -121,8 +121,13 @@ void loop() {
       selectorvalve_status[i] = byte(selectorvalves[i].read_register(RheoLink_STATUS));
     }
     // PRESSURE
+    // Sized SSCX_MAX, not SSCX_QTY: indices 0 and 1 are read unconditionally
+    // below and further down in the state machine, so with SSCX_QTY 0 this was
+    // a zero-length array and those reads went out of bounds into whatever the
+    // stack held. Zero-initialized so an unpopulated sensor reads as 0 rather
+    // than garbage.
     uint16_t press_readings[2];
-    uint16_t pressure_results[SSCX_QTY];
+    uint16_t pressure_results[SSCX_MAX] = {0};
     for (uint8_t i = 0; i < SSCX_QTY; i++) {
       pressuresensors[i].read(press_readings);
       pressure_results[i] = press_readings[SSCX_PRESS_IDX];
@@ -532,9 +537,12 @@ void onPacketReceived(const uint8_t* buffer, size_t size) {
         // Stop all operations
         disableControlLoops();
         valves.clear_all();
-        uint8_t err;
+        // Accumulate rather than assign: plain assignment kept only the last
+        // valve's result, so a failure on any earlier valve was reported as
+        // success. Initialized because the loop body may not run at all.
+        uint8_t err = 0;
         for (uint8_t i = 0; i < SELECTORVALVE_QTY; i++) {
-          err = selectorvalves[i].set_position(1, true, RheoLink_TIMEOUT);
+          err |= selectorvalves[i].set_position(1, true, RheoLink_TIMEOUT);
         }
 
         time_since_last_tx = 0;
