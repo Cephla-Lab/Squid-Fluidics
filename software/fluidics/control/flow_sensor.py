@@ -168,15 +168,22 @@ class FlowSensorSimulation:
 def build_flow_sensors(fluid_controller, config, simulation=False):
     """Construct FlowSensor instances from config. Does not call begin().
 
-    Phase 1: the firmware has a single sensor object and always transmits it
-    in packet slot 0, whichever I2C bus it sits on. When the firmware grows a
-    sensor array this becomes `index - 1`.
+    Slot is `index - 1`, matching the firmware: index is the physical board
+    position, which is the I2C bus, which fixes the packet slot. Index 1 reads
+    bytes 23-24, index 2 reads bytes 25-26.
+
+    Deliberately derived from index rather than from position in the config
+    list, so reordering the YAML cannot silently repoint a sensor at a
+    different slot. A lone sensor declared at index 2 therefore reads slot 1
+    while slot 0 carries the no-sensor sentinel -- a normal configuration, not
+    an error.
     """
     if not config.flow_sensors:
         return []
 
     cls = FlowSensorSimulation if simulation else FlowSensor
     return [
-        cls(fluid_controller, index=cfg.index, name=cfg.name, packet_slot=0)
+        cls(fluid_controller, index=cfg.index, name=cfg.name,
+            packet_slot=cfg.index - 1)
         for cfg in config.flow_sensors
     ]

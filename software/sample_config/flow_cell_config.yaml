@@ -86,11 +86,16 @@ reagent_selection:
       port_28: 900
   common_tubing_fluid_amount_ul: 800
 # Optional -- omit the whole section if no flow sensor is fitted.
-# index is the I2C bus the sensor sits on: 1 = Wire1, 2 = Wire2. Bus 0 is not
-# supported; it is shared with the selector valves, whose driver emits a
-# general-call transaction after every command.
-# Only one sensor is accepted for now. A second needs firmware that populates
-# packet bytes 25-26.
+#
+# index is the sensor's physical position on the board, which is its I2C bus
+# and fixes which packet bytes carry it: 1 = Wire1 = bytes 23-24, 2 = Wire2 =
+# bytes 25-26. Bus 0 is not supported; it carries the selector valves, whose
+# transactions would stall flow reads during a valve move.
+#
+# One or two sensors, in any combination. A single sensor may sit at index 2
+# with nothing at index 1 -- it reads bytes 25-26 and 23-24 report no sensor.
+# Note only index 1 feeds the firmware's closed-loop flow control and the
+# CLEAR_LINES guard; a sensor at index 2 is read and plotted but not fed back.
 flow_sensors:
 - index: 1
   name: syringe_draw

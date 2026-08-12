@@ -123,10 +123,14 @@ class FluidicsConfig(BaseModel):
                     "lands."
                 )
 
-        if len(self.flow_sensors) > 1:
+        # Two is the hardware ceiling: slot i is transmitted at packet bytes
+        # 23 + 2*i, and a third would grow the packet past MCU_MSG_LENGTH.
+        # Unique indices already bound the count, so this only fires if the
+        # Literal on `index` is ever widened.
+        if len(self.flow_sensors) > 2:
             raise ValueError(
-                "only one flow sensor is supported; a second requires firmware "
-                "that populates packet bytes 25-26"
+                "at most two flow sensors are supported; the status packet has "
+                "room for two readings (bytes 23-24 and 25-26)"
             )
         return self
 

@@ -290,12 +290,22 @@ class TestFlowSensorConfig:
                 {"index": 2, "name": "same"},
             ]))
 
-    def test_two_sensors_rejected_in_phase_1(self):
-        with pytest.raises(ValidationError, match="one flow sensor"):
-            FluidicsConfig(**_make_config_dict(flow_sensors=[
-                {"index": 1, "name": "a"},
-                {"index": 2, "name": "b"},
-            ]))
+    def test_two_sensors_accepted(self):
+        config = FluidicsConfig(**_make_config_dict(flow_sensors=[
+            {"index": 1, "name": "syringe_draw"},
+            {"index": 2, "name": "waste_line"},
+        ]))
+        assert [s.index for s in config.flow_sensors] == [1, 2]
+
+    def test_a_lone_sensor_on_index_2_is_valid(self):
+        """One sensor in board slot 2, nothing in slot 1. It reads packet
+        bytes 25-26 while 23-24 carry the no-sensor sentinel -- a normal
+        wiring, not an error.
+        """
+        config = FluidicsConfig(**_make_config_dict(
+            flow_sensors=[{"index": 2, "name": "waste_line"}]
+        ))
+        assert config.flow_sensors[0].index == 2
 
     def test_empty_list_rejected(self):
         with pytest.raises(ValidationError):
