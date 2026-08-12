@@ -53,7 +53,7 @@ This is the observability layer: it makes flow readable, plottable, and recordab
 
 - **Index 0 / the `Wire` bus.** Excluded because of the selector-valve general-call interaction above.
 - **Draw protection behaviour** — the fault rule, arming around a draw, and which operation consults which sensor. The config fields are declared here (§1) so the schema lives in one place, but nothing reads them until the MERFISH operations design lands; see "Next" below.
-- **Transmitting the signaling flags.** Phase 2 at the earliest; requires the read consolidation.
+- **Transmitting the signaling flags.** A firmware change, and out of scope entirely — see "Firmware work that is deliberately not part of this".
 - **Changing `SLF3X_MAX_VAL_uL_MIN`** (3520 vs the datasheet's 3250). Firmware `:1244` multiplies by it and `controller.py:678` divides by it, so it cancels on the round trip and only bounds the maximum representable `FLUID_OUT_PID` setpoint — which the sensor cannot reach anyway. Cosmetic; leave it.
 - **Making `medium` or `crc` configurable.** Both hardcoded — see §1.
 - Open Chamber disc-pump flow control, and anything in `tests/hardware/`.
@@ -99,7 +99,7 @@ Only the fields are defined here. The fault rule that consumes them, and the arm
 
 `name` labels the GUI tab and the CSV filename, and is the handle the operations layer selects by. `index` matches the "I2C index" wording at `controller.py:380` and the `idx` convention `INITIALIZE_ROTARY` uses. **`max_flow_rate_ul_min` defaults to 2000** — exactly the datasheet's full-scale figure, above which accuracy degrades toward the ±3250 saturation point.
 
-Validation: indices unique; `name`s unique. **Phase 1 additionally rejects more than one entry**, with a message stating that two sensors require the Phase 2 firmware.
+Validation: indices unique; `name`s unique. **More than one entry is rejected**, with a message stating that a second sensor requires firmware that populates packet bytes 25–26.
 
 **Why `medium` is not configurable.** It selects the on-chip calibration field (`0x3608` water / `0x3615` IPA). Datasheet Tables 1 and 2 give both an identical ±2000 µL/min full scale and ±3250 µL/min output limit — identical range confirms an identical scale factor, so the firmware's hardcoded ÷10 is right either way. Only the error characteristics differ (±5% water vs ±10% IPA). These reagents are aqueous and `clean_up` uses water, so the driver hardcodes water. One line to add back if a solvent step ever appears.
 
@@ -150,8 +150,8 @@ class FlowSensor:
 
 **`packet_slot` vs `index`.** The I²C index identifies the bus; the packet slot identifies which pair of bytes carries the reading. They differ by phase, and keeping them separate keeps the driver dumb — the wiring code in `gui.py` / `run_sequences.py` computes the slot:
 
-- **Phase 1:** the firmware has one sensor object and always transmits it in bytes 23–24, whichever bus it is on. Slot is `0` regardless of index.
-- **Phase 2:** slot is `index - 1`, so index 1 → bytes 23–24 and index 2 → bytes 25–26. Deterministic, independent of config ordering.
+- **Today:** the firmware has one sensor object and always transmits it in bytes 23–24, whichever bus it is on. Slot is `0` regardless of index.
+- **If the firmware ever grows a sensor array:** slot becomes `index - 1`, so index 1 → bytes 23–24 and index 2 → bytes 25–26. Deterministic, independent of config ordering.
 
 `FlowSensorSimulation` mirrors the API and runs its own thread, since `FluidControllerSimulation` has no packet stream. It publishes a settable `simulated_flow_ul_min` attribute, defaulting to a plausible steady value. Tests drive that attribute directly to produce low-flow, dropout, and sentinel streams, so the simulation stays a dumb source with no knowledge of any consumer.
 
@@ -179,15 +179,34 @@ The widget subscribes through `FlowSensor.subscribe()` and knows nothing about d
 
 ## Phasing
 
-**Phase 1 — software only, no reflash.** Everything above, limited to one sensor on index 1 or 2, reading packet slot 0. Fully useful today: it gives live plots and CSV traces of real sequences, which is the raw material for choosing the tolerance and ramp-up values that draw protection will need.
+**Any firmware change belongs in Phase 1.** The firmware defines the contract the software is written against, so deferring a protocol change to a later phase means building the software twice — once against the interim packet layout and again after it moves. Phase 1 therefore either includes the firmware work or establishes that none is needed. It established the latter: the reading was already being transmitted, so Phase 1 shipped with zero firmware changes and the contract is settled. There is no firmware phase after this.
 
-**Phase 2 — firmware.** Sensor array following the existing `SSCX_QTY`/`SSCX_MAX` and `SELECTORVALVE_QTY`/`SELECTORVALVE_MAX` pattern; index maps to `Wire1`/`Wire2`; transmit loop fills bytes 23–24 and 25–26. **The packet stays 30 bytes** — two sensors fit the slots that already exist, so `MCU_MSG_LENGTH` is unchanged and there is no protocol bump. Also folds in the read consolidation (single read per cycle into globals, so the averaging window is consistent), CRC-failure sentinel substitution, and the `SLF3X_SMOOTHING_ON` bit fix (`_defs.h:45` has `1 << 4`; datasheet Table 9 says bit 5). Optionally transmits the flags word, which would need new bytes and *would* be a protocol bump — deferred, and only worth it if above-range detection proves necessary.
+**Phase 1 — the driver. Complete.** One sensor on index 1 or 2, read from packet slot 0. No reflash, because the Teensy already streamed the reading in bytes 23–24 and nothing consumed it.
 
-Phase 2's read consolidation retargets `:133` and `:294`, which feed the bang-bang and PID loops for the Open Chamber disc pump. Mechanical, but live control code — it needs a hardware smoke test on both applications.
+Phase 1 is done when, with a sensor connected and declared in config, you can:
 
-## Next: MERFISH operations
+- open the GUI and see a **Flow Sensors** tab with a live µL/min readout updating as flow changes
+- watch that reading plotted against a rolling time window, with the window and refresh rate adjustable
+- hit **Start Recording** and get a CSV containing every sample at the sensor's full 60 ms cadence, not the plot's refresh rate
+- see an absent or failed sensor read as `invalid` and a plot gap, rather than a plausible-looking 3276.7 µL/min
 
-Draw protection is designed separately, since a sensor's role belongs to the operation that uses it. Carried forward from this discussion:
+Those traces are also the raw material for choosing Phase 2's tolerance and ramp-up values, which is why this phase comes first: you cannot pick a sensible fault threshold without first seeing what normal looks like on real hardware.
+
+**Phase 2 — MERFISH draw protection. Software only.** The motivating requirement: stop a syringe draw when measured flow is wrong. Everything it needs already exists — one sensor, its readings, and the per-sensor tuning fields in config. Detailed in the next section.
+
+### Firmware work that is deliberately not part of this
+
+Two capabilities would require touching the firmware. Neither is needed for draw protection on a single sensor, so both are out of scope here rather than queued as a later phase. If either is ever wanted, it is its own piece of work with its own design — not a continuation of this one.
+
+**A second sensor** would need a sensor array following the existing `SSCX_QTY`/`SSCX_MAX` and `SELECTORVALVE_QTY`/`SELECTORVALVE_MAX` pattern, index mapping to `Wire1`/`Wire2`, and a transmit loop filling bytes 23–24 and 25–26. The packet would stay 30 bytes, since two slots already exist. Note it would change the index-to-slot mapping: today a sensor on any bus reports into bytes 23–24, whereas a mapping of `index - 1` moves an index-2 sensor to bytes 25–26, invisible to software built before the change.
+
+**Above-range detection** would need the signaling flags transmitted, which needs new bytes and a genuine protocol bump. It is the only way to tell "genuinely flowing fast" from "broken" above the sensor's 3250 µL/min limit, where the sample sequences at 5000–10000 µL/min sit. Until then those draws simply run unmonitored, which Phase 2 handles by not arming.
+
+Either change should also fold in the fixes found while reading the firmware: read consolidation (a single read per cycle, so the averaging window is consistent), CRC-failure sentinel substitution, and the `SLF3X_SMOOTHING_ON` bit (`_defs.h:45` has `1 << 4`; datasheet Table 9 says bit 5). The read consolidation retargets `:133` and `:294`, which feed the bang-bang and PID loops for the Open Chamber disc pump — mechanical, but live control code, and it would need a hardware smoke test on both applications.
+
+## Phase 2 detail: MERFISH draw protection
+
+Designed separately from the driver because a sensor's role belongs to the operation that uses it, not to the device. Carried forward from this discussion:
 
 **A `FlowMonitor` holding the fault rule** as a pure function of `(flow, timestamp)` samples — no controller, no thread, no clock — so it is unit-testable in isolation. Armed around a draw, probably as a context manager wrapping `sp.execute()`. The rule as sketched so far:
 
