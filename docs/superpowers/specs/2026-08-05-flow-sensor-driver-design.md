@@ -27,9 +27,13 @@ Established by reading `firmware/SLF3X.{h,cpp}`, `firmware/controller_teensy41.i
 
 **Sentinel and saturation do not collide.** The datasheet gives the sensor output limit as **±3250 µL/min** (raw ±32500) and full scale as **±2000 µL/min**. The sentinel is 32767. They are 267 counts apart, so "saturated" and "no reading" are distinguishable.
 
-**Monitoring cannot work at current sequence flow rates.** `sample_sequences/merfish-experiment.yaml` runs `flow_reagent` at 5000 µL/min and `clean_up` at 10000 µL/min — far above the 3250 µL/min output limit. Above that the reading is meaningless, so the monitor skips the check and warns rather than producing false faults.
+**Real MERFISH runs sit well inside the sensor's range.** Production sequences run at **500 µL/min**, comfortably under the 3250 µL/min output limit and under the 2000 µL/min full-scale figure — so draws are monitorable in practice. Note 500 µL/min is speed code 40, the slowest a 5000 µL syringe reaches, and `get_flow_rate(40)` returns exactly 500, so requested and actual coincide with no rounding.
 
-**Expected rate must come from the speed code, not the sequence.** `flow_rate_to_speed_code()` snaps the requested rate to a discrete code, and `get_flow_rate()` returns **mL/min** (see the `"{rate} mL/min"` label at `gui.py:614`) while sequence `flow_rate` is **µL/min**. The monitor compares against `sp.get_flow_rate(speed_code) * 1000`.
+The rates in `sample_sequences/merfish-experiment.yaml` (5000 and 10000 µL/min) are test values, not representative. They do exceed the sensor's range, which is why the fault rule still needs an out-of-range skip — but that path is the exception, not the normal case.
+
+**Expected rate must come from the speed code, not the sequence.** `flow_rate_to_speed_code()` snaps the requested rate to a discrete code, so the pump's actual rate can differ from what the sequence asked for. The monitor compares against `sp.get_flow_rate(speed_code)`.
+
+That function used to return mL/min while its own inverse took µL/min — a silent factor of 1000 sitting exactly where draw protection would compare measured against expected. Fixed in Phase 1: the pump API is µL/min throughout and the two round-trip, with a test asserting it for all 41 speed codes.
 
 **`do_crc` currently does nothing.** On CRC failure `SLF3X::read()` sets bits in its *return value*, but `readings[]` already holds the corrupted data (written at `SLF3X.cpp:207-213`, before the check at `:219-225`), and both call sites — `controller_teensy41.ino:132` and `:486` — discard the return value. `PERFORM_CRC` in `_defs.h:37` is defined and never referenced.
 
@@ -228,7 +232,7 @@ Designed separately from the driver because a sensor's role belongs to the opera
 
 **A `FlowMonitor` holding the fault rule** as a pure function of `(flow, timestamp)` samples — no controller, no thread, no clock — so it is unit-testable in isolation. Armed around a draw, probably as a context manager wrapping `sp.execute()`. The rule as sketched so far:
 
-- **Out of range** — if the expected rate exceeds the sensor's `max_flow_rate_ul_min`, do not arm; log a warning naming the operation and rate. At the default of 2000 µL/min this means the 5000 and 10000 µL/min steps in the current sample sequences run unmonitored.
+- **Out of range** — if the expected rate exceeds the sensor's `max_flow_rate_ul_min`, do not arm; log a warning naming the operation and rate. At the 500 µL/min production rate this never fires; it exists for the fast steps in the sample sequences and for any future protocol that runs above full scale.
 - **Ramp-up** — for `ramp_up_seconds` after arming, accumulate samples but never fault.
 - **Fault** — after ramp-up, `abs(measured)` outside `expected × (1 ± tolerance_fraction)` for 3 consecutive samples (≈180 ms at the 60 ms cadence).
 - **Invalid** — sentinel samples count toward a fault once past ramp-up; a sensor that died mid-draw means nothing can be verified.
@@ -245,9 +249,17 @@ Comparison uses magnitude, so sensor orientation in the line does not matter. `d
 
 `warn` exists because tolerance and ramp-up have to be tuned against real hardware before enforcement can be trusted, and reading a log beats eyeballing a chart.
 
-**Expected rate comes from the speed code,** not the sequence: `sp.get_flow_rate(speed_code) * 1000`, per the units finding above.
+**The mode is switchable from the GUI, per sensor, at runtime.** Config supplies the startup value; the Flow Sensors tab lets an operator move a sensor between `off`, `warn` and `stop` without editing YAML and restarting. That is what makes the tuning loop practical — record with `off`, switch to `warn` and watch what would have fired, then move to `stop` for real runs, all in one session against the same rig.
+
+Two consequences for the design. The mode has to live somewhere mutable and be read per draw rather than captured once at construction, so arming consults the current value. And the switch is session-only: it does not write back to config, so a restart returns to the declared value — which keeps the config file the source of truth for what an unattended run does.
+
+**Expected rate comes from the speed code,** not the sequence: `sp.get_flow_rate(speed_code)`, now in µL/min like everything else.
 
 **A non-latching pump stop is required.** `sp.abort()` latches `is_aborted` until `reset_abort()`, and `flow_reagent` checks `if self.sp.is_aborted: return` after each `execute()` — so reusing the abort path would make a flow fault **silently return** rather than raise. The pump needs a `stop()` that terminates the current chain and lets `wait_for_stop()` exit without latching, so the fault surfaces as an `OperationError` with a real diagnostic.
+
+Deliberately *not* a change to `abort()` itself. The two mean different things — abort is "the operator cancelled the experiment", stop is "halt this chain, an error is being raised" — and the latching behaviour is correct for the first. The `abort` pattern is also a codebase-wide convention (`abort()` / `reset_abort()` / `is_aborted` across every hardware class), so reworking it would reach far outside draw protection. Adding `stop()` alongside is the narrower change; whether `abort` wants revisiting on its own merits is a separate discussion, deferred until after Phase 2 lands.
+
+**Stop latency is accepted at ~0.5 s.** `wait_for_stop()` polls on a 0.5 s interval, so a fault raised on the reader thread takes up to that long to break the blocking `execute()` — roughly 17 µL of continued draw at 2000 µL/min, and about 4 µL at the 500 µL/min production rate. Confirmed acceptable, so the poll interval stays as it is. `terminateCmd()` still halts the plunger immediately; only the unblocking is bounded by the poll.
 
 **Open question:** which operations to guard — `flow_reagent` alone, or `priming_or_clean_up` too, where air in the lines is expected and false positives are likely. Also whether an operation arms every sensor whose `monitor` is not `off`, or names the specific sensor it depends on.
 
