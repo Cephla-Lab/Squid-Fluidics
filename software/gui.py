@@ -614,7 +614,9 @@ class ManualControlWidget(QWidget):
         speed_code_limit = self.config.syringe_pump.speed_code_limit
         for code in range(speed_code_limit, len(self.syringePump.SPEED_SEC_MAPPING)):
             rate = self.syringePump.get_flow_rate(code)
-            self.speedCombo.addItem(f"{rate} mL/min", code)
+            # uL/min, matching what sequences are written in -- picking a speed
+            # here and typing a flow_rate into a sequence now use one scale.
+            self.speedCombo.addItem(f"{rate:,.0f} µL/min", code)
         self.speedCombo.setCurrentIndex(40 - self.config.syringe_pump.speed_code_limit)  # Set default to code 40
         leftLayout.addWidget(QLabel("Speed:"), 1, 0)
         leftLayout.addWidget(self.speedCombo, 1, 1)

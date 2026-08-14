@@ -65,7 +65,7 @@ class TestFlowRateToSpeedCode:
 
         flow_rate_to_speed_code computes target_time = volume * 60 / rate and
         compares directly against SPEED_SEC_MAPPING, so we derive rates from
-        that formula (without the *1000 used in get_flow_rate).
+        that formula, which get_flow_rate now inverts exactly.
         """
         pump_sim.speed_code_limit = 0
         mapping = SyringePump.SPEED_SEC_MAPPING
@@ -78,20 +78,27 @@ class TestFlowRateToSpeedCode:
 
 class TestGetFlowRate:
     def test_known_values(self):
-        """get_flow_rate returns volume * 60 / (mapping[code] * 1000)."""
+        """get_flow_rate returns volume * 60 / mapping[code], in uL/min."""
         p = SyringePumpSimulation(sn=None, syringe_ul=5000, speed_code_limit=10, waste_port=1)
-        # speed code 0 -> 1.25 sec -> 5000*60/(1.25*1000) = 240.0
-        assert p.get_flow_rate(0) == 240.0
-        # speed code 40 -> 600.0 sec -> 5000*60/(600*1000) = 0.5
-        assert p.get_flow_rate(40) == 0.5
+        # speed code 0 -> 1.25 sec -> 5000*60/1.25 = 240000 uL/min
+        assert p.get_flow_rate(0) == 240000.0
+        # speed code 40 -> 600.0 sec -> 5000*60/600 = 500 uL/min,
+        # which is the rate MERFISH runs at.
+        assert p.get_flow_rate(40) == 500.0
+
+    def test_get_flow_rate_inverts_flow_rate_to_speed_code(self):
+        """The two are now on one scale, so they round-trip.
+
+        Before this they differed by 1000x -- get_flow_rate in mL/min,
+        flow_rate_to_speed_code in uL/min -- which is exactly the trap draw
+        protection would have hit when comparing measured against expected.
+        """
+        p = _make_sim_with_real_speed_code(speed_code_limit=0)
+        for code in range(41):
+            assert p.flow_rate_to_speed_code(p.get_flow_rate(code)) == code
 
     def test_flow_rate_to_speed_code_round_trips(self):
-        """flow_rate_to_speed_code round-trips when given rates in its own units.
-
-        Note: get_flow_rate and flow_rate_to_speed_code use different unit
-        conventions (get_flow_rate divides by 1000 extra), so we test
-        flow_rate_to_speed_code's self-consistency separately.
-        """
+        """flow_rate_to_speed_code round-trips against the mapping directly."""
         p = _make_sim_with_real_speed_code(speed_code_limit=0)
         mapping = SyringePump.SPEED_SEC_MAPPING
         for code in range(41):

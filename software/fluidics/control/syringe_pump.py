@@ -120,7 +120,14 @@ class SyringePump:
             time.sleep(0.5)
 
     def get_flow_rate(self, speed_code):
-        return round(self.volume * 60 / (self.SPEED_SEC_MAPPING[speed_code] * 1000), 2)
+        """Flow rate for a speed code, in uL/min.
+
+        uL/min throughout: it is what sequences are written in, what
+        flow_rate_to_speed_code takes, and what the flow sensor reports. This
+        used to return mL/min, which made it the only function in the pump API
+        on a different scale from its own inverse.
+        """
+        return round(self.volume * 60 / self.SPEED_SEC_MAPPING[speed_code], 2)
 
     def flow_rate_to_speed_code(self, target_flow_rate):
         """
@@ -229,7 +236,14 @@ class SyringePumpSimulation():
         return
 
     def get_flow_rate(self, speed_code):
-        return round(self.volume * 60 / (self.SPEED_SEC_MAPPING[speed_code] * 1000), 2)
+        """Flow rate for a speed code, in uL/min.
+
+        uL/min throughout: it is what sequences are written in, what
+        flow_rate_to_speed_code takes, and what the flow sensor reports. This
+        used to return mL/min, which made it the only function in the pump API
+        on a different scale from its own inverse.
+        """
+        return round(self.volume * 60 / self.SPEED_SEC_MAPPING[speed_code], 2)
 
     def flow_rate_to_speed_code(self, target_flow_rate):
         return 20
