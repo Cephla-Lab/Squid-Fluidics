@@ -1,6 +1,9 @@
 # tests/unit/control/test_flow_sensor.py
+from types import SimpleNamespace
+
 import pytest
 
+from fluidics.control.config import FlowSensorConfig
 from fluidics.control.controller import FluidController, PacketSubscribers
 from fluidics.control.flow_sensor import (
     FlowSensor, FlowSensorSimulation, INVALID_RAW, start_flow_sensors)
@@ -239,20 +242,12 @@ class TestStartFlowSensors:
     closing leaves live handlers with nothing holding a reference to them.
     """
 
-    class Config:
-        def __init__(self, entries):
-            self.flow_sensors = entries
-
-    class Entry:
-        def __init__(self, index, name):
-            self.index = index
-            self.name = name
-            self.monitor = "off"
-            self.ramp_up_seconds = 3.0
-            self.tolerance_fraction = 0.3
-
     def _config(self, count):
-        return self.Config([self.Entry(i + 1, f"s{i + 1}") for i in range(count)])
+        """The real config model, so a field added to FlowSensorConfig and to
+        the build_flow_sensors call cannot quietly stop being covered here."""
+        return SimpleNamespace(flow_sensors=[
+            FlowSensorConfig(index=i + 1, name=f"s{i + 1}") for i in range(count)
+        ])
 
     def test_all_sensors_are_initialized_and_subscribed(self):
         fc = FakeController()
@@ -288,4 +283,4 @@ class TestStartFlowSensors:
 
     def test_no_sensors_configured_returns_nothing(self):
         fc = FakeController()
-        assert start_flow_sensors(fc, self.Config(None)) == []
+        assert start_flow_sensors(fc, SimpleNamespace(flow_sensors=None)) == []

@@ -1153,7 +1153,7 @@ class FlowSensorWidget(TimeSeriesPlotWidget):
         # the next value costs a whole run.
         self.monitor_combo = QComboBox()
         self.monitor_combo.addItems(["off", "warn", "stop"])
-        self.monitor_combo.setCurrentText(getattr(self.sensor, "monitor", "off"))
+        self.monitor_combo.setCurrentText(self.sensor.monitor)
         self.monitor_combo.setToolTip(
             "off: plot only.\n"
             "warn: log a flow fault and carry on.\n"

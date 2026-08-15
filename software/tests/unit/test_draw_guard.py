@@ -53,17 +53,23 @@ def guard_for(*sensors, pump=None, expected=500.0, log=None):
                      log=(log if log is not None else lambda m: None))
 
 
-def _feed(sensor, flows, step=0.06):
+def _drive(emit, flows, step=0.06):
+    """Push readings at the 60 ms packet cadence.
+
+    `emit` is either a sensor's fan-out or a bare handler -- the late-sample
+    tests call one directly, the way notify's snapshot does after unsubscribe.
+    """
     started = time.time()
     for i, flow in enumerate(flows):
-        sensor.feed(flow, started + (i + 1) * step)
+        emit(flow, started + (i + 1) * step)
 
 
-def _replay(handler, flows, step=0.06):
-    """Call a handler directly, as notify's snapshot would after unsubscribe."""
-    started = time.time()
-    for i, flow in enumerate(flows):
-        handler(flow, started + (i + 1) * step)
+def _feed(sensor, flows):
+    _drive(sensor.feed, flows)
+
+
+def _replay(handler, flows):
+    _drive(handler, flows)
 
 
 def draw(guard, sensor, flows):

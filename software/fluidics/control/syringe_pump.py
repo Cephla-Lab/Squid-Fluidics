@@ -1,7 +1,88 @@
 import fluidics.control.tecancavro as tecancavro
 import threading
-import time
 from serial.tools import list_ports
+
+
+class Interruptible:
+    """Halting a move that is already running, shared by both pump classes.
+
+    Two ways to interrupt, differing only in whether they latch:
+
+      abort()  the operator cancelled. Latches until reset_abort(), so every
+               later operation returns early.
+      stop()   a fault the caller is about to raise on -- a flow fault, say.
+               Does not latch: the run is being failed by whoever called it,
+               and callers read is_aborted to mean "the operator cancelled",
+               so latching here would report a hardware problem as a user
+               action and silently disable the rest of the run.
+
+    Shared rather than written twice because the simulation is where these
+    semantics get tested -- the real pump needs hardware. Two copies would put
+    the tested one and the shipped one out of reach of each other, which is
+    exactly how the sleep-through-abort bug survived 230 passing tests.
+
+    Subclasses supply the two hardware-shaped pieces: _terminate() to halt the
+    plunger, and _move_finished() to say whether it has stopped.
+    """
+
+    def _init_interrupt(self):
+        self.is_busy = False
+        self.is_aborted = False
+        self._interrupt = threading.Event()
+
+    # --- what a real pump does and a simulated one cannot ---
+
+    def _terminate(self):
+        """Halt the plunger. Nothing to halt in simulation."""
+
+    def _move_finished(self):
+        """Whether the move has ended. A simulated move ends when its
+        estimated duration does, so there is nothing further to wait for."""
+        return True
+
+    # --- interruption ---
+
+    def abort(self):
+        self._terminate()
+        self.is_aborted = True
+        self._interrupt.set()
+
+    def reset_abort(self):
+        self.is_aborted = False
+        self._interrupt.clear()
+
+    def stop(self):
+        self._terminate()
+        self._interrupt.set()
+
+    def _arm(self):
+        """Clear any stale interrupt and report whether a chain may run.
+
+        Clearing before reading is_aborted, and abort() setting the flag before
+        the event, is what makes an abort landing anywhere around here still
+        count: either the flag is already true and the caller returns, or the
+        event is set afterwards and wait_for_stop wakes on it.
+        """
+        self._interrupt.clear()
+        return not self.is_aborted
+
+    def wait_for_stop(self, t=0):
+        """Block until the move finishes, or until abort()/stop() interrupts.
+
+        t is the pump's estimate of how long the whole chain will take, which
+        for a 2000 uL draw at 500 uL/min is about 240 s. This used to be
+        time.sleep(t) -- an uninterruptible sleep for the entire move, so an
+        interrupt halted the plunger immediately but the caller stayed asleep
+        and the run did not unwind until the estimate elapsed. Waiting on the
+        event returns the moment either arrives; _move_finished() stays the
+        authoritative end-of-move signal, with the estimate only gating when we
+        start asking.
+        """
+        interrupted = self._interrupt.wait(t)
+        while not interrupted and not self._move_finished():
+            interrupted = self._interrupt.wait(0.5)
+        self.is_busy = False
+
 
 class SpeedCodes:
     """The speed-code mapping and the conversions either way.
@@ -69,7 +150,7 @@ class SpeedCodes:
         return left
 
 
-class SyringePump(SpeedCodes):
+class SyringePump(SpeedCodes, Interruptible):
     def __init__(self, sn, syringe_ul, speed_code_limit, waste_port, num_ports=4, slope=14, debug=False):
         if sn is not None:
             for d in list_ports.comports():
@@ -92,13 +173,7 @@ class SyringePump(SpeedCodes):
         self.chained_volume = 0
 
         self.get_plunger_position()
-
-        self.is_busy = False
-        self.is_aborted = False
-        # Set by abort() and by stop(). wait_for_stop waits on it instead of
-        # sleeping, so an interruption is noticed the moment it arrives rather
-        # than whenever the estimated move duration happens to elapse.
-        self._interrupt = threading.Event()
+        self._init_interrupt()
 
         print("Syringe pump initialized.")
 
@@ -124,12 +199,7 @@ class SyringePump(SpeedCodes):
         self.chained_volume = 0
 
     def execute(self, block_pump=False):
-        # Clear before reading is_aborted, and abort() sets the flag before the
-        # event: between them, an abort landing anywhere around here is still
-        # seen -- either the flag is already true and we return, or the event
-        # is set afterwards and wait_for_stop wakes on it.
-        self._interrupt.clear()
-        if self.is_aborted:
+        if not self._arm():
             return
         self.is_busy = True
         t = self.syringe.executeChain(minimal_reset=True)
@@ -171,48 +241,11 @@ class SyringePump(SpeedCodes):
         self.chained_volume = 0
         return self.get_time_to_finish()
 
-    def abort(self):
-        """Operator cancellation. Latches until reset_abort()."""
+    def _terminate(self):
         self.syringe.terminateCmd()
-        self.is_aborted = True
-        self._interrupt.set()
 
-    def reset_abort(self):
-        self.is_aborted = False
-        self._interrupt.clear()
-
-    def stop(self):
-        """Halt the current chain without latching.
-
-        For a fault the caller is about to raise on -- a flow fault, say --
-        where abort() would be wrong twice over: it latches, so every later
-        operation would silently return, and callers read is_aborted to mean
-        "the operator cancelled", which would report a hardware problem as a
-        user action.
-        """
-        self.syringe.terminateCmd()
-        self._interrupt.set()
-
-    def wait_for_stop(self, t=0):
-        """Block until the move finishes, or until abort()/stop() interrupts.
-
-        t is the pump's estimate of how long the whole chain will take, which
-        for a 2000 uL draw at 500 uL/min is about 240 s. This used to be
-        time.sleep(t) -- an uninterruptible sleep for the entire move, so an
-        abort halted the plunger immediately but the caller stayed asleep and
-        the run did not unwind until the estimate elapsed. Waiting on the
-        event instead returns the moment either arrives.
-        """
-        if self._interrupt.wait(t):
-            self.is_busy = False
-            return
-        while True:
-            if self.syringe._checkReady():
-                self.is_busy = False
-                break
-            if self._interrupt.wait(0.5):
-                self.is_busy = False
-                return
+    def _move_finished(self):
+        return self.syringe._checkReady()
 
     def close(self, to_waste=False):
         if to_waste:
@@ -220,18 +253,13 @@ class SyringePump(SpeedCodes):
             self.execute()
         del self.com_link
 
-class SyringePumpSimulation(SpeedCodes):
+class SyringePumpSimulation(SpeedCodes, Interruptible):
     def __init__(self, sn, syringe_ul, speed_code_limit, waste_port, num_ports=4, slope=14):
         self.syringe = None
         self.volume = syringe_ul
         self.speed_code_limit = speed_code_limit
         self.range = 3000
-        self.is_busy = False
-        self.is_aborted = False
-        # The real pump's interrupt, mirrored. Without this the simulation
-        # ignored abort entirely, so no test could exercise an interrupted
-        # operation -- which is why the sleep-through-abort bug went unseen.
-        self._interrupt = threading.Event()
+        self._init_interrupt()
         self.get_plunger_position()
         print("Simulated syringe pump.")
 
@@ -255,8 +283,7 @@ class SyringePumpSimulation(SpeedCodes):
         pass
 
     def execute(self, block_pump=False):
-        self._interrupt.clear()
-        if self.is_aborted:
+        if not self._arm():
             return
         self.is_busy = True
         self.wait_for_stop(5)
@@ -272,22 +299,6 @@ class SyringePumpSimulation(SpeedCodes):
 
     def dispense_to_waste(self, speed_code=None):
         return 5
-
-    def abort(self):
-        self.is_aborted = True
-        self._interrupt.set()
-
-    def reset_abort(self):
-        self.is_aborted = False
-        self._interrupt.clear()
-
-    def stop(self):
-        self._interrupt.set()
-
-    def wait_for_stop(self, t=0):
-        self._interrupt.wait(t)
-        self.is_busy = False
-        return
 
     def close(self, to_waste=False):
         pass

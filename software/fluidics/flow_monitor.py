@@ -16,6 +16,21 @@ import time
 from .experiment_worker import OperationError
 
 
+def band(expected_ul_min, tolerance_fraction):
+    """The healthy range around an expected rate, as (low, high).
+
+    One definition, used by both the rule and the message it produces --
+    they had drifted apart already, one applying abs() and one not.
+
+    Magnitude, not sign: the sensor reads negative or positive during a draw
+    depending on which way round it sits in the line, and which way that is
+    should not change the rule.
+    """
+    magnitude = abs(expected_ul_min)
+    return (magnitude * (1 - tolerance_fraction),
+            magnitude * (1 + tolerance_fraction))
+
+
 class FlowFault(OperationError):
     """Measured flow left its expected band for long enough to count.
 
@@ -32,8 +47,7 @@ class FlowFault(OperationError):
         self.out_of_band_seconds = out_of_band_seconds
         self.consecutive_samples = consecutive_samples
 
-        low = expected_ul_min * (1 - tolerance_fraction)
-        high = expected_ul_min * (1 + tolerance_fraction)
+        low, high = band(expected_ul_min, tolerance_fraction)
         measured = ("no reading" if measured_ul_min is None
                     else f"{measured_ul_min:.0f} µL/min")
         super().__init__(
@@ -62,28 +76,21 @@ class FlowMonitor:
         self.tolerance_fraction = tolerance_fraction
         self.debounce_samples = debounce_samples
 
+        # Fixed for the life of the monitor, so computed once rather than on
+        # every sample -- and so the band reads as the invariant it is.
+        self.low_ul_min, self.high_ul_min = band(expected_ul_min,
+                                                 tolerance_fraction)
+
         self._started_at = None
         self._out_of_band_since = None
         self._consecutive = 0
 
-    # --- the band ---
-
-    @property
-    def low_ul_min(self):
-        return abs(self.expected_ul_min) * (1 - self.tolerance_fraction)
-
-    @property
-    def high_ul_min(self):
-        return abs(self.expected_ul_min) * (1 + self.tolerance_fraction)
-
     def in_band(self, flow):
         """Whether a reading counts as healthy.
 
-        Magnitude, not sign: the sensor reports negative during a draw or
-        positive depending on which way round it sits in the line, and which
-        way that is should not change the rule. An invalid reading (None) is
-        never in band -- a sensor that stopped reporting mid-draw means
-        nothing can be verified, which is not the same as being fine.
+        An invalid reading (None) is never in band -- a sensor that stopped
+        reporting mid-draw means nothing can be verified, which is not the same
+        as being fine.
         """
         if flow is None:
             return False
@@ -149,13 +156,11 @@ class DrawGuard:
     """
 
     def __init__(self, sensors, expected_ul_min, stop_pump, log=print):
+        self.sensors = sensors
         self.expected_ul_min = expected_ul_min
         self.stop_pump = stop_pump
         self.log = log
 
-        # `monitor` is read once, here, so a mid-draw flip from the GUI cannot
-        # change the rules underneath a draw already running.
-        self._sensors = [s for s in sensors if getattr(s, "monitor", "off") != "off"]
         self._handlers = []
         self._lock = threading.Lock()
         self._fault = None
@@ -173,15 +178,20 @@ class DrawGuard:
         started_at = time.time()
         with self._lock:
             self._active = True
-        for sensor in self._sensors:
-            monitor = FlowMonitor(
+        for sensor in self.sensors:
+            # Read once, here, so a mid-draw flip from the GUI cannot change
+            # the rules underneath a draw already running.
+            mode = sensor.monitor
+            if mode == "off":
+                continue
+            rule = FlowMonitor(
                 sensor.name,
                 expected_ul_min=self.expected_ul_min,
                 ramp_up_seconds=sensor.ramp_up_seconds,
                 tolerance_fraction=sensor.tolerance_fraction,
             )
-            monitor.start(started_at)
-            handler = self._make_handler(sensor, monitor)
+            rule.start(started_at)
+            handler = self._make_handler(mode, rule)
             self._handlers.append((sensor, handler))
             sensor.subscribe(handler)
         return self
@@ -211,25 +221,29 @@ class DrawGuard:
         if fault is not None:
             raise fault
 
-    def _make_handler(self, sensor, monitor):
+    def _make_handler(self, mode, rule):
         """One closure per sensor, holding its own rule and mode."""
-        stop = (sensor.monitor == "stop")
-        warned = []
+        stop = (mode == "stop")
+        done = False
 
         def handle(flow, timestamp):
-            fault = monitor.sample(flow, timestamp)
-            if fault is None:
+            nonlocal done
+            # The rule keeps faulting on every sample once it has tripped, and
+            # this handler has nothing more to say after the first: warn has
+            # logged, and stop has either claimed the draw or lost it. Bailing
+            # here rather than re-deriving a fault to discard also keeps the
+            # reader thread's per-packet work flat for the rest of the draw.
+            if done:
                 return
 
+            fault = rule.sample(flow, timestamp)
+            if fault is None:
+                return
+            done = True
+
             if not stop:
-                # warn: report once per draw and stay out of the way. The rule
-                # keeps faulting on every sample once it has tripped, so
-                # logging each one would bury the rest of the run log.
-                with self._lock:
-                    if not self._active or warned:
-                        return
-                    warned.append(True)
-                self.log(f"WARNING: {fault}")
+                if self._still_running():
+                    self.log(f"WARNING: {fault}")
                 return
 
             if not self._claim(fault):
@@ -245,6 +259,12 @@ class DrawGuard:
                 self.log(f"Failed to stop the pump after a flow fault: {e}")
 
         return handle
+
+    def _still_running(self):
+        """Whether the draw is still ours to speak for. False once __exit__ has
+        disarmed -- see the note there on late samples."""
+        with self._lock:
+            return self._active
 
     def _claim(self, fault):
         """Record `fault` if the draw is still running and nothing has faulted

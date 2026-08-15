@@ -15,17 +15,28 @@ class MERFISHOperations():
         self.extract_port = self.config.syringe_pump.extract_port
         self.speed_code_limit = self.config.syringe_pump.speed_code_limit
 
-    def _guarded_draw(self, speed_code):
-        """Watch the flow sensors while a draw at `speed_code` runs.
+    def _guarded_execute(self, speed_code):
+        """Run the queued chain with the flow sensors watching it.
+
+        The whole protocol lives here rather than at the call sites, because
+        the last step is the forgettable one: a draw that arms and executes but
+        never raises would stop the pump on a fault, unwind cleanly, leave
+        is_aborted False, and return -- and the operation would carry on to its
+        next step as though the draw had succeeded.
 
         The expectation is the pump's actual rate for the code, not the rate
         the sequence asked for: flow_rate_to_speed_code quantizes to the 41
         available codes, so a sequence asking for 480 uL/min gets 500, and
         measuring against 480 would bias the whole band by the rounding.
         """
-        return DrawGuard(self.flow_sensors,
-                         expected_ul_min=self.sp.get_flow_rate(speed_code),
-                         stop_pump=self.sp.stop)
+        guard = DrawGuard(self.flow_sensors,
+                          expected_ul_min=self.sp.get_flow_rate(speed_code),
+                          stop_pump=self.sp.stop)
+        with guard:
+            self.sp.execute()
+            # Raised here, on the sequence thread: the fault is recorded by the
+            # reader thread, which cannot unwind this operation.
+            guard.raise_if_faulted()
 
     def process_sequence(self, sequence):
         print(sequence)
@@ -74,9 +85,7 @@ class MERFISHOperations():
             self.sp.extract(self.extract_port, volume, speed_code)
             if self.sp.is_aborted:
                 return
-            with self._guarded_draw(speed_code) as guard:
-                self.sp.execute()
-                guard.raise_if_faulted()
+            self._guarded_execute(speed_code)
             if self.sp.is_aborted:
                 return
             if fill_tubing_with_port:
@@ -85,9 +94,7 @@ class MERFISHOperations():
                 self.sp.extract(self.extract_port, self.sv.get_tubing_fluid_amount_to_valve(fill_tubing_with_port), speed_code)
                 if self.sp.is_aborted:
                     return
-                with self._guarded_draw(speed_code) as guard:
-                    self.sp.execute()
-                    guard.raise_if_faulted()
+                self._guarded_execute(speed_code)
 
         except FlowFault:
             # Already an OperationError, and it carries the sensor, the band and

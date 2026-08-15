@@ -14,7 +14,7 @@ import time
 
 import pytest
 
-from fluidics.control.syringe_pump import SyringePumpSimulation
+from fluidics.control.syringe_pump import SyringePump, SyringePumpSimulation
 
 
 # Captured at import, before conftest's autouse fixture patches them.
@@ -32,6 +32,71 @@ def real_clock(monkeypatch):
 def _pump():
     return SyringePumpSimulation(sn=None, syringe_ul=5000,
                                  speed_code_limit=10, waste_port=1)
+
+
+class FakeSyringe:
+    """The two calls Interruptible makes into the Tecan driver."""
+
+    def __init__(self, ready=True):
+        self.terminated = 0
+        self.ready = ready
+
+    def terminateCmd(self):
+        self.terminated += 1
+
+    def _checkReady(self):
+        return self.ready
+
+
+def _real_pump(ready=True):
+    """A real SyringePump with the hardware left out of its __init__.
+
+    The interrupt logic lives in Interruptible, shared with the simulation, so
+    the only thing left to check on this side is that the two hooks are wired
+    to the driver. Without this the shipped path had no test at all -- which is
+    how the sleep-through-abort bug survived.
+    """
+    pump = SyringePump.__new__(SyringePump)
+    pump.syringe = FakeSyringe(ready=ready)
+    pump._init_interrupt()
+    return pump
+
+
+class TestTheRealPumpsHooks:
+    def test_stop_halts_the_plunger(self):
+        pump = _real_pump()
+        pump.stop()
+        assert pump.syringe.terminated == 1
+
+    def test_abort_halts_the_plunger(self):
+        pump = _real_pump()
+        pump.abort()
+        assert pump.syringe.terminated == 1
+
+    def test_the_plunger_is_halted_before_the_waiter_is_woken(self):
+        """Both run on the interrupting thread while the sequence thread waits.
+        Waking first would let the sequence thread resume into get_plunger_position
+        -- a second serial round trip -- while terminateCmd is still in flight on
+        the same port."""
+        pump = _real_pump()
+        order = []
+        pump.syringe.terminateCmd = lambda: order.append("terminate")
+        pump._interrupt.set = lambda: order.append("wake")
+        pump.stop()
+        assert order == ["terminate", "wake"]
+
+    def test_the_wait_ends_when_the_driver_reports_ready(self):
+        pump = _real_pump(ready=True)
+        pump.wait_for_stop(0)
+        assert pump.is_busy is False
+
+    def test_the_wait_keeps_polling_while_the_driver_is_not_ready(self, real_clock):
+        """_checkReady, not the estimate, is what ends the move."""
+        pump = _real_pump(ready=False)
+        threading.Timer(0.05, pump.stop).start()
+        started = time.monotonic()
+        pump.wait_for_stop(0)
+        assert time.monotonic() - started >= 0.04
 
 
 def _ran_the_chain(pump):
