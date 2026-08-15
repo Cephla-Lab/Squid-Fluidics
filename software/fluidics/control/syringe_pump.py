@@ -1,4 +1,5 @@
 import fluidics.control.tecancavro as tecancavro
+import threading
 import time
 from serial.tools import list_ports
 
@@ -34,6 +35,10 @@ class SyringePump:
 
         self.is_busy = False
         self.is_aborted = False
+        # Set by abort() and by stop(). wait_for_stop waits on it instead of
+        # sleeping, so an interruption is noticed the moment it arrives rather
+        # than whenever the estimated move duration happens to elapse.
+        self._interrupt = threading.Event()
 
         print("Syringe pump initialized.")
 
@@ -59,6 +64,11 @@ class SyringePump:
         self.chained_volume = 0
 
     def execute(self, block_pump=False):
+        # Clear before reading is_aborted, and abort() sets the flag before the
+        # event: between them, an abort landing anywhere around here is still
+        # seen -- either the flag is already true and we return, or the event
+        # is set afterwards and wait_for_stop wakes on it.
+        self._interrupt.clear()
         if self.is_aborted:
             return
         self.is_busy = True
@@ -102,22 +112,47 @@ class SyringePump:
         return self.get_time_to_finish()
 
     def abort(self):
+        """Operator cancellation. Latches until reset_abort()."""
         self.syringe.terminateCmd()
         self.is_aborted = True
+        self._interrupt.set()
 
     def reset_abort(self):
         self.is_aborted = False
+        self._interrupt.clear()
+
+    def stop(self):
+        """Halt the current chain without latching.
+
+        For a fault the caller is about to raise on -- a flow fault, say --
+        where abort() would be wrong twice over: it latches, so every later
+        operation would silently return, and callers read is_aborted to mean
+        "the operator cancelled", which would report a hardware problem as a
+        user action.
+        """
+        self.syringe.terminateCmd()
+        self._interrupt.set()
 
     def wait_for_stop(self, t=0):
-        time.sleep(t)
+        """Block until the move finishes, or until abort()/stop() interrupts.
+
+        t is the pump's estimate of how long the whole chain will take, which
+        for a 2000 uL draw at 500 uL/min is about 240 s. This used to be
+        time.sleep(t) -- an uninterruptible sleep for the entire move, so an
+        abort halted the plunger immediately but the caller stayed asleep and
+        the run did not unwind until the estimate elapsed. Waiting on the
+        event instead returns the moment either arrives.
+        """
+        if self._interrupt.wait(t):
+            self.is_busy = False
+            return
         while True:
-            if self.is_aborted:
-                self.is_busy = False
-                return
             if self.syringe._checkReady():
                 self.is_busy = False
                 break
-            time.sleep(0.5)
+            if self._interrupt.wait(0.5):
+                self.is_busy = False
+                return
 
     def get_flow_rate(self, speed_code):
         """Flow rate for a speed code, in uL/min.
@@ -186,6 +221,10 @@ class SyringePumpSimulation():
         self.range = 3000
         self.is_busy = False
         self.is_aborted = False
+        # The real pump's interrupt, mirrored. Without this the simulation
+        # ignored abort entirely, so no test could exercise an interrupted
+        # operation -- which is why the sleep-through-abort bug went unseen.
+        self._interrupt = threading.Event()
         self.get_plunger_position()
         print("Simulated syringe pump.")
 
@@ -209,6 +248,9 @@ class SyringePumpSimulation():
         pass
 
     def execute(self, block_pump=False):
+        self._interrupt.clear()
+        if self.is_aborted:
+            return
         self.is_busy = True
         self.wait_for_stop(5)
 
@@ -226,12 +268,17 @@ class SyringePumpSimulation():
 
     def abort(self):
         self.is_aborted = True
+        self._interrupt.set()
 
     def reset_abort(self):
         self.is_aborted = False
+        self._interrupt.clear()
+
+    def stop(self):
+        self._interrupt.set()
 
     def wait_for_stop(self, t=0):
-        time.sleep(t)
+        self._interrupt.wait(t)
         self.is_busy = False
         return
 
