@@ -115,6 +115,10 @@ Speed codes (0–40) map to stroke times via `SPEED_SEC_MAPPING`. Use `flow_rate
 
 Per sensor, `monitor` is `off` (plot only), `warn` (log and carry on), or `stop` (halt the draw and raise `FlowFault`). Config sets the starting mode; the Flow Sensors tab switches it at runtime. Each draw reads the mode once when it arms.
 
+Notices go to `MERFISHOperations(on_warning=...)`, which becomes the `DrawGuard`'s `log`. It defaults to `print` for the CLI; the GUI passes a channel that marshals to the GUI thread and shows a non-modal line under the progress bar. A `warn` fault raises nothing, so that notice is the only trace it leaves.
+
+**Only Flow Cell is guarded.** `OpenChamberOperations` is never handed the sensors, so a `warn`/`stop` mode configured on an Open Chamber machine is inert; the GUI says so at startup, forces the mode to `off`, and disables the per-sensor control.
+
 Not guarded: the dispense-to-waste inside `_empty_syringe_pump_on_full`, and `Priming`/`Clean Up` — both move liquid out the waste port rather than through the flow cell, so the sensors would read nothing and every one would fault.
 
 `FlowFault` subclasses `OperationError` and is re-raised past `flow_reagent`'s `except Exception` wrapper so its fields survive. Halting uses `SyringePump.stop()`, not `abort()`: `abort()` latches and means "the operator cancelled".

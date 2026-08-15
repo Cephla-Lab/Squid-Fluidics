@@ -183,3 +183,46 @@ class TestScope:
         sensor.flow = 0.0
         ops.process_sequence({"type": "priming", "fluidic_port": 10,
                               "flow_rate": 500, "volume": 2000})
+
+
+class TestWarningsAreReportable:
+    """`warn` deliberately raises nothing, so the notice is the only trace it
+    leaves. Defaulting it to stdout meant a GUI-launched run showed nothing at
+    all for the mode operators are told to start on.
+    """
+
+    @pytest.fixture
+    def warned(self, flow_cell_hardware):
+        config, sp, sv = flow_cell_hardware
+        sensor = ScriptedSensor(flow=0.0, monitor="warn")
+        original_wait = sp.wait_for_stop
+
+        def wait_for_stop(t=0):
+            sensor.play()
+            return original_wait(t)
+
+        sp.wait_for_stop = wait_for_stop
+        lines = []
+        ops = MERFISHOperations(config, sp, sv, flow_sensors=[sensor],
+                                on_warning=lines.append)
+        return ops, lines
+
+    def test_the_notice_reaches_the_injected_channel(self, warned):
+        ops, lines = warned
+        ops.process_sequence(SEQ)
+        assert len(lines) == 1
+        assert "syringe_draw" in lines[0]
+
+    def test_a_stop_also_reports_before_it_raises(self, warned):
+        """The operator sees why the run is about to fail, not just that it
+        did -- the two arrive by different routes and the notice comes first."""
+        ops, lines = warned
+        ops.flow_sensors[0].monitor = "stop"
+        with pytest.raises(FlowFault):
+            ops.process_sequence(SEQ)
+        assert any("Stopping draw" in line for line in lines)
+
+    def test_it_defaults_to_stdout_when_nothing_is_injected(self, flow_cell_hardware):
+        """The CLI relies on this."""
+        config, sp, sv = flow_cell_hardware
+        assert MERFISHOperations(config, sp, sv).on_warning is print

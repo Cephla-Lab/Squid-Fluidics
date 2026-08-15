@@ -6,12 +6,17 @@ from . import sequence_utils
 
 class MERFISHOperations():
     def __init__(self, config, syringe_pump, selector_valves,
-                 temperature_controller=None, flow_sensors=None):
+                 temperature_controller=None, flow_sensors=None, on_warning=None):
         self.config = config
         self.sp = syringe_pump
         self.sv = selector_valves
         self.tc = temperature_controller
         self.flow_sensors = flow_sensors or []
+        # Where a draw-protection notice goes. Defaults to stdout, which is all
+        # the CLI needs; the GUI passes something the operator can actually see,
+        # since a `warn`-mode fault deliberately raises nothing and would
+        # otherwise leave no trace on a machine with no console.
+        self.on_warning = on_warning or print
         self.extract_port = self.config.syringe_pump.extract_port
         self.speed_code_limit = self.config.syringe_pump.speed_code_limit
 
@@ -31,7 +36,8 @@ class MERFISHOperations():
         """
         guard = DrawGuard(self.flow_sensors,
                           expected_ul_min=self.sp.get_flow_rate(speed_code),
-                          stop_pump=self.sp.stop)
+                          stop_pump=self.sp.stop,
+                          log=self.on_warning)
         with guard:
             self.sp.execute()
             # Raised here, on the sequence thread: the fault is recorded by the

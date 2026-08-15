@@ -45,3 +45,53 @@ class TestSafeFilenamePart:
 
     def test_spaces_become_underscores(self):
         assert gui._safe_filename_part("waste line") == "waste_line"
+
+
+class TestDrawProtectionUnavailable:
+    """Only MERFISHOperations arms the sensors, so on any other application a
+    configured warn/stop mode is inert. Silence there would leave the operator
+    believing a draw is protected when nothing is watching it.
+
+    Called unbound against a stub, since the method touches only self.flowSensors
+    and a message box -- constructing a QMainWindow needs a QApplication.
+    """
+
+    class Stub:
+        def __init__(self, sensors):
+            self.flowSensors = sensors
+
+    class Sensor:
+        def __init__(self, name, monitor):
+            self.name = name
+            self.monitor = monitor
+
+    @pytest.fixture
+    def shown(self, monkeypatch):
+        messages = []
+        monkeypatch.setattr(gui.QMessageBox, "warning",
+                            lambda parent, title, text: messages.append(text))
+        return messages
+
+    def _run(self, sensors, draw_protection):
+        stub = self.Stub(sensors)
+        gui.FluidicsControlGUI._warn_if_draw_protection_unavailable(
+            stub, draw_protection)
+        return stub
+
+    def test_a_configured_mode_is_reported(self, shown):
+        self._run([self.Sensor("syringe_draw", "stop")], draw_protection=False)
+        assert len(shown) == 1
+        assert "syringe_draw" in shown[0]
+
+    def test_the_mode_is_forced_off_so_the_gui_cannot_show_it_as_active(self, shown):
+        stub = self._run([self.Sensor("s", "stop")], draw_protection=False)
+        assert stub.flowSensors[0].monitor == "off"
+
+    def test_sensors_already_off_are_not_reported(self, shown):
+        self._run([self.Sensor("s", "off")], draw_protection=False)
+        assert shown == []
+
+    def test_nothing_is_reported_when_protection_is_available(self, shown):
+        stub = self._run([self.Sensor("s", "stop")], draw_protection=True)
+        assert shown == []
+        assert stub.flowSensors[0].monitor == "stop"
