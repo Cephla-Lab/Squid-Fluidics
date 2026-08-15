@@ -114,7 +114,7 @@ def main():
 
         # Run experiment
         if config.application == "Flow Cell":
-            experiment_ops = MERFISHOperations(config, syringePump, selectorValveSystem, temperatureController)
+            experiment_ops = MERFISHOperations(config, syringePump, selectorValveSystem, temperatureController, flow_sensors)
         elif config.application == "Open Chamber":
             experiment_ops = OpenChamberOperations(config, syringePump, selectorValveSystem, discPump, temperatureController)
         else:

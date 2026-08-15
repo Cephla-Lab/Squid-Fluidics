@@ -3,13 +3,73 @@ import threading
 import time
 from serial.tools import list_ports
 
-class SyringePump:
-    SPEED_SEC_MAPPING = [1.25, 1.30, 1.39, 1.52, 1.71, 1.97, 2.37, 2.77, 3.03, 3.36, 3.77, 
+class SpeedCodes:
+    """The speed-code mapping and the conversions either way.
+
+    Shared by the real pump and the simulation because it is arithmetic over
+    self.volume and self.speed_code_limit -- no hardware in it. The simulation
+    used to stub flow_rate_to_speed_code as `return 20`, so a simulated run
+    ignored the sequence's flow rate entirely and every rate produced the same
+    8501 uL/min. Anything that reasons about the actual rate (draw protection
+    does) was measuring against a number the simulation invented.
+    """
+
+    SPEED_SEC_MAPPING = [1.25, 1.30, 1.39, 1.52, 1.71, 1.97, 2.37, 2.77, 3.03, 3.36, 3.77,
                         4.30, 5.00, 6.00, 7.50, 10.00, 15.00, 30.00, 31.58, 33.33, 35.29,
                         37.50, 40.00, 42.86, 46.15, 50.00, 54.55, 60.00, 66.67, 75.00, 85.71,
                         100.00, 120.00, 150.00, 200.00, 300.00, 333.33, 375.00, 428.57, 500.00, 600.00]
                         # Maps to speed code 0-40
 
+    def get_flow_rate(self, speed_code):
+        """Flow rate for a speed code, in uL/min.
+
+        uL/min throughout: it is what sequences are written in, what
+        flow_rate_to_speed_code takes, and what the flow sensor reports. This
+        used to return mL/min, which made it the only function in the pump API
+        on a different scale from its own inverse.
+        """
+        return round(self.volume * 60 / self.SPEED_SEC_MAPPING[speed_code], 2)
+
+    def flow_rate_to_speed_code(self, target_flow_rate):
+        """
+        Map any flow rate to the closest speed code of the syringe pump
+
+        :param flow_rate: ul/min
+        :return: speed code (int)
+        """
+        # TODO: move this to utils
+        target_time = self.volume * 60 / target_flow_rate
+
+        left = 0
+        right = len(self.SPEED_SEC_MAPPING) - 1
+
+        # If target is beyond the range, return the closest endpoint
+        if target_time <= self.SPEED_SEC_MAPPING[self.speed_code_limit]:
+            return self.speed_code_limit
+        if target_time >= self.SPEED_SEC_MAPPING[-1]:
+            return len(self.SPEED_SEC_MAPPING) - 1
+
+        # Binary search
+        while left < right:
+            if right - left == 1:
+                if abs(self.SPEED_SEC_MAPPING[left] - target_time) <= abs(self.SPEED_SEC_MAPPING[right] - target_time):
+                    return left
+                return right
+
+            mid = (left + right) // 2
+            mid_value = self.SPEED_SEC_MAPPING[mid]
+
+            if mid_value == target_time:
+                return mid
+            elif mid_value > target_time:
+                right = mid
+            else:
+                left = mid
+
+        return left
+
+
+class SyringePump(SpeedCodes):
     def __init__(self, sn, syringe_ul, speed_code_limit, waste_port, num_ports=4, slope=14, debug=False):
         if sn is not None:
             for d in list_ports.comports():
@@ -154,70 +214,17 @@ class SyringePump:
                 self.is_busy = False
                 return
 
-    def get_flow_rate(self, speed_code):
-        """Flow rate for a speed code, in uL/min.
-
-        uL/min throughout: it is what sequences are written in, what
-        flow_rate_to_speed_code takes, and what the flow sensor reports. This
-        used to return mL/min, which made it the only function in the pump API
-        on a different scale from its own inverse.
-        """
-        return round(self.volume * 60 / self.SPEED_SEC_MAPPING[speed_code], 2)
-
-    def flow_rate_to_speed_code(self, target_flow_rate):
-        """
-        Map any flow rate to the closest speed code of the syringe pump
-        
-        :param flow_rate: ul/min
-        :return: speed code (int)
-        """
-        # TODO: move this to utils
-        target_time = self.volume * 60 / target_flow_rate
-
-        left = 0
-        right = len(self.SPEED_SEC_MAPPING) - 1
-
-        # If target is beyond the range, return the closest endpoint
-        if target_time <= self.SPEED_SEC_MAPPING[self.speed_code_limit]:
-            return self.speed_code_limit
-        if target_time >= self.SPEED_SEC_MAPPING[-1]:
-            return len(self.SPEED_SEC_MAPPING) - 1
-
-        # Binary search
-        while left < right:
-            if right - left == 1:
-                if abs(self.SPEED_SEC_MAPPING[left] - target_time) <= abs(self.SPEED_SEC_MAPPING[right] - target_time):
-                    return left
-                return right
-
-            mid = (left + right) // 2
-            mid_value = self.SPEED_SEC_MAPPING[mid]
-
-            if mid_value == target_time:
-                return mid
-            elif mid_value > target_time:
-                right = mid
-            else:
-                left = mid
-
-        return left
-
     def close(self, to_waste=False):
         if to_waste:
             self.dispense_to_waste(self.speed_code_limit)
             self.execute()
         del self.com_link
 
-class SyringePumpSimulation():
-    SPEED_SEC_MAPPING = [1.25, 1.30, 1.39, 1.52, 1.71, 1.97, 2.37, 2.77, 3.03, 3.36, 3.77, 
-                        4.30, 5.00, 6.00, 7.50, 10.00, 15.00, 30.00, 31.58, 33.33, 35.29,
-                        37.50, 40.00, 42.86, 46.15, 50.00, 54.55, 60.00, 66.67, 75.00, 85.71,
-                        100.00, 120.00, 150.00, 200.00, 300.00, 333.33, 375.00, 428.57, 500.00, 600.00]
-                        # Maps to speed code 0-40
-
+class SyringePumpSimulation(SpeedCodes):
     def __init__(self, sn, syringe_ul, speed_code_limit, waste_port, num_ports=4, slope=14):
         self.syringe = None
         self.volume = syringe_ul
+        self.speed_code_limit = speed_code_limit
         self.range = 3000
         self.is_busy = False
         self.is_aborted = False
@@ -281,19 +288,6 @@ class SyringePumpSimulation():
         self._interrupt.wait(t)
         self.is_busy = False
         return
-
-    def get_flow_rate(self, speed_code):
-        """Flow rate for a speed code, in uL/min.
-
-        uL/min throughout: it is what sequences are written in, what
-        flow_rate_to_speed_code takes, and what the flow sensor reports. This
-        used to return mL/min, which made it the only function in the pump API
-        on a different scale from its own inverse.
-        """
-        return round(self.volume * 60 / self.SPEED_SEC_MAPPING[speed_code], 2)
-
-    def flow_rate_to_speed_code(self, target_flow_rate):
-        return 20
 
     def close(self, to_waste=False):
         pass

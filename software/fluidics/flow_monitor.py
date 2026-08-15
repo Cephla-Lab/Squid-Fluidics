@@ -10,6 +10,9 @@ raising or touching the pump, so the caller chooses what a fault means: `warn`
 logs it, `stop` halts the draw and raises it.
 """
 
+import threading
+import time
+
 from .experiment_worker import OperationError
 
 
@@ -128,3 +131,116 @@ class FlowMonitor:
             out_of_band_seconds=timestamp - self._out_of_band_since,
             consecutive_samples=self._consecutive,
         )
+
+
+class DrawGuard:
+    """Watches every armed sensor for the duration of one draw.
+
+    Wrap the blocking pump call:
+
+        with DrawGuard(sensors, expected, stop_pump=self.sp.stop) as guard:
+            self.sp.execute()
+            guard.raise_if_faulted()
+
+    Arming and disarming are the context manager's job because the failure
+    path is the one that matters: a draw that raises must still leave the
+    packet stream clean, or every later draw accumulates another dead handler
+    faulting against a stale expectation.
+    """
+
+    def __init__(self, sensors, expected_ul_min, stop_pump, log=print):
+        self.expected_ul_min = expected_ul_min
+        self.stop_pump = stop_pump
+        self.log = log
+
+        # `monitor` is read once, here, so a mid-draw flip from the GUI cannot
+        # change the rules underneath a draw already running.
+        self._armed = [s for s in sensors if getattr(s, "monitor", "off") != "off"]
+        self._handlers = []
+        self._lock = threading.Lock()
+        self._fault = None
+
+    @property
+    def fault(self):
+        """The first fault a `stop` sensor saw, or None. Set from the reader
+        thread. A `warn` sensor never fills this -- warn logs and nothing more,
+        so a fault recorded here always means the draw is being failed."""
+        with self._lock:
+            return self._fault
+
+    def __enter__(self):
+        started_at = time.time()
+        for sensor in self._armed:
+            monitor = FlowMonitor(
+                sensor.name,
+                expected_ul_min=self.expected_ul_min,
+                ramp_up_seconds=sensor.ramp_up_seconds,
+                tolerance_fraction=sensor.tolerance_fraction,
+            )
+            monitor.start(started_at)
+            handler = self._make_handler(sensor, monitor)
+            self._handlers.append((sensor, handler))
+            sensor.subscribe(handler)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        for sensor, handler in self._handlers:
+            sensor.unsubscribe(handler)
+        self._handlers.clear()
+        return False
+
+    def raise_if_faulted(self):
+        """Raise the fault a `stop` sensor recorded, if there was one.
+
+        Separate from the callback so the raise happens on the thread running
+        the sequence. Raising from the reader thread would only kill the reader.
+        """
+        fault = self.fault
+        if fault is not None:
+            raise fault
+
+    def _make_handler(self, sensor, monitor):
+        """One closure per sensor, holding its own rule and mode."""
+        stop = (sensor.monitor == "stop")
+        warned = []
+
+        def handle(flow, timestamp):
+            fault = monitor.sample(flow, timestamp)
+            if fault is None:
+                return
+
+            if not stop:
+                # warn: report once per draw and stay out of the way. The rule
+                # keeps faulting on every sample once it has tripped, so
+                # logging each one would bury the rest of the run log.
+                if not warned:
+                    warned.append(True)
+                    self.log(f"WARNING: {fault}")
+                return
+
+            if not self._claim(fault):
+                return
+            self.log(f"Stopping draw: {fault}")
+            # terminateCmd() from the reader thread, while the sequence thread
+            # sits in wait_for_stop -- the same crossing abort() already makes
+            # from the Qt thread. If it raises we must not take the reader down
+            # with it; the fault is already recorded and will still be raised.
+            try:
+                self.stop_pump()
+            except Exception as e:
+                self.log(f"Failed to stop the pump after a flow fault: {e}")
+
+        return handle
+
+    def _claim(self, fault):
+        """Record `fault` if nothing has faulted yet. True if it was recorded.
+
+        First cause wins, and two sensors can fault on the same packet. Without
+        this the second overwrites the first and the operator is told about
+        whichever sensor happened to be later in the list.
+        """
+        with self._lock:
+            if self._fault is not None:
+                return False
+            self._fault = fault
+            return True

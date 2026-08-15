@@ -99,10 +99,13 @@ reagent_selection:
 flow_sensors:
 - index: 1
   name: syringe_draw
-  # Reserved for draw protection, which is not implemented yet, so "off" is the
-  # only accepted value today. Keep it quoted -- bare off is a YAML boolean.
-  # The three fields below are read by that same future feature; shown here at
-  # their defaults, and all optional.
+  # Draw protection. Keep it quoted -- bare off is a YAML boolean.
+  #   off   read and plot only
+  #   warn  log a flow fault and carry on
+  #   stop  halt the draw and fail the sequence
+  # This is the starting mode; the GUI switches it per sensor at runtime. Start
+  # a new setup on "warn" and watch what the rule would have fired on before
+  # letting it halt a run. All four fields are optional; shown at their defaults.
   monitor: "off"
   ramp_up_seconds: 3.0
   tolerance_fraction: 0.3

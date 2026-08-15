@@ -163,7 +163,8 @@ class SequencesWidget(QWidget):
 
     sequence_running = pyqtSignal(bool)
 
-    def __init__(self, config, syringe, selector_valves, disc_pump, temperature_controller):
+    def __init__(self, config, syringe, selector_valves, disc_pump, temperature_controller,
+                 flow_sensors=None):
         super().__init__()
         self.config = config
         self.syringePump = syringe
@@ -175,7 +176,7 @@ class SequencesWidget(QWidget):
         self.worker = None
 
         if self.config.application == 'Flow Cell':
-            self.experiment_ops = MERFISHOperations(self.config, self.syringePump, self.selectorValveSystem, self.temperatureController)
+            self.experiment_ops = MERFISHOperations(self.config, self.syringePump, self.selectorValveSystem, self.temperatureController, flow_sensors)
         elif self.config.application == "Open Chamber":
             self.experiment_ops = OpenChamberOperations(self.config, self.syringePump, self.selectorValveSystem, self.discPump, self.temperatureController)
         else:
@@ -1143,12 +1144,34 @@ class FlowSensorWidget(TimeSeriesPlotWidget):
         readout_layout.addWidget(QLabel("Flow rate:"))
         readout_layout.addWidget(self.flow_label)
         readout_layout.addStretch()
+
+        # Draw protection, switchable mid-run. Each draw reads the mode once
+        # when it arms, so changing this affects the next draw, not the one
+        # already running. Being able to move a sensor from warn to stop
+        # without restarting is the point: the tolerance and ramp-up that suit
+        # a given setup are found by watching warnings, and a restart to try
+        # the next value costs a whole run.
+        self.monitor_combo = QComboBox()
+        self.monitor_combo.addItems(["off", "warn", "stop"])
+        self.monitor_combo.setCurrentText(getattr(self.sensor, "monitor", "off"))
+        self.monitor_combo.setToolTip(
+            "off: plot only.\n"
+            "warn: log a flow fault and carry on.\n"
+            "stop: halt the draw and fail the sequence."
+        )
+        self.monitor_combo.currentTextChanged.connect(self._on_monitor_changed)
+        readout_layout.addWidget(QLabel("Draw protection:"))
+        readout_layout.addWidget(self.monitor_combo)
         readout.setLayout(readout_layout)
 
         plot_box = self._build_plot_box("Plot", min_interval=1)
 
         layout.addWidget(readout)
         layout.addWidget(plot_box)
+
+    def _on_monitor_changed(self, mode):
+        self.sensor.monitor = mode
+        print(f"Flow sensor '{self.sensor.name}': draw protection set to {mode}.")
 
     def _on_callback(self, flow, timestamp):
         # Runs in the controller's reader thread; marshal to the GUI thread.
@@ -1236,7 +1259,7 @@ class FluidicsControlGUI(QMainWindow):
         self.tabWidget = QTabWidget()
 
         # "Settings and Manual Control" tab
-        runExperimentsTab = SequencesWidget(self.config, self.syringePump, self.selectorValveSystem, self.discPump, self.temperatureController)
+        runExperimentsTab = SequencesWidget(self.config, self.syringePump, self.selectorValveSystem, self.discPump, self.temperatureController, self.flowSensors)
         manualControlTab = ManualControlWidget(self.config, self.syringePump, self.selectorValveSystem, self.discPump)
         # TODO: integrate temperature controller ui
 

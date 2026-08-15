@@ -29,12 +29,23 @@ class FlowSensor:
     (1 = Wire1, 2 = Wire2) and fixes which pair of packet bytes carries it:
     index 1 reads bytes 23-24, index 2 reads bytes 25-26. The firmware applies
     the same mapping, so the two stay in step.
+
+    monitor/ramp_up_seconds/tolerance_fraction are draw-protection policy. The
+    driver never consults them -- it carries them because the config declares
+    them in this sensor's own block, and because both consumers (the operations
+    layer, which reads them per draw, and the GUI, which writes `monitor` at
+    runtime) already hold the sensor. A separate registry keyed by name would
+    be one more thing to keep in step with no one left to benefit.
     """
 
-    def __init__(self, fluid_controller, index, name):
+    def __init__(self, fluid_controller, index, name,
+                 monitor="off", ramp_up_seconds=3.0, tolerance_fraction=0.3):
         self.fc = fluid_controller
         self.index = index
         self.name = name
+        self.monitor = monitor
+        self.ramp_up_seconds = ramp_up_seconds
+        self.tolerance_fraction = tolerance_fraction
         # Derived, not passed: index and slot must always agree, so carrying
         # them as independent arguments only creates a way for them to differ.
         self.packet_slot = index - 1
@@ -120,10 +131,14 @@ class FlowSensorSimulation:
     not started; callers start it explicitly.
     """
 
-    def __init__(self, fluid_controller=None, index=1, name="sim"):
+    def __init__(self, fluid_controller=None, index=1, name="sim",
+                 monitor="off", ramp_up_seconds=3.0, tolerance_fraction=0.3):
         self.fc = fluid_controller
         self.index = index
         self.name = name
+        self.monitor = monitor
+        self.ramp_up_seconds = ramp_up_seconds
+        self.tolerance_fraction = tolerance_fraction
         self.packet_slot = index - 1
 
         self.simulated_flow_ul_min = 500.0
@@ -177,6 +192,8 @@ def build_flow_sensors(fluid_controller, config, simulation=False):
 
     cls = FlowSensorSimulation if simulation else FlowSensor
     return [
-        cls(fluid_controller, index=cfg.index, name=cfg.name)
+        cls(fluid_controller, index=cfg.index, name=cfg.name,
+            monitor=cfg.monitor, ramp_up_seconds=cfg.ramp_up_seconds,
+            tolerance_fraction=cfg.tolerance_fraction)
         for cfg in config.flow_sensors
     ]

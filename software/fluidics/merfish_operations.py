@@ -1,16 +1,31 @@
 from time import sleep
 from .experiment_worker import AbortRequested, OperationError
+from .flow_monitor import DrawGuard, FlowFault
 from . import sequence_utils
 
 
 class MERFISHOperations():
-    def __init__(self, config, syringe_pump, selector_valves, temperature_controller=None):
+    def __init__(self, config, syringe_pump, selector_valves,
+                 temperature_controller=None, flow_sensors=None):
         self.config = config
         self.sp = syringe_pump
         self.sv = selector_valves
         self.tc = temperature_controller
+        self.flow_sensors = flow_sensors or []
         self.extract_port = self.config.syringe_pump.extract_port
         self.speed_code_limit = self.config.syringe_pump.speed_code_limit
+
+    def _guarded_draw(self, speed_code):
+        """Watch the flow sensors while a draw at `speed_code` runs.
+
+        The expectation is the pump's actual rate for the code, not the rate
+        the sequence asked for: flow_rate_to_speed_code quantizes to the 41
+        available codes, so a sequence asking for 480 uL/min gets 500, and
+        measuring against 480 would bias the whole band by the rounding.
+        """
+        return DrawGuard(self.flow_sensors,
+                         expected_ul_min=self.sp.get_flow_rate(speed_code),
+                         stop_pump=self.sp.stop)
 
     def process_sequence(self, sequence):
         print(sequence)
@@ -45,6 +60,11 @@ class MERFISHOperations():
         """
         Flow reagent from {port}. Finally, fill the tubings before sample with reagent from {fill_tubing_with_port}.
         Only the ports on the last selector valve should be used for {fill_tubing_with_port}, usually a common buffer.
+
+        Both draws run under a DrawGuard. The dispense-to-waste inside
+        _empty_syringe_pump_on_full does not: it goes out the waste port, not
+        through the flow cell, so the sensors would read nothing and every full
+        syringe would fault.
         """
         speed_code = self.sp.flow_rate_to_speed_code(flow_rate)
         try:
@@ -54,7 +74,9 @@ class MERFISHOperations():
             self.sp.extract(self.extract_port, volume, speed_code)
             if self.sp.is_aborted:
                 return
-            self.sp.execute()
+            with self._guarded_draw(speed_code) as guard:
+                self.sp.execute()
+                guard.raise_if_faulted()
             if self.sp.is_aborted:
                 return
             if fill_tubing_with_port:
@@ -63,8 +85,15 @@ class MERFISHOperations():
                 self.sp.extract(self.extract_port, self.sv.get_tubing_fluid_amount_to_valve(fill_tubing_with_port), speed_code)
                 if self.sp.is_aborted:
                     return
-                self.sp.execute()
+                with self._guarded_draw(speed_code) as guard:
+                    self.sp.execute()
+                    guard.raise_if_faulted()
 
+        except FlowFault:
+            # Already an OperationError, and it carries the sensor, the band and
+            # the measurement. Falling into the wrapper below would flatten all
+            # of that into a string.
+            raise
         except Exception as e:
             raise OperationError(f"Error in flow_reagent from port: {port}: {str(e)}")
 
