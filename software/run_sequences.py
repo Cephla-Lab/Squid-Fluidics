@@ -75,6 +75,12 @@ def initialize_hardware(simulation, config):
     flow_sensors = build_flow_sensors(controller, config, simulation)
     for sensor in flow_sensors:
         sensor.begin()
+        # The simulated sensor's publish loop is built stopped so tests can
+        # drive it by hand. A CLI run has to start it, or a --simulation run
+        # with monitor: stop reads nothing, never faults, and looks like draw
+        # protection working when it has not run at all.
+        if hasattr(sensor, "reading_thread"):
+            sensor.reading_thread.start()
 
     return controller, syringePump, temperatureController, flow_sensors
 
@@ -114,7 +120,7 @@ def main():
 
         # Run experiment
         if config.application == "Flow Cell":
-            experiment_ops = MERFISHOperations(config, syringePump, selectorValveSystem, temperatureController, flow_sensors)
+            experiment_ops = MERFISHOperations(config, syringePump, selectorValveSystem, temperatureController, flowSensors)
         elif config.application == "Open Chamber":
             experiment_ops = OpenChamberOperations(config, syringePump, selectorValveSystem, discPump, temperatureController)
         else:

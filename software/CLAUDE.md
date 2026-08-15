@@ -109,6 +109,16 @@ Speed codes (0–40) map to stroke times via `SPEED_SEC_MAPPING`. Use `flow_rate
 - `Flow Reagent` — extract reagent through selector valve, optionally fill tubing with buffer afterward
 - `Priming` / `Clean Up` — prime all ports with their reagents, then fill tubing with wash buffer
 
+### Draw Protection
+
+`Flow Reagent`'s two draws run under a `DrawGuard` (`fluidics/flow_monitor.py`), which watches each configured flow sensor against the pump's actual rate for the speed code. `FlowMonitor` is the rule — a pure function of `(flow, timestamp)` with a ramp-up window and a consecutive-sample debounce; the guard is the plumbing that arms sensors, halts the pump, and raises.
+
+Per sensor, `monitor` is `off` (plot only), `warn` (log and carry on), or `stop` (halt the draw and raise `FlowFault`). Config sets the starting mode; the Flow Sensors tab switches it at runtime. Each draw reads the mode once when it arms.
+
+Not guarded: the dispense-to-waste inside `_empty_syringe_pump_on_full`, and `Priming`/`Clean Up` — both move liquid out the waste port rather than through the flow cell, so the sensors would read nothing and every one would fault.
+
+`FlowFault` subclasses `OperationError` and is re-raised past `flow_reagent`'s `except Exception` wrapper so its fields survive. Halting uses `SyringePump.stop()`, not `abort()`: `abort()` latches and means "the operator cancelled".
+
 **`OpenChamberOperations`** — syringe pump + disc pump for open chamber:
 - `Add Reagent` / `Clear Tubings and Add Reagent` — push reagent into chamber, disc pump aspirates waste
 - `Wash with Constant Flow` — simultaneous syringe dispense + disc pump aspiration
