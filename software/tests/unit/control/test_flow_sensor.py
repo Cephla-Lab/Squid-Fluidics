@@ -2,7 +2,8 @@
 import pytest
 
 from fluidics.control.controller import FluidController, PacketSubscribers
-from fluidics.control.flow_sensor import FlowSensor, FlowSensorSimulation, INVALID_RAW
+from fluidics.control.flow_sensor import (
+    FlowSensor, FlowSensorSimulation, INVALID_RAW, start_flow_sensors)
 from fluidics.control._def import CMD_SET, COMMAND_STATUS
 
 from .packet_helpers import make_status_packet as _make_packet
@@ -222,3 +223,69 @@ class TestFlowSensorSimulation:
     def test_thread_is_not_started_on_construction(self):
         sim = FlowSensorSimulation()
         assert not sim.reading_thread.is_alive()
+
+    def test_begin_does_not_start_the_thread(self):
+        """The suite's fake clock turns the publish loop into a busy spin, so
+        a test that only calls begin() must not get a thread it did not ask
+        for. start() is the explicit opt-in."""
+        sim = FlowSensorSimulation()
+        sim.begin()
+        assert not sim.reading_thread.is_alive()
+
+
+class TestStartFlowSensors:
+    """A sensor claims a slot on the packet stream in its constructor, and only
+    close() gives it back. A partial failure that drops the list without
+    closing leaves live handlers with nothing holding a reference to them.
+    """
+
+    class Config:
+        def __init__(self, entries):
+            self.flow_sensors = entries
+
+    class Entry:
+        def __init__(self, index, name):
+            self.index = index
+            self.name = name
+            self.monitor = "off"
+            self.ramp_up_seconds = 3.0
+            self.tolerance_fraction = 0.3
+
+    def _config(self, count):
+        return self.Config([self.Entry(i + 1, f"s{i + 1}") for i in range(count)])
+
+    def test_all_sensors_are_initialized_and_subscribed(self):
+        fc = FakeController()
+        sensors = start_flow_sensors(fc, self._config(2))
+        assert len(sensors) == 2
+        assert len(fc._packet_subscribers) == 2
+
+    def test_a_failing_sensor_takes_the_healthy_ones_down_with_it(self, monkeypatch):
+        """Sensor 1 came up, sensor 2 did not. Sensor 1 must not be left
+        publishing into a handler no one can reach."""
+        fc = FakeController()
+        real_begin = FlowSensor.begin
+
+        def begin(self):
+            if self.index == 2:
+                raise RuntimeError("sensor 2 is not connected")
+            return real_begin(self)
+
+        monkeypatch.setattr(FlowSensor, "begin", begin)
+        with pytest.raises(RuntimeError, match="not connected"):
+            start_flow_sensors(fc, self._config(2))
+        assert len(fc._packet_subscribers) == 0
+
+    def test_cleanup_does_not_depend_on_begin_cleaning_up_after_itself(self, monkeypatch):
+        """start() can raise too -- a thread started twice, say -- and by then
+        begin() has returned and the sensor is fully live."""
+        fc = FakeController()
+        monkeypatch.setattr(FlowSensor, "start",
+                            lambda self: (_ for _ in ()).throw(RuntimeError("boom")))
+        with pytest.raises(RuntimeError, match="boom"):
+            start_flow_sensors(fc, self._config(2))
+        assert len(fc._packet_subscribers) == 0
+
+    def test_no_sensors_configured_returns_nothing(self):
+        fc = FakeController()
+        assert start_flow_sensors(fc, self.Config(None)) == []

@@ -155,10 +155,11 @@ class DrawGuard:
 
         # `monitor` is read once, here, so a mid-draw flip from the GUI cannot
         # change the rules underneath a draw already running.
-        self._armed = [s for s in sensors if getattr(s, "monitor", "off") != "off"]
+        self._sensors = [s for s in sensors if getattr(s, "monitor", "off") != "off"]
         self._handlers = []
         self._lock = threading.Lock()
         self._fault = None
+        self._active = False
 
     @property
     def fault(self):
@@ -170,7 +171,9 @@ class DrawGuard:
 
     def __enter__(self):
         started_at = time.time()
-        for sensor in self._armed:
+        with self._lock:
+            self._active = True
+        for sensor in self._sensors:
             monitor = FlowMonitor(
                 sensor.name,
                 expected_ul_min=self.expected_ul_min,
@@ -184,6 +187,15 @@ class DrawGuard:
         return self
 
     def __exit__(self, exc_type, exc, tb):
+        # Disarm before unsubscribing, and under the lock. Subscribers.notify
+        # snapshots the callback list and dispatches outside its own lock, so a
+        # handler can still be entered after unsubscribe() has returned -- by
+        # which point the draw is over and the pump may already be executing
+        # the next chain. Without this, that late sample could terminate a
+        # chain it knows nothing about, and record the fault on a guard nobody
+        # will ever check.
+        with self._lock:
+            self._active = False
         for sensor, handler in self._handlers:
             sensor.unsubscribe(handler)
         self._handlers.clear()
@@ -213,9 +225,11 @@ class DrawGuard:
                 # warn: report once per draw and stay out of the way. The rule
                 # keeps faulting on every sample once it has tripped, so
                 # logging each one would bury the rest of the run log.
-                if not warned:
+                with self._lock:
+                    if not self._active or warned:
+                        return
                     warned.append(True)
-                    self.log(f"WARNING: {fault}")
+                self.log(f"WARNING: {fault}")
                 return
 
             if not self._claim(fault):
@@ -233,14 +247,18 @@ class DrawGuard:
         return handle
 
     def _claim(self, fault):
-        """Record `fault` if nothing has faulted yet. True if it was recorded.
+        """Record `fault` if the draw is still running and nothing has faulted
+        yet. True if it was recorded, which is also the caller's permission to
+        stop the pump -- checking and claiming under one lock leaves no window
+        where a second sensor, or a sample arriving after __exit__, could stop
+        a pump this guard no longer speaks for.
 
         First cause wins, and two sensors can fault on the same packet. Without
-        this the second overwrites the first and the operator is told about
+        that the second overwrites the first and the operator is told about
         whichever sensor happened to be later in the list.
         """
         with self._lock:
-            if self._fault is not None:
+            if not self._active or self._fault is not None:
                 return False
             self._fault = fault
             return True

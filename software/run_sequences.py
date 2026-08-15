@@ -8,7 +8,7 @@ from fluidics.control.syringe_pump import SyringePumpSimulation, SyringePump
 from fluidics.control.selector_valve import SelectorValveSystem
 from fluidics.control.disc_pump import DiscPump
 from fluidics.control.temperature_controller import TCMControllerSimulation, TCMController
-from fluidics.control.flow_sensor import build_flow_sensors
+from fluidics.control.flow_sensor import start_flow_sensors
 from fluidics.merfish_operations import MERFISHOperations
 from fluidics.open_chamber_operations import OpenChamberOperations
 from fluidics.experiment_worker import ExperimentWorker
@@ -72,15 +72,7 @@ def initialize_hardware(simulation, config):
     controller.begin()
     controller.send_command(CMD_SET.CLEAR)
 
-    flow_sensors = build_flow_sensors(controller, config, simulation)
-    for sensor in flow_sensors:
-        sensor.begin()
-        # The simulated sensor's publish loop is built stopped so tests can
-        # drive it by hand. A CLI run has to start it, or a --simulation run
-        # with monitor: stop reads nothing, never faults, and looks like draw
-        # protection working when it has not run at all.
-        if hasattr(sensor, "reading_thread"):
-            sensor.reading_thread.start()
+    flow_sensors = start_flow_sensors(controller, config, simulation)
 
     return controller, syringePump, temperatureController, flow_sensors
 

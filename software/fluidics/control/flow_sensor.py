@@ -89,6 +89,11 @@ class FlowSensor:
             raise
         print(f"Flow sensor '{self.name}' initialized on I2C index {self.index}.")
 
+    def start(self):
+        """Begin publishing. Nothing to do: the controller's reader thread
+        already drives _on_packet. Exists so callers can start real and
+        simulated sensors the same way."""
+
     @property
     def latest_flow_ul_min(self):
         """Most recent reading in uL/min, or None if invalid or not yet seen."""
@@ -152,6 +157,15 @@ class FlowSensorSimulation:
     def begin(self):
         pass
 
+    def start(self):
+        """Start the publish loop.
+
+        Separate from begin() because the suite's fake clock turns this loop
+        into a busy spin -- a test that calls begin() must not get a thread it
+        did not ask for.
+        """
+        self.reading_thread.start()
+
     @property
     def latest_flow_ul_min(self):
         return self.simulated_flow_ul_min
@@ -197,3 +211,31 @@ def build_flow_sensors(fluid_controller, config, simulation=False):
             tolerance_fraction=cfg.tolerance_fraction)
         for cfg in config.flow_sensors
     ]
+
+
+def start_flow_sensors(fluid_controller, config, simulation=False):
+    """Construct, initialize and start every configured sensor.
+
+    All or nothing. A sensor claims a slot on the controller's packet stream in
+    its constructor, and only close() gives it back; if the second sensor fails
+    to initialize, dropping the list leaves the first one subscribed for the
+    life of the process with nothing holding a reference to unsubscribe it.
+
+    Everything built is closed on the way out, including the sensor that
+    failed. begin() does clean up after itself, but making that the only
+    cleanup couples this to which line inside it raised -- and start() can
+    raise too, at which point the sensor is fully live. close() is idempotent,
+    so closing twice costs nothing and closing something never begun is fine.
+
+    Both entry points call this so neither has to remember either half.
+    """
+    sensors = build_flow_sensors(fluid_controller, config, simulation)
+    try:
+        for sensor in sensors:
+            sensor.begin()
+            sensor.start()
+    except Exception:
+        for sensor in sensors:
+            sensor.close()
+        raise
+    return sensors

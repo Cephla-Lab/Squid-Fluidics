@@ -21,7 +21,7 @@ from fluidics.control.syringe_pump import SyringePump, SyringePumpSimulation
 from fluidics.control.selector_valve import SelectorValveSystem
 from fluidics.control.disc_pump import DiscPump
 from fluidics.control.temperature_controller import TCMController, TCMControllerSimulation
-from fluidics.control.flow_sensor import build_flow_sensors
+from fluidics.control.flow_sensor import start_flow_sensors
 
 from fluidics.control._def import CMD_SET
 from fluidics.control.tecancavro.tecanapi import TecanAPITimeout
@@ -1274,9 +1274,6 @@ class FluidicsControlGUI(QMainWindow):
             flowSensorTab = FlowSensorControlWidget(self.flowSensors)
             self.tabWidget.addTab(flowSensorTab, "Flow Sensors")
             self.sensorTabs.append(flowSensorTab)
-            for sensor in self.flowSensors:
-                if hasattr(sensor, "reading_thread"):
-                    sensor.reading_thread.start()
 
         self.setCentralWidget(self.tabWidget)
         runExperimentsTab.sequence_running.connect(self.set_manual_control_tab_state)
@@ -1328,22 +1325,20 @@ class FluidicsControlGUI(QMainWindow):
         self.controller.begin()
         self.controller.send_command(CMD_SET.CLEAR)
 
-        self.flowSensors = build_flow_sensors(self.controller, config, simulation)
-        for sensor in self.flowSensors:
-            try:
-                sensor.begin()
-            except Exception as e:
-                # begin() releases the packet_callback slot it claimed before
-                # re-raising, so discarding the sensor here strands nothing.
-                msg = f"Failed to initialize flow sensor '{sensor.name}': {e}"
-                print(msg)
-                self.flowSensors = []
-                QMessageBox.warning(
-                    self, "Flow Sensor",
-                    f"{msg}\n\nCheck that the sensor is connected to I2C index "
-                    f"{sensor.index}. The Flow Sensor tab will not be available."
-                )
-                break
+        try:
+            self.flowSensors = start_flow_sensors(self.controller, config, simulation)
+        except Exception as e:
+            # start_flow_sensors closes whatever it had already brought up, so
+            # nothing is left subscribed to the packet stream. The message
+            # names the sensor and its index.
+            msg = f"Failed to initialize flow sensors: {e}"
+            print(msg)
+            self.flowSensors = []
+            QMessageBox.warning(
+                self, "Flow Sensor",
+                f"{msg}\n\nCheck that the sensor is connected to the matching "
+                f"I2C index. The Flow Sensor tab will not be available."
+            )
 
     def set_manual_control_tab_state(self, is_running):
         manual_control_tab_index = 1

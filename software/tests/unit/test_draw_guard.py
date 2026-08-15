@@ -59,6 +59,13 @@ def _feed(sensor, flows, step=0.06):
         sensor.feed(flow, started + (i + 1) * step)
 
 
+def _replay(handler, flows, step=0.06):
+    """Call a handler directly, as notify's snapshot would after unsubscribe."""
+    started = time.time()
+    for i, flow in enumerate(flows):
+        handler(flow, started + (i + 1) * step)
+
+
 def draw(guard, sensor, flows):
     """Run one draw: arm, feed, disarm, then raise if it faulted."""
     with guard:
@@ -106,6 +113,40 @@ class TestArming:
         g = guard_for()
         with g:
             g.raise_if_faulted()
+
+
+class TestSamplesArrivingAfterTheDraw:
+    """Subscribers.notify snapshots the callback list and dispatches outside
+    its lock, so a handler can still be entered after unsubscribe() returned.
+    By then the draw is over and the pump may be executing the next chain.
+    """
+
+    def test_a_late_sample_does_not_stop_the_pump(self):
+        sensor, pump = FakeSensor(monitor="stop"), RecordingPump()
+        g = guard_for(sensor, pump=pump)
+        with g:
+            handler = sensor.subscribers[0]      # the snapshot notify would hold
+        _replay(handler, [0.0] * 10)
+        assert pump.stops == 0
+
+    def test_a_late_sample_does_not_record_a_fault(self):
+        """It would land on a guard whose raise_if_faulted has already run, so
+        the run would carry on with a fault recorded and never reported."""
+        sensor = FakeSensor(monitor="stop")
+        g = guard_for(sensor)
+        with g:
+            handler = sensor.subscribers[0]
+        _replay(handler, [0.0] * 10)
+        assert g.fault is None
+
+    def test_a_late_sample_does_not_log_a_warning(self):
+        lines = []
+        sensor = FakeSensor(monitor="warn")
+        g = guard_for(sensor, log=lines.append)
+        with g:
+            handler = sensor.subscribers[0]
+        _replay(handler, [0.0] * 10)
+        assert lines == []
 
 
 class TestStopPolicy:
