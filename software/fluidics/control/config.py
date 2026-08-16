@@ -24,6 +24,11 @@ class SyringePumpConfig(BaseModel):
     extract_port: int
     dispense_port: Optional[int] = None
     speed_code_limit: int = Field(ge=0, le=40)
+    # Fine-positioning mode (Tecan N1): 24000 plunger increments per stroke
+    # instead of 3000, so each motor step displaces 1/8 the volume. Smaller,
+    # faster pulses keep the instantaneous flow nearer the SLF3X's output
+    # limit, where the sensor measures instead of misreading (datasheet 3.3.1).
+    microstep: bool = False
 
 
 class SelectorValvesConfig(BaseModel):

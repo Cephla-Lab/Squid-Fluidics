@@ -151,7 +151,7 @@ class SpeedCodes:
 
 
 class SyringePump(SpeedCodes, Interruptible):
-    def __init__(self, sn, syringe_ul, speed_code_limit, waste_port, num_ports=4, slope=14, debug=False):
+    def __init__(self, sn, syringe_ul, speed_code_limit, waste_port, num_ports=4, slope=14, microstep=False, debug=False):
         if sn is not None:
             for d in list_ports.comports():
                 if d.serial_number == sn:
@@ -162,14 +162,17 @@ class SyringePump(SpeedCodes, Interruptible):
         self.syringe = tecancavro.models.XCaliburD(com_link=self.com_link,
                             num_ports=num_ports,
                             syringe_ul=syringe_ul,
-                            microstep=False,
+                            microstep=microstep,
                             waste_port=waste_port,
                             slope=slope,
                             debug=debug,
                             debug_log_path='.')
         self.volume = syringe_ul
         self.speed_code_limit = speed_code_limit
-        self.range = 3000  # Property of the syringe pump
+        # Plunger increments per full stroke: the pump reports positions in
+        # these units, so the fraction in get_plunger_position() must match
+        # the mode or every volume readback is off by 8x.
+        self.range = 24000 if microstep else 3000
         self.chained_volume = 0
 
         self.get_plunger_position()
@@ -254,11 +257,11 @@ class SyringePump(SpeedCodes, Interruptible):
         del self.com_link
 
 class SyringePumpSimulation(SpeedCodes, Interruptible):
-    def __init__(self, sn, syringe_ul, speed_code_limit, waste_port, num_ports=4, slope=14):
+    def __init__(self, sn, syringe_ul, speed_code_limit, waste_port, num_ports=4, slope=14, microstep=False):
         self.syringe = None
         self.volume = syringe_ul
         self.speed_code_limit = speed_code_limit
-        self.range = 3000
+        self.range = 24000 if microstep else 3000
         self._init_interrupt()
         self.get_plunger_position()
         print("Simulated syringe pump.")
