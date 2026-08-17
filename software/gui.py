@@ -1328,8 +1328,7 @@ class FluidicsControlGUI(QMainWindow):
                                 sn=config.syringe_pump.serial_number,
                                 syringe_ul=config.syringe_pump.volume_ul,
                                 speed_code_limit=config.syringe_pump.speed_code_limit,
-                                waste_port=config.syringe_pump.waste_port,
-                                microstep=config.syringe_pump.microstep)
+                                waste_port=config.syringe_pump.waste_port)
             if config.temperature_controller is not None:
                 tc_cfg = config.temperature_controller
                 self.temperatureController = TCMControllerSimulation(
@@ -1344,8 +1343,7 @@ class FluidicsControlGUI(QMainWindow):
                                 sn=config.syringe_pump.serial_number,
                                 syringe_ul=config.syringe_pump.volume_ul,
                                 speed_code_limit=config.syringe_pump.speed_code_limit,
-                                waste_port=config.syringe_pump.waste_port,
-                                microstep=config.syringe_pump.microstep)
+                                waste_port=config.syringe_pump.waste_port)
             if config.temperature_controller is not None:
                 try:
                     tc_cfg = config.temperature_controller
