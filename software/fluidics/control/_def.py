@@ -19,7 +19,9 @@ class MCU_CONSTANTS:
   # (INITIALIZE_BANG_BANG_PARAMS), so it must match the firmware, NOT
   # necessarily the installed sensor. The sensor's own scale factor lives in
   # flow_sensor.py, which is what turns a reading into uL/min.
-  SCALE_FACTOR_FLOW = 10
+  MCU_ASSUMED_SCALE_FACTOR_FLOW = 10
+  # Same category: mirrors firmware SLF3X.h, so it describes what the MCU
+  # assumes rather than the part that is fitted.
   SLF3X_MAX_VAL_uL_MIN = 3520
   SLF3X_WATER = 0x08
   SLF3X_IPA = 0x15

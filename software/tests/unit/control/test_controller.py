@@ -117,28 +117,17 @@ def _bare_controller():
 
 
 class TestParsePacket:
-    def test_positive_flow_scales_by_ten(self):
+    @pytest.mark.parametrize("raw", [1000, -1000, 32500, 32767])
+    def test_flow_passes_through_unscaled(self, raw):
+        """_parse_packet hands on the sensor's counts untouched. Turning them
+        into uL/min needs the installed part's scale factor, which lives with
+        the driver -- so that conversion is tested in test_flow_sensor.py, not
+        here. 32767 is the no-reading sentinel and 32500 a real saturated
+        reading; at this layer both are simply carried through.
+        """
         fc = _bare_controller()
-        parsed = fc._parse_packet(_make_packet(flow_raw=1000))
-        assert parsed["flowrates_raw"][0] == 1000
-        assert parsed["flowrates_raw"][0] == 1000
-
-    def test_negative_flow_scales_by_ten(self):
-        fc = _bare_controller()
-        parsed = fc._parse_packet(_make_packet(flow_raw=-1000))
-        assert parsed["flowrates_raw"][0] == -1000
-        assert parsed["flowrates_raw"][0] == -1000
-
-    def test_sentinel_survives_as_raw(self):
-        fc = _bare_controller()
-        parsed = fc._parse_packet(_make_packet(flow_raw=32767))
-        assert parsed["flowrates_raw"][0] == 32767
-
-    def test_saturation_is_distinct_from_sentinel(self):
-        fc = _bare_controller()
-        parsed = fc._parse_packet(_make_packet(flow_raw=32500))
-        assert parsed["flowrates_raw"][0] == 32500
-        assert parsed["flowrates_raw"][0] == 32500
+        parsed = fc._parse_packet(_make_packet(flow_raw=raw))
+        assert parsed["flowrates_raw"][0] == raw
 
     def test_uid_and_status_round_trip(self):
         fc = _bare_controller()
@@ -282,7 +271,6 @@ class TestNegativeRawDecoding:
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             parsed = fc._parse_packet(msg)
-        assert parsed["flowrates_raw"][0] == -1000
         assert parsed["flowrates_raw"][0] == -1000
 
     def test_solenoid_valves_negative_high_bit_no_numpy_warning(self):

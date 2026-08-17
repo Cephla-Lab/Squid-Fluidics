@@ -3,19 +3,14 @@
 **/.idea/
 
 # Per-machine hardware config: serial numbers, tubing volumes and reagent port
-# names are specific to one rig. gui.py loads ./config.yaml automatically when
-# present, so a committed copy would silently override every other machine's
-# setup. Shareable examples belong in software/sample_config/.
-software/config.yaml
-# Same rig, legacy format. load_config auto-converts it to config.yaml, so a
-# committed copy would be picked up on any machine that has no config.yaml yet.
-software/config.json
-# Another rig's config, left here by a parallel debugging session. Untracked
-# and carrying a different instrument's serial numbers, so a directory-wide
-# add would commit one machine's hardware over everyone else's.
-software/_config.yaml
-# Per-rig configs kept side by side while more than one instrument is in play.
-software/config_*.yaml
+# names are specific to one rig, and gui.py loads ./config.yaml automatically,
+# so a committed copy would silently override every other machine's setup.
+# Covers the legacy .json (auto-converted on load) and the per-rig copies kept
+# side by side when more than one instrument is in play. Shareable examples
+# belong in software/sample_config/.
+software/config*.yaml
+software/config*.json
+software/_config*.yaml
 # Local test sequence, swept in by a directory-wide git add. Belongs to the
 # temperature-controller work, not here; add it deliberately if it should ship.
 software/sample_sequences/temperature-test.yaml
