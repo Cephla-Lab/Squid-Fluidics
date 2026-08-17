@@ -39,13 +39,13 @@ class TestFlowSensorReadings:
         fc = FakeController()
         sensor = FlowSensor(fc, index=1, name="s")
         fc.publish(1000)
-        assert sensor.latest_flow_ul_min == pytest.approx(100.0)
+        assert sensor.latest_flow_ul_min == pytest.approx(2000.0)
 
     def test_negative_reading(self):
         fc = FakeController()
         sensor = FlowSensor(fc, index=1, name="s")
         fc.publish(-1000)
-        assert sensor.latest_flow_ul_min == pytest.approx(-100.0)
+        assert sensor.latest_flow_ul_min == pytest.approx(-2000.0)
 
     def test_sentinel_maps_to_none(self):
         fc = FakeController()
@@ -57,7 +57,7 @@ class TestFlowSensorReadings:
         fc = FakeController()
         sensor = FlowSensor(fc, index=1, name="s")
         fc.publish(32500)
-        assert sensor.latest_flow_ul_min == pytest.approx(3250.0)
+        assert sensor.latest_flow_ul_min == pytest.approx(65000.0)
 
     def test_no_reading_before_first_packet(self):
         sensor = FlowSensor(FakeController(), index=1, name="s")
@@ -68,7 +68,7 @@ class TestFlowSensorReadings:
         sensor = FlowSensor(fc, index=1, name="s")
         fc.publish(INVALID_RAW)
         fc.publish(500)
-        assert sensor.latest_flow_ul_min == pytest.approx(50.0)
+        assert sensor.latest_flow_ul_min == pytest.approx(1000.0)
 
 
 class TestFlowSensorSubscribers:
@@ -79,7 +79,7 @@ class TestFlowSensorSubscribers:
         sensor.subscribe(lambda flow, ts: seen.append(flow))
         fc.publish(100)
         fc.publish(200)
-        assert seen == [pytest.approx(10.0), pytest.approx(20.0)]
+        assert seen == [pytest.approx(200.0), pytest.approx(400.0)]
 
     def test_subscriber_sees_none_for_sentinel(self):
         fc = FakeController()
@@ -96,7 +96,7 @@ class TestFlowSensorSubscribers:
         sensor.subscribe(lambda flow, ts: 1 / 0)
         sensor.subscribe(lambda flow, ts: seen.append(flow))
         fc.publish(100)
-        assert seen == [pytest.approx(10.0)]
+        assert seen == [pytest.approx(200.0)]
 
 
 class TestFlowSensorBegin:
@@ -136,7 +136,7 @@ class TestFlowSensorClose:
         fc.publish(100)
         sensor.close()
         fc.publish(200)
-        assert sensor.latest_flow_ul_min == pytest.approx(10.0)
+        assert sensor.latest_flow_ul_min == pytest.approx(200.0)
 
     def test_close_stops_notifying_subscribers(self):
         fc = FakeController()
@@ -161,7 +161,7 @@ class TestFlowSensorClose:
         second = FlowSensor(fc, index=2, name="second")
         second.close()
         fc.publish(1000, flow_2_raw=2000)
-        assert first.latest_flow_ul_min == pytest.approx(100.0)
+        assert first.latest_flow_ul_min == pytest.approx(2000.0)
         assert second.latest_flow_ul_min is None
 
 
@@ -173,15 +173,15 @@ class TestTwoSensorsOnOneController:
         first = FlowSensor(fc, index=1, name="first")
         second = FlowSensor(fc, index=2, name="second")
         fc.publish(1000, flow_2_raw=-2000)
-        assert first.latest_flow_ul_min == pytest.approx(100.0)
-        assert second.latest_flow_ul_min == pytest.approx(-200.0)
+        assert first.latest_flow_ul_min == pytest.approx(2000.0)
+        assert second.latest_flow_ul_min == pytest.approx(-4000.0)
 
     def test_slot_1_sentinel_is_independent_of_slot_0(self):
         fc = FakeController()
         first = FlowSensor(fc, index=1, name="first")
         second = FlowSensor(fc, index=2, name="second")
         fc.publish(1000, flow_2_raw=INVALID_RAW)
-        assert first.latest_flow_ul_min == pytest.approx(100.0)
+        assert first.latest_flow_ul_min == pytest.approx(2000.0)
         assert second.latest_flow_ul_min is None
 
     def test_empty_slot_0_does_not_disturb_a_lone_slot_1_sensor(self):
@@ -192,7 +192,7 @@ class TestTwoSensorsOnOneController:
         fc = FakeController()
         lone = FlowSensor(fc, index=2, name="waste_line")
         fc.publish(INVALID_RAW, flow_2_raw=1500)
-        assert lone.latest_flow_ul_min == pytest.approx(150.0)
+        assert lone.latest_flow_ul_min == pytest.approx(3000.0)
 
     def test_a_raising_sensor_does_not_starve_the_other(self):
         fc = FakeController()
@@ -202,7 +202,7 @@ class TestTwoSensorsOnOneController:
         seen = []
         second.subscribe(lambda flow, ts: seen.append(flow))
         fc.publish(1000, flow_2_raw=2000)
-        assert seen == [pytest.approx(200.0)]
+        assert seen == [pytest.approx(4000.0)]
 
 
 class TestFlowSensorSimulation:

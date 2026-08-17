@@ -11,11 +11,26 @@ import time
 from ._def import CMD_SET, COMMAND_STATUS, MCU_CONSTANTS
 from .controller import Subscribers
 
+# Counts per (uL/min) for the installed part. The firmware sends the sensor's
+# raw int16 untouched, so this is the only place the wire value becomes a flow.
+#
+# SLF3S-1300F: datasheet Table 15 gives 500 counts per ml/min, i.e. 0.5 counts
+# per uL/min, so uL/min = raw / 0.5 = raw * 2.
+#
+# This driver previously assumed the SLF3S-0600F's 10 counts per uL/min. That
+# is a factor of 20, and a bench sweep on hardware measured exactly that:
+# 19.6x, 19.8x, 19.7x, 20.0x low across 500-4000 uL/min. Applying the correct
+# factor puts all four points within 2% of the commanded rate.
+#
+# If a rig is fitted with a different SLF3x part, this constant and
+# SLF3X_SCALE_FACTOR_FLOW in the firmware are what change.
+SCALE_FACTOR_COUNTS_PER_UL_MIN = 0.5
+
 # SLF3X::read() pre-fills its output with INT16_MAX and returns early when the
-# sensor was never initialized or the I2C read short-reads. An absent sensor
-# therefore streams 32767, which scales to a plausible-looking 3276.7 uL/min.
-# The real output limit is +/-3250 uL/min (raw +/-32500), so the sentinel never
-# collides with a genuine saturated reading.
+# sensor was never initialized or the I2C read short-reads, so an absent sensor
+# streams 32767. The 1300F's output limit is +/-65 ml/min, which the datasheet
+# says it reports as raw +/-32500 -- so the sentinel still cannot collide with
+# a genuine saturated reading.
 INVALID_RAW = 32767
 
 MEDIUM_WATER = MCU_CONSTANTS.MEDIUM_WATER
@@ -119,7 +134,7 @@ class FlowSensor:
 
     def _on_packet(self, parsed):
         raw = parsed["flowrates_raw"][self.packet_slot]
-        flow = None if raw == INVALID_RAW else parsed["flowrates"][self.packet_slot]
+        flow = None if raw == INVALID_RAW else raw / SCALE_FACTOR_COUNTS_PER_UL_MIN
 
         with self._lock:
             self._latest = flow

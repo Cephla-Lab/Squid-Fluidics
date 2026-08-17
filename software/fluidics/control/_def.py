@@ -14,7 +14,12 @@ class MCU_CONSTANTS:
   _p_max = 15 # psi
   # SLF3X params
   VOLUME_UL_MAX = 5000
-  SCALE_FACTOR_FLOW = 10 # Scale Factor for flow rate measurement, ul/min, SLF3S-0600F
+  # Mirrors SLF3X_SCALE_FACTOR_FLOW in the firmware. Used only to convert
+  # uL/min thresholds into the raw counts the MCU compares against
+  # (INITIALIZE_BANG_BANG_PARAMS), so it must match the firmware, NOT
+  # necessarily the installed sensor. The sensor's own scale factor lives in
+  # flow_sensor.py, which is what turns a reading into uL/min.
+  SCALE_FACTOR_FLOW = 10
   SLF3X_MAX_VAL_uL_MIN = 3520
   SLF3X_WATER = 0x08
   SLF3X_IPA = 0x15
