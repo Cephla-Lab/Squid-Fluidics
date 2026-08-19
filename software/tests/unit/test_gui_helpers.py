@@ -7,6 +7,7 @@ module-level pure functions are covered here.
 """
 
 import os
+from types import SimpleNamespace
 
 import pytest
 
@@ -45,6 +46,198 @@ class TestSafeFilenamePart:
 
     def test_spaces_become_underscores(self):
         assert gui._safe_filename_part("waste line") == "waste_line"
+
+
+class TestHighlightFollowsCheckedRows:
+    """The worker runs only the checked sequences, so the index it reports is a
+    position in that filtered list -- not a tree row. With a non-contiguous
+    selection, highlighting the raw index lights up the wrong sequence.
+
+    _handle_progress must translate through the rows snapshotted at run start.
+    Called unbound against a stub, since constructing SequencesWidget needs a
+    QApplication.
+    """
+
+    class Label:
+        def setText(self, text):
+            pass
+
+    class Stub:
+        def __init__(self, running_rows):
+            self._running_rows = running_rows
+            self.total_sequences = len(running_rows)
+            self.sequenceLabel = TestHighlightFollowsCheckedRows.Label()
+            self.highlighted = []
+
+        def highlightRow(self, row):
+            self.highlighted.append(row)
+
+    def test_a_sparse_selection_lights_each_checked_row_in_turn(self):
+        stub = self.Stub(running_rows=[0, 2, 4])
+        for index in range(3):
+            gui.SequencesWidget._handle_progress(stub, index, index + 1, "Started")
+        assert stub.highlighted == [0, 2, 4]
+
+    def test_an_out_of_range_index_clears_the_highlight(self):
+        # Defensive: an index past the snapshot can only come from a worker
+        # bug; better no highlight than a wrong one. (A tree that shrank
+        # mid-run is caught separately, by highlightRow's own bounds check.)
+        stub = self.Stub(running_rows=[0])
+        gui.SequencesWidget._handle_progress(stub, 5, 6, "Started")
+        assert stub.highlighted == [None]
+
+    def test_a_negative_index_clears_the_highlight_too(self):
+        # Python indexing would wrap -1 to the last checked row -- the guard
+        # must treat it like any other impossible index.
+        stub = self.Stub(running_rows=[0, 2])
+        gui.SequencesWidget._handle_progress(stub, -1, 0, "Started")
+        assert stub.highlighted == [None]
+
+
+class TestCheckedRows:
+    """_checkedRows is both the row filter getSequences(selected_only=True)
+    iterates and the snapshot _handle_progress translates through, so it must
+    list the checked rows in tree order.
+    """
+
+    class FakeItem:
+        def __init__(self, checked):
+            self._checked = checked
+
+        def checkState(self, column):
+            return gui.Qt.Checked if self._checked else gui.Qt.Unchecked
+
+    class FakeTree:
+        def __init__(self, states):
+            self._items = [TestCheckedRows.FakeItem(s) for s in states]
+
+        def topLevelItemCount(self):
+            return len(self._items)
+
+        def topLevelItem(self, i):
+            return self._items[i]
+
+    class Stub:
+        def __init__(self, tree):
+            self.tree = tree
+
+    def test_returns_checked_rows_in_tree_order(self):
+        stub = self.Stub(self.FakeTree([True, False, True, False, True]))
+        assert gui.SequencesWidget._checkedRows(stub) == [0, 2, 4]
+
+    def test_nothing_checked_gives_no_rows(self):
+        stub = self.Stub(self.FakeTree([False, False]))
+        assert gui.SequencesWidget._checkedRows(stub) == []
+
+
+class TestRecordingSaveDialog:
+    """Start Recording asks where to save, pre-filled with the generated
+    filename; Stop Recording reports the full path it saved to. Called unbound
+    against a stub, since constructing TimeSeriesPlotWidget needs a
+    QApplication.
+    """
+
+    class Button:
+        def __init__(self, text):
+            self._text = text
+
+        def text(self):
+            return self._text
+
+        def setText(self, text):
+            self._text = text
+
+    class Stub:
+        def __init__(self):
+            self.record_btn = TestRecordingSaveDialog.Button("Start Recording")
+            self.file = None
+            self.writer = None
+
+        def _record_filename(self):
+            return "flow_test_20260819_000000.csv"
+
+        def _record_header(self):
+            return ["Time", "Flow Rate (uL/min)"]
+
+        def close_recording(self):
+            return gui.TimeSeriesPlotWidget.close_recording(self)
+
+    @pytest.fixture
+    def dialogs(self, monkeypatch, tmp_path):
+        """Route the file dialog and message boxes; pin the shared last-dir."""
+        calls = SimpleNamespace(defaults=[], chosen="", info=[], error=[])
+
+        def fake_get_save_filename(parent, caption, default, filter):
+            calls.defaults.append(default)
+            return calls.chosen, filter
+
+        monkeypatch.setattr(gui.QFileDialog, "getSaveFileName",
+                            fake_get_save_filename)
+        monkeypatch.setattr(gui.QMessageBox, "information",
+                            lambda parent, title, text: calls.info.append(text))
+        monkeypatch.setattr(gui.QMessageBox, "critical",
+                            lambda parent, title, text: calls.error.append(text))
+        monkeypatch.setattr(gui.TimeSeriesPlotWidget, "_last_record_dir",
+                            str(tmp_path))
+        return calls
+
+    def test_cancelling_the_dialog_leaves_recording_unstarted(self, dialogs):
+        stub = self.Stub()
+        gui.TimeSeriesPlotWidget._toggle_record(stub)
+        assert stub.file is None
+        assert stub.record_btn.text() == "Start Recording"
+
+    def test_the_dialog_is_prefilled_with_the_generated_name(self, dialogs, tmp_path):
+        stub = self.Stub()
+        gui.TimeSeriesPlotWidget._toggle_record(stub)
+        assert dialogs.defaults == [str(tmp_path / "flow_test_20260819_000000.csv")]
+
+    def test_starting_writes_the_header_at_the_chosen_path(self, dialogs, tmp_path):
+        path = tmp_path / "run1.csv"
+        dialogs.chosen = str(path)
+        stub = self.Stub()
+        gui.TimeSeriesPlotWidget._toggle_record(stub)
+        assert stub.record_btn.text() == "Stop Recording"
+        stub.close_recording()
+        # read_text() collapses csv's \r\n line ending via universal newlines.
+        assert path.read_text() == "Time,Flow Rate (uL/min)\n"
+
+    def test_stopping_reports_where_the_file_was_saved(self, dialogs, tmp_path):
+        dialogs.chosen = str(tmp_path / "run1.csv")
+        stub = self.Stub()
+        gui.TimeSeriesPlotWidget._toggle_record(stub)
+        gui.TimeSeriesPlotWidget._toggle_record(stub)
+        assert stub.file is None
+        assert stub.record_btn.text() == "Start Recording"
+        assert len(dialogs.info) == 1
+        assert str(tmp_path / "run1.csv") in dialogs.info[0]
+
+    def test_the_chosen_directory_is_remembered_for_the_next_dialog(self, dialogs, tmp_path):
+        (tmp_path / "data").mkdir()
+        dialogs.chosen = str(tmp_path / "data" / "run1.csv")
+        gui.TimeSeriesPlotWidget._toggle_record(self.Stub())
+        dialogs.chosen = ""
+        gui.TimeSeriesPlotWidget._toggle_record(self.Stub())
+        assert dialogs.defaults[1] == str(
+            tmp_path / "data" / "flow_test_20260819_000000.csv")
+
+    def test_stopping_with_no_open_file_shows_no_notice(self, dialogs):
+        # close_recordings() at app exit can close the file while the button
+        # still reads "Stop Recording"; a click then must not crash or report
+        # a phantom save.
+        stub = self.Stub()
+        stub.record_btn.setText("Stop Recording")
+        gui.TimeSeriesPlotWidget._toggle_record(stub)
+        assert dialogs.info == []
+        assert stub.record_btn.text() == "Start Recording"
+
+    def test_a_failed_open_reports_and_stays_unstarted(self, dialogs, tmp_path):
+        dialogs.chosen = str(tmp_path / "no_such_dir" / "run1.csv")
+        stub = self.Stub()
+        gui.TimeSeriesPlotWidget._toggle_record(stub)
+        assert len(dialogs.error) == 1
+        assert stub.file is None
+        assert stub.record_btn.text() == "Start Recording"
 
 
 class TestDrawProtectionUnavailable:

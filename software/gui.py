@@ -174,6 +174,7 @@ class SequencesWidget(QWidget):
 
         self.experiment_ops = None  # Will be set based on the selected application
         self.worker = None
+        self._running_rows = []  # Tree rows of the sequences handed to the worker
 
         if self.config.application == 'Flow Cell':
             self.experiment_ops = MERFISHOperations(self.config, self.syringePump, self.selectorValveSystem,
@@ -337,13 +338,11 @@ class SequencesWidget(QWidget):
     def getSequences(self, selected_only=False):
         """Read the tree back into a list of sequence dicts."""
         sequences = []
-        for i in range(self.tree.topLevelItemCount()):
+        rows = self._checkedRows() if selected_only else range(self.tree.topLevelItemCount())
+        for i in rows:
             item = self.tree.topLevelItem(i)
             seq_type = item.data(0, Qt.UserRole)
             include = item.checkState(0) == Qt.Checked
-
-            if selected_only and not include:
-                continue
 
             seq = {'type': seq_type, 'include': include}
 
@@ -416,6 +415,13 @@ class SequencesWidget(QWidget):
         for i in range(self.tree.topLevelItemCount()):
             self.tree.topLevelItem(i).setCheckState(0, Qt.Unchecked)
 
+    def _checkedRows(self):
+        """Tree rows whose checkbox is checked, in order. getSequences reads
+        exactly these rows when selected_only=True, so a snapshot of this list
+        stays index-aligned with the sequences handed to the worker."""
+        return [i for i in range(self.tree.topLevelItemCount())
+                if self.tree.topLevelItem(i).checkState(0) == Qt.Checked]
+
     def highlightRow(self, row_index):
         """Highlight the currently running sequence in the tree."""
         white_brush = QBrush(QColor('white'))
@@ -441,6 +447,9 @@ class SequencesWidget(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Invalid Sequence", f"Failed to validate sequences: {str(e)}")
             return
+        # The worker reports positions in this filtered list; remember which
+        # tree row each one came from so the highlight lands on it.
+        self._running_rows = self._checkedRows()
         self.total_sequences = sum(s.get('repeat', 1) for s in selected)
 
         if not selected:
@@ -507,7 +516,8 @@ class SequencesWidget(QWidget):
 
     def _handle_progress(self, index, sequence_num, status):
         self.sequenceLabel.setText(f"{sequence_num}/{self.total_sequences} sequences")
-        self.highlightRow(index)
+        row = self._running_rows[index] if 0 <= index < len(self._running_rows) else None
+        self.highlightRow(row)
 
     def _handle_warning(self, message):
         self._warnings.append(message)
@@ -848,6 +858,10 @@ class TimeSeriesPlotWidget(QWidget):
     them, via the four hooks below.
     """
 
+    # Where the save dialog opens; every plot shares it, so consecutive
+    # recordings land next to each other. Session-only, no persistence.
+    _last_record_dir = os.getcwd()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.times = []
@@ -966,19 +980,38 @@ class TimeSeriesPlotWidget(QWidget):
 
     def _toggle_record(self):
         if self.record_btn.text() == "Start Recording":
-            self.record_btn.setText("Stop Recording")
-            self.file = open(self._record_filename(), "w", newline="")
+            default = os.path.join(TimeSeriesPlotWidget._last_record_dir,
+                                   self._record_filename())
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Save Recording", default, "CSV Files (*.csv)")
+            if not path:
+                return
+            try:
+                self.file = open(path, "w", newline="")
+            except OSError as e:
+                QMessageBox.critical(self, "Recording Not Started",
+                                     f"Could not create {path}:\n{e}")
+                return
+            TimeSeriesPlotWidget._last_record_dir = os.path.dirname(path)
             self.writer = csv.writer(self.file)
             self.writer.writerow(self._record_header())
+            self.record_btn.setText("Stop Recording")
         else:
             self.record_btn.setText("Start Recording")
-            self.close_recording()
+            saved_path = self.close_recording()
+            if saved_path:
+                QMessageBox.information(self, "Recording Saved",
+                                        f"Recording saved to:\n{saved_path}")
 
     def close_recording(self):
-        if self.file is not None:
-            self.file.close()
-            self.file = None
-            self.writer = None
+        """Close the recording if one is open; returns its path, else None."""
+        if self.file is None:
+            return None
+        saved_path = self.file.name
+        self.file.close()
+        self.file = None
+        self.writer = None
+        return saved_path
 
 
 class SensorTabWidget(QWidget):
