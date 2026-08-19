@@ -11,11 +11,26 @@ import time
 from ._def import CMD_SET, COMMAND_STATUS, MCU_CONSTANTS
 from .controller import Subscribers
 
+# Counts per (uL/min) for the installed part. The firmware sends the sensor's
+# raw int16 untouched, so this is the only place the wire value becomes a flow.
+#
+# SLF3S-1300F: datasheet Table 15 gives 500 counts per ml/min, i.e. 0.5 counts
+# per uL/min, so uL/min = raw / 0.5 = raw * 2.
+#
+# This driver previously assumed the SLF3S-0600F's 10 counts per uL/min. That
+# is a factor of 20, and a bench sweep on hardware measured exactly that:
+# 19.6x, 19.8x, 19.7x, 20.0x low across 500-4000 uL/min. Applying the correct
+# factor puts all four points within 2% of the commanded rate.
+#
+# If a rig is fitted with a different SLF3x part, this constant and
+# SLF3X_SCALE_FACTOR_FLOW in the firmware are what change.
+SCALE_FACTOR_COUNTS_PER_UL_MIN = 0.5
+
 # SLF3X::read() pre-fills its output with INT16_MAX and returns early when the
-# sensor was never initialized or the I2C read short-reads. An absent sensor
-# therefore streams 32767, which scales to a plausible-looking 3276.7 uL/min.
-# The real output limit is +/-3250 uL/min (raw +/-32500), so the sentinel never
-# collides with a genuine saturated reading.
+# sensor was never initialized or the I2C read short-reads, so an absent sensor
+# streams 32767. The 1300F's output limit is +/-65 ml/min, which the datasheet
+# says it reports as raw +/-32500 -- so the sentinel still cannot collide with
+# a genuine saturated reading.
 INVALID_RAW = 32767
 
 MEDIUM_WATER = MCU_CONSTANTS.MEDIUM_WATER
@@ -29,12 +44,23 @@ class FlowSensor:
     (1 = Wire1, 2 = Wire2) and fixes which pair of packet bytes carries it:
     index 1 reads bytes 23-24, index 2 reads bytes 25-26. The firmware applies
     the same mapping, so the two stay in step.
+
+    monitor/ramp_up_seconds/tolerance_fraction are draw-protection policy. The
+    driver never consults them -- it carries them because the config declares
+    them in this sensor's own block, and because both consumers (the operations
+    layer, which reads them per draw, and the GUI, which writes `monitor` at
+    runtime) already hold the sensor. A separate registry keyed by name would
+    be one more thing to keep in step with no one left to benefit.
     """
 
-    def __init__(self, fluid_controller, index, name):
+    def __init__(self, fluid_controller, index, name,
+                 monitor="off", ramp_up_seconds=3.0, tolerance_fraction=0.3):
         self.fc = fluid_controller
         self.index = index
         self.name = name
+        self.monitor = monitor
+        self.ramp_up_seconds = ramp_up_seconds
+        self.tolerance_fraction = tolerance_fraction
         # Derived, not passed: index and slot must always agree, so carrying
         # them as independent arguments only creates a way for them to differ.
         self.packet_slot = index - 1
@@ -78,6 +104,11 @@ class FlowSensor:
             raise
         print(f"Flow sensor '{self.name}' initialized on I2C index {self.index}.")
 
+    def start(self):
+        """Begin publishing. Nothing to do: the controller's reader thread
+        already drives _on_packet. Exists so callers can start real and
+        simulated sensors the same way."""
+
     @property
     def latest_flow_ul_min(self):
         """Most recent reading in uL/min, or None if invalid or not yet seen."""
@@ -103,7 +134,7 @@ class FlowSensor:
 
     def _on_packet(self, parsed):
         raw = parsed["flowrates_raw"][self.packet_slot]
-        flow = None if raw == INVALID_RAW else parsed["flowrates"][self.packet_slot]
+        flow = None if raw == INVALID_RAW else raw / SCALE_FACTOR_COUNTS_PER_UL_MIN
 
         with self._lock:
             self._latest = flow
@@ -120,10 +151,14 @@ class FlowSensorSimulation:
     not started; callers start it explicitly.
     """
 
-    def __init__(self, fluid_controller=None, index=1, name="sim"):
+    def __init__(self, fluid_controller=None, index=1, name="sim",
+                 monitor="off", ramp_up_seconds=3.0, tolerance_fraction=0.3):
         self.fc = fluid_controller
         self.index = index
         self.name = name
+        self.monitor = monitor
+        self.ramp_up_seconds = ramp_up_seconds
+        self.tolerance_fraction = tolerance_fraction
         self.packet_slot = index - 1
 
         self.simulated_flow_ul_min = 500.0
@@ -136,6 +171,15 @@ class FlowSensorSimulation:
 
     def begin(self):
         pass
+
+    def start(self):
+        """Start the publish loop.
+
+        Separate from begin() because the suite's fake clock turns this loop
+        into a busy spin -- a test that calls begin() must not get a thread it
+        did not ask for.
+        """
+        self.reading_thread.start()
 
     @property
     def latest_flow_ul_min(self):
@@ -177,6 +221,36 @@ def build_flow_sensors(fluid_controller, config, simulation=False):
 
     cls = FlowSensorSimulation if simulation else FlowSensor
     return [
-        cls(fluid_controller, index=cfg.index, name=cfg.name)
+        cls(fluid_controller, index=cfg.index, name=cfg.name,
+            monitor=cfg.monitor, ramp_up_seconds=cfg.ramp_up_seconds,
+            tolerance_fraction=cfg.tolerance_fraction)
         for cfg in config.flow_sensors
     ]
+
+
+def start_flow_sensors(fluid_controller, config, simulation=False):
+    """Construct, initialize and start every configured sensor.
+
+    All or nothing. A sensor claims a slot on the controller's packet stream in
+    its constructor, and only close() gives it back; if the second sensor fails
+    to initialize, dropping the list leaves the first one subscribed for the
+    life of the process with nothing holding a reference to unsubscribe it.
+
+    Everything built is closed on the way out, including the sensor that
+    failed. begin() does clean up after itself, but making that the only
+    cleanup couples this to which line inside it raised -- and start() can
+    raise too, at which point the sensor is fully live. close() is idempotent,
+    so closing twice costs nothing and closing something never begun is fine.
+
+    Both entry points call this so neither has to remember either half.
+    """
+    sensors = build_flow_sensors(fluid_controller, config, simulation)
+    try:
+        for sensor in sensors:
+            sensor.begin()
+            sensor.start()
+    except Exception:
+        for sensor in sensors:
+            sensor.close()
+        raise
+    return sensors

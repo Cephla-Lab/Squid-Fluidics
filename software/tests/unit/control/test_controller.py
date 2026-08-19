@@ -117,28 +117,17 @@ def _bare_controller():
 
 
 class TestParsePacket:
-    def test_positive_flow_scales_by_ten(self):
+    @pytest.mark.parametrize("raw", [1000, -1000, 32500, 32767])
+    def test_flow_passes_through_unscaled(self, raw):
+        """_parse_packet hands on the sensor's counts untouched. Turning them
+        into uL/min needs the installed part's scale factor, which lives with
+        the driver -- so that conversion is tested in test_flow_sensor.py, not
+        here. 32767 is the no-reading sentinel and 32500 a real saturated
+        reading; at this layer both are simply carried through.
+        """
         fc = _bare_controller()
-        parsed = fc._parse_packet(_make_packet(flow_raw=1000))
-        assert parsed["flowrates"][0] == pytest.approx(100.0)
-        assert parsed["flowrates_raw"][0] == 1000
-
-    def test_negative_flow_scales_by_ten(self):
-        fc = _bare_controller()
-        parsed = fc._parse_packet(_make_packet(flow_raw=-1000))
-        assert parsed["flowrates"][0] == pytest.approx(-100.0)
-        assert parsed["flowrates_raw"][0] == -1000
-
-    def test_sentinel_survives_as_raw(self):
-        fc = _bare_controller()
-        parsed = fc._parse_packet(_make_packet(flow_raw=32767))
-        assert parsed["flowrates_raw"][0] == 32767
-
-    def test_saturation_is_distinct_from_sentinel(self):
-        fc = _bare_controller()
-        parsed = fc._parse_packet(_make_packet(flow_raw=32500))
-        assert parsed["flowrates_raw"][0] == 32500
-        assert parsed["flowrates"][0] == pytest.approx(3250.0)
+        parsed = fc._parse_packet(_make_packet(flow_raw=raw))
+        assert parsed["flowrates_raw"][0] == raw
 
     def test_uid_and_status_round_trip(self):
         fc = _bare_controller()
@@ -152,7 +141,7 @@ class TestPublishStatus:
         fc = _bare_controller()
         fc._init_status_state()
         fc._publish_status(fc._parse_packet(_make_packet(flow_raw=250)))
-        assert fc.get_mcu_status()["flowrates"][0] == pytest.approx(25.0)
+        assert fc.get_mcu_status()["flowrates_raw"][0] == 250
 
     def test_publish_increments_sequence(self):
         fc = _bare_controller()
@@ -169,22 +158,22 @@ class TestPublishStatus:
         fc.subscribe_packets(seen.append)
         fc._publish_status(fc._parse_packet(_make_packet(flow_raw=400)))
         assert len(seen) == 1
-        assert seen[0]["flowrates"][0] == pytest.approx(40.0)
+        assert seen[0]["flowrates_raw"][0] == 400
 
     def test_subscriber_exception_does_not_break_publishing(self):
         fc = _bare_controller()
         fc._init_status_state()
         fc.subscribe_packets(lambda _: 1 / 0)
         fc._publish_status(fc._parse_packet(_make_packet(flow_raw=400)))
-        assert fc.get_mcu_status()["flowrates"][0] == pytest.approx(40.0)
+        assert fc.get_mcu_status()["flowrates_raw"][0] == 400
 
     def test_snapshot_is_a_copy(self):
         fc = _bare_controller()
         fc._init_status_state()
         fc._publish_status(fc._parse_packet(_make_packet()))
         snapshot = fc.get_mcu_status()
-        snapshot["flowrates"] = "clobbered"
-        assert fc.get_mcu_status()["flowrates"] != "clobbered"
+        snapshot["flowrates_raw"] = "clobbered"
+        assert fc.get_mcu_status()["flowrates_raw"] != "clobbered"
 
 
 class TestPacketSubscribers:
@@ -283,7 +272,6 @@ class TestNegativeRawDecoding:
             warnings.simplefilter("error")
             parsed = fc._parse_packet(msg)
         assert parsed["flowrates_raw"][0] == -1000
-        assert parsed["flowrates"][0] == pytest.approx(-100.0)
 
     def test_solenoid_valves_negative_high_bit_no_numpy_warning(self):
         fc = _bare_controller()
@@ -432,7 +420,7 @@ class TestReaderLoop:
 
         fc._reader_loop()
 
-        assert fc.get_mcu_status()["flowrates"][0] == pytest.approx(30.0)
+        assert fc.get_mcu_status()["flowrates_raw"][0] == 300
 
 
 class _FakeThreadingNamespace:

@@ -21,7 +21,7 @@ from fluidics.control.syringe_pump import SyringePump, SyringePumpSimulation
 from fluidics.control.selector_valve import SelectorValveSystem
 from fluidics.control.disc_pump import DiscPump
 from fluidics.control.temperature_controller import TCMController, TCMControllerSimulation
-from fluidics.control.flow_sensor import build_flow_sensors
+from fluidics.control.flow_sensor import start_flow_sensors
 
 from fluidics.control._def import CMD_SET
 from fluidics.control.tecancavro.tecanapi import TecanAPITimeout
@@ -163,7 +163,8 @@ class SequencesWidget(QWidget):
 
     sequence_running = pyqtSignal(bool)
 
-    def __init__(self, config, syringe, selector_valves, disc_pump, temperature_controller):
+    def __init__(self, config, syringe, selector_valves, disc_pump, temperature_controller,
+                 flow_sensors=None):
         super().__init__()
         self.config = config
         self.syringePump = syringe
@@ -175,7 +176,9 @@ class SequencesWidget(QWidget):
         self.worker = None
 
         if self.config.application == 'Flow Cell':
-            self.experiment_ops = MERFISHOperations(self.config, self.syringePump, self.selectorValveSystem, self.temperatureController)
+            self.experiment_ops = MERFISHOperations(self.config, self.syringePump, self.selectorValveSystem,
+                                                   self.temperatureController, flow_sensors,
+                                                   on_warning=self.reportWarning)
         elif self.config.application == "Open Chamber":
             self.experiment_ops = OpenChamberOperations(self.config, self.syringePump, self.selectorValveSystem, self.discPump, self.temperatureController)
         else:
@@ -231,6 +234,14 @@ class SequencesWidget(QWidget):
         self.progressBar = QProgressBar()
         self.sequenceLabel = QLabel("0/0 sequences")
         self.timeLabel = QLabel("00:00:00 remaining")
+        # Draw-protection notices land here rather than in a QMessageBox: a
+        # `warn`-mode fault can fire once per draw, and a modal dialog per draw
+        # would be unusable during the very run it is meant to inform.
+        self.warningLabel = QLabel()
+        self.warningLabel.setStyleSheet("color: #b36b00;")
+        self.warningLabel.setWordWrap(True)
+        self.warningLabel.setVisible(False)
+        self._warnings = []
 
         progressSection = QVBoxLayout()
         progressLabelLayout = QHBoxLayout()
@@ -239,6 +250,7 @@ class SequencesWidget(QWidget):
         progressLabelLayout.addWidget(self.timeLabel)
         progressSection.addLayout(progressLabelLayout)
         progressSection.addWidget(self.progressBar)
+        progressSection.addWidget(self.warningLabel)
 
         layout.addLayout(progressSection)
 
@@ -442,6 +454,9 @@ class SequencesWidget(QWidget):
             'on_estimate': self.setTimeEstimate
         }
 
+        self._warnings.clear()
+        self.warningLabel.setVisible(False)
+
         self.runButton.setEnabled(False)
         self.abortButton.setEnabled(True)
         self.sequence_running.emit(True)
@@ -476,6 +491,8 @@ class SequencesWidget(QWidget):
         if event.type() == WorkerEvent.EVENT_TYPE:
             if event.callback_name == 'update_progress':
                 self._handle_progress(*event.args)
+            elif event.callback_name == 'show_warning':
+                self._handle_warning(*event.args)
             elif event.callback_name == 'show_error':
                 self._handle_error(*event.args)
             elif event.callback_name == 'on_finished':
@@ -491,6 +508,18 @@ class SequencesWidget(QWidget):
     def _handle_progress(self, index, sequence_num, status):
         self.sequenceLabel.setText(f"{sequence_num}/{self.total_sequences} sequences")
         self.highlightRow(index)
+
+    def _handle_warning(self, message):
+        self._warnings.append(message)
+        count = len(self._warnings)
+        prefix = "\u26a0 " if count == 1 else f"\u26a0 {count} notices, latest: "
+        self.warningLabel.setText(prefix + message)
+        self.warningLabel.setVisible(True)
+
+    def reportWarning(self, message):
+        """Called from the MCU reader thread, so it must not touch widgets."""
+        print(message)
+        self._post_event('show_warning', message)
 
     def _handle_error(self, error_message):
         QMessageBox.critical(self, "Error", error_message)
@@ -1116,9 +1145,10 @@ class FlowSensorWidget(TimeSeriesPlotWidget):
 
     reading_signal = pyqtSignal(object, float)  # (flow_ul_min or None, timestamp)
 
-    def __init__(self, sensor, parent=None):
+    def __init__(self, sensor, draw_protection=True, parent=None):
         super().__init__(parent)
         self.sensor = sensor
+        self.draw_protection = draw_protection
 
         self.flows = []
 
@@ -1143,12 +1173,45 @@ class FlowSensorWidget(TimeSeriesPlotWidget):
         readout_layout.addWidget(QLabel("Flow rate:"))
         readout_layout.addWidget(self.flow_label)
         readout_layout.addStretch()
+
+        # Draw protection, switchable mid-run. Each draw reads the mode once
+        # when it arms, so changing this affects the next draw, not the one
+        # already running. Being able to move a sensor from warn to stop
+        # without restarting is the point: the tolerance and ramp-up that suit
+        # a given setup are found by watching warnings, and a restart to try
+        # the next value costs a whole run.
+        self.monitor_combo = QComboBox()
+        self.monitor_combo.addItems(["off", "warn", "stop"])
+        self.monitor_combo.setCurrentText(self.sensor.monitor)
+        self.monitor_combo.setToolTip(
+            "off: plot only.\n"
+            "warn: log a flow fault and carry on.\n"
+            "stop: halt the draw and fail the sequence."
+        )
+        self.monitor_combo.currentTextChanged.connect(self._on_monitor_changed)
+        if not self.draw_protection:
+            # Only MERFISHOperations arms the sensors. Leaving the control live
+            # on an application that consumes nothing would offer the operator
+            # a safety switch wired to nothing, which is worse than not
+            # offering it -- so show what it actually is: off, and unavailable.
+            self.monitor_combo.setCurrentText("off")
+            self.monitor_combo.setEnabled(False)
+            self.monitor_combo.setToolTip(
+                "Draw protection is only available for the Flow Cell "
+                "application."
+            )
+        readout_layout.addWidget(QLabel("Draw protection:"))
+        readout_layout.addWidget(self.monitor_combo)
         readout.setLayout(readout_layout)
 
         plot_box = self._build_plot_box("Plot", min_interval=1)
 
         layout.addWidget(readout)
         layout.addWidget(plot_box)
+
+    def _on_monitor_changed(self, mode):
+        self.sensor.monitor = mode
+        print(f"Flow sensor '{self.sensor.name}': draw protection set to {mode}.")
 
     def _on_callback(self, flow, timestamp):
         # Runs in the controller's reader thread; marshal to the GUI thread.
@@ -1198,11 +1261,11 @@ class FlowSensorWidget(TimeSeriesPlotWidget):
 class FlowSensorControlWidget(SensorTabWidget):
     """Container laying out one FlowSensorWidget per configured sensor."""
 
-    def __init__(self, sensors):
+    def __init__(self, sensors, draw_protection=True):
         super().__init__()
         layout = QHBoxLayout(self)
         for sensor in sensors:
-            sw = FlowSensorWidget(sensor)
+            sw = FlowSensorWidget(sensor, draw_protection=draw_protection)
             self.plot_widgets.append(sw)
             layout.addWidget(sw)
 
@@ -1236,7 +1299,7 @@ class FluidicsControlGUI(QMainWindow):
         self.tabWidget = QTabWidget()
 
         # "Settings and Manual Control" tab
-        runExperimentsTab = SequencesWidget(self.config, self.syringePump, self.selectorValveSystem, self.discPump, self.temperatureController)
+        runExperimentsTab = SequencesWidget(self.config, self.syringePump, self.selectorValveSystem, self.discPump, self.temperatureController, self.flowSensors)
         manualControlTab = ManualControlWidget(self.config, self.syringePump, self.selectorValveSystem, self.discPump)
         # TODO: integrate temperature controller ui
 
@@ -1248,12 +1311,12 @@ class FluidicsControlGUI(QMainWindow):
             self.sensorTabs.append(temperatureControlTab)
 
         if self.flowSensors:
-            flowSensorTab = FlowSensorControlWidget(self.flowSensors)
+            draw_protection = self.config.application == "Flow Cell"
+            self._warn_if_draw_protection_unavailable(draw_protection)
+            flowSensorTab = FlowSensorControlWidget(self.flowSensors,
+                                                    draw_protection=draw_protection)
             self.tabWidget.addTab(flowSensorTab, "Flow Sensors")
             self.sensorTabs.append(flowSensorTab)
-            for sensor in self.flowSensors:
-                if hasattr(sensor, "reading_thread"):
-                    sensor.reading_thread.start()
 
         self.setCentralWidget(self.tabWidget)
         runExperimentsTab.sequence_running.connect(self.set_manual_control_tab_state)
@@ -1305,22 +1368,40 @@ class FluidicsControlGUI(QMainWindow):
         self.controller.begin()
         self.controller.send_command(CMD_SET.CLEAR)
 
-        self.flowSensors = build_flow_sensors(self.controller, config, simulation)
+        try:
+            self.flowSensors = start_flow_sensors(self.controller, config, simulation)
+        except Exception as e:
+            # start_flow_sensors closes whatever it had already brought up, so
+            # nothing is left subscribed to the packet stream. The message
+            # names the sensor and its index.
+            msg = f"Failed to initialize flow sensors: {e}"
+            print(msg)
+            self.flowSensors = []
+            QMessageBox.warning(
+                self, "Flow Sensor",
+                f"{msg}\n\nCheck that the sensor is connected to the matching "
+                f"I2C index. The Flow Sensor tab will not be available."
+            )
+
+    def _warn_if_draw_protection_unavailable(self, draw_protection):
+        """Say so loudly when a configured mode will not be acted on.
+
+        Only MERFISHOperations arms the sensors, so on any other application a
+        config asking for warn or stop is inert. Silence there would leave the
+        operator believing a draw is protected when nothing is watching it.
+        """
+        if draw_protection:
+            return
+        configured = [s.name for s in self.flowSensors if s.monitor != "off"]
+        if not configured:
+            return
         for sensor in self.flowSensors:
-            try:
-                sensor.begin()
-            except Exception as e:
-                # begin() releases the packet_callback slot it claimed before
-                # re-raising, so discarding the sensor here strands nothing.
-                msg = f"Failed to initialize flow sensor '{sensor.name}': {e}"
-                print(msg)
-                self.flowSensors = []
-                QMessageBox.warning(
-                    self, "Flow Sensor",
-                    f"{msg}\n\nCheck that the sensor is connected to I2C index "
-                    f"{sensor.index}. The Flow Sensor tab will not be available."
-                )
-                break
+            sensor.monitor = "off"
+        msg = (f"Draw protection is configured for {', '.join(configured)} but "
+               f"is only available for the Flow Cell application. The sensors "
+               f"will read and plot; they will not stop a draw.")
+        print(msg)
+        QMessageBox.warning(self, "Flow Sensor", msg)
 
     def set_manual_control_tab_state(self, is_running):
         manual_control_tab_index = 1

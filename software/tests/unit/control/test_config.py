@@ -253,15 +253,11 @@ class TestFlowSensorConfig:
         assert config.flow_sensors[0].monitor == "off"
 
     @pytest.mark.parametrize("mode", ["warn", "stop"])
-    def test_monitor_not_off_rejected(self, mode):
-        """monitor is a real Literal value but draw protection doesn't exist
-        yet, so setting it to anything but "off" must fail loudly instead of
-        silently doing nothing -- it's a safety switch, not inert tuning.
-        """
-        with pytest.raises(ValidationError, match="not implemented"):
-            FluidicsConfig(**_make_config_dict(
-                flow_sensors=[{"index": 1, "name": "s", "monitor": mode}]
-            ))
+    def test_active_monitor_modes_accepted(self, mode):
+        config = FluidicsConfig(**_make_config_dict(
+            flow_sensors=[{"index": 1, "name": "s", "monitor": mode}]
+        ))
+        assert config.flow_sensors[0].monitor == mode
 
     @pytest.mark.parametrize("field,bad_value", [
         ("ramp_up_seconds", 0),

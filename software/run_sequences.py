@@ -8,7 +8,7 @@ from fluidics.control.syringe_pump import SyringePumpSimulation, SyringePump
 from fluidics.control.selector_valve import SelectorValveSystem
 from fluidics.control.disc_pump import DiscPump
 from fluidics.control.temperature_controller import TCMControllerSimulation, TCMController
-from fluidics.control.flow_sensor import build_flow_sensors
+from fluidics.control.flow_sensor import start_flow_sensors
 from fluidics.merfish_operations import MERFISHOperations
 from fluidics.open_chamber_operations import OpenChamberOperations
 from fluidics.experiment_worker import ExperimentWorker
@@ -72,9 +72,7 @@ def initialize_hardware(simulation, config):
     controller.begin()
     controller.send_command(CMD_SET.CLEAR)
 
-    flow_sensors = build_flow_sensors(controller, config, simulation)
-    for sensor in flow_sensors:
-        sensor.begin()
+    flow_sensors = start_flow_sensors(controller, config, simulation)
 
     return controller, syringePump, temperatureController, flow_sensors
 
@@ -114,7 +112,7 @@ def main():
 
         # Run experiment
         if config.application == "Flow Cell":
-            experiment_ops = MERFISHOperations(config, syringePump, selectorValveSystem, temperatureController)
+            experiment_ops = MERFISHOperations(config, syringePump, selectorValveSystem, temperatureController, flowSensors)
         elif config.application == "Open Chamber":
             experiment_ops = OpenChamberOperations(config, syringePump, selectorValveSystem, discPump, temperatureController)
         else:

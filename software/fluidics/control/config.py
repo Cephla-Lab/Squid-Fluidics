@@ -79,8 +79,16 @@ class FlowSensorConfig(BaseModel):
     is excluded: it is shared with the selector valves, whose driver emits
     a general-call transaction after every command.
 
-    The monitor fields are per-sensor tuning consumed by draw protection in
-    the operations layer. Nothing reads them yet.
+    The monitor fields are per-sensor tuning for draw protection, consumed in
+    the operations layer:
+
+      off   read and plot only; the sensor never stops anything
+      warn  log a fault and carry on -- the mode to run first on a new setup,
+            to see what the rule would have fired on before it can halt a run
+      stop  halt the draw and fail the sequence
+
+    monitor is the starting mode only; the GUI switches it per sensor at
+    runtime. Bad tuning is otherwise only discoverable by restarting a run.
     """
     index: Literal[1, 2]
     name: str
@@ -113,15 +121,6 @@ class FluidicsConfig(BaseModel):
         names = [s.name for s in self.flow_sensors]
         if len(set(names)) != len(names):
             raise ValueError("flow_sensors entries must have unique name values")
-
-        for s in self.flow_sensors:
-            if s.monitor != "off":
-                raise ValueError(
-                    f"flow_sensors[{s.name!r}].monitor={s.monitor!r} is not "
-                    "supported: draw protection is not implemented yet. The "
-                    "field is reserved for it -- set monitor: off until it "
-                    "lands."
-                )
 
         # Two is the hardware ceiling: slot i is transmitted at packet bytes
         # 23 + 2*i, and a third would grow the packet past MCU_MSG_LENGTH.

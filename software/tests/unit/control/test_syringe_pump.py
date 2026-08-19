@@ -4,17 +4,35 @@ from fluidics.control.syringe_pump import SyringePump, SyringePumpSimulation
 
 
 def _make_sim_with_real_speed_code(speed_code_limit=10):
-    """Create a SyringePumpSimulation with SyringePump's flow_rate_to_speed_code bound.
-
-    SyringePump can't be instantiated without hardware, so we bind its
-    flow_rate_to_speed_code method onto a SyringePumpSimulation instance.
-    We must also set speed_code_limit manually since SyringePumpSimulation
-    discards that constructor parameter.
+    """A simulated pump. Both classes inherit the conversions from SpeedCodes,
+    so the simulation's answers are the real pump's answers -- this used to
+    require binding SyringePump's method onto the instance by hand.
     """
-    p = SyringePumpSimulation(sn=None, syringe_ul=5000, speed_code_limit=speed_code_limit, waste_port=1)
-    p.speed_code_limit = speed_code_limit
-    p.flow_rate_to_speed_code = SyringePump.flow_rate_to_speed_code.__get__(p)
-    return p
+    return SyringePumpSimulation(sn=None, syringe_ul=5000,
+                                 speed_code_limit=speed_code_limit, waste_port=1)
+
+
+class TestSpeedCodesIsShared:
+    """The simulation used to stub flow_rate_to_speed_code as `return 20`, so a
+    simulated run ran every sequence at one rate no matter what it asked for --
+    and anything reasoning about the actual rate measured against a number the
+    simulation had invented.
+    """
+
+    def test_the_simulation_honours_the_requested_rate(self):
+        sim = _make_sim_with_real_speed_code()
+        assert sim.flow_rate_to_speed_code(500) != sim.flow_rate_to_speed_code(5000)
+
+    @pytest.mark.parametrize("rate", [500, 2000, 5000, 10000, 60000])
+    def test_the_simulation_agrees_with_the_real_pump(self, rate):
+        sim = _make_sim_with_real_speed_code()
+        real = SyringePump.flow_rate_to_speed_code.__get__(sim)
+        assert sim.flow_rate_to_speed_code(rate) == real(rate)
+
+    def test_the_simulation_keeps_its_speed_code_limit(self):
+        """It used to discard the constructor argument, so the clamp that keeps
+        a run below a dangerous rate did nothing in simulation."""
+        assert _make_sim_with_real_speed_code(speed_code_limit=17).speed_code_limit == 17
 
 
 class TestSpeedSecMapping:

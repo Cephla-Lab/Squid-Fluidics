@@ -274,7 +274,7 @@ class FluidController(Microcontroller, PacketSubscribers):
 
         if(self.log_measurements):
             self.measurement_file = open(os.path.join(Path.home(),"Downloads","Fluidic Controller Logged Measurement_" + datetime.now().strftime('%Y-%m-%d %H-%M-%S.%f') + ".csv"), "w+")
-            self.measurement_file.write("timestamp,rx_uid,rx_cmd,cmd_status,mcu_state,bs1,bs2,mcu_time,sv0,sv1,sv2,sv3,sv4,valves,pump,p0,p1,p2,p3,f1,f2,vol_uL\n")
+            self.measurement_file.write("timestamp,rx_uid,rx_cmd,cmd_status,mcu_state,bs1,bs2,mcu_time,sv0,sv1,sv2,sv3,sv4,valves,pump,p0,p1,p2,p3,f1_raw,f2_raw,vol_uL\n")
             self.counter_measurement_file_flush = 1
 
         self.cmd_uid = 0
@@ -416,12 +416,10 @@ class FluidController(Microcontroller, PacketSubscribers):
         pressure_3 = raw_to_psi(_pressure_3_raw)
         pressure_4 = raw_to_psi(_pressure_4_raw)
 
-        # Keep the raw int16 alongside the scaled value: 32767 is the SLF3X
-        # "no reading" sentinel, and comparing raw ints beats comparing floats.
+        # Raw int16 exactly as received. 32767 is the SLF3X "no reading"
+        # sentinel, which the driver compares against before scaling.
         flow_1_raw = to_int16((int(msg[23]) << 8) + msg[24])
         flow_2_raw = to_int16((int(msg[25]) << 8) + msg[26])
-        flow_1 = float(flow_1_raw) / MCU_CONSTANTS.SCALE_FACTOR_FLOW
-        flow_2 = float(flow_2_raw) / MCU_CONSTANTS.SCALE_FACTOR_FLOW
 
         MCU_CMD_time_elapsed = msg[27]
 
@@ -438,7 +436,10 @@ class FluidController(Microcontroller, PacketSubscribers):
             "solenoid_valves": solenoid_valves,
             "measurement_pump_power": measurement_pump_power,
             "pressures": [pressure_1, pressure_2, pressure_3, pressure_4],
-            "flowrates": [flow_1, flow_2],
+            # Raw counts only. Turning these into uL/min needs the installed
+            # sensor's scale factor, which lives with the driver that knows
+            # which part it is talking to (flow_sensor.py). Scaling here as
+            # well would be a second copy, free to disagree -- and it did.
             "flowrates_raw": [flow_1_raw, flow_2_raw],
             "vol_ul": vol_ul,
         }
@@ -503,7 +504,7 @@ class FluidController(Microcontroller, PacketSubscribers):
         b1, b2 = d["bubble_sensor_states"]
         sv = d["selector_valves_pos"]
         p = d["pressures"]
-        f = d["flowrates"]
+        f = d["flowrates_raw"]
         line = (f"{datetime.now().strftime('%m/%d %H:%M:%S')},"
                 f"{d['MCU_received_command_UID']},"
                 f"{d['MCU_received_command']},"
@@ -515,7 +516,7 @@ class FluidController(Microcontroller, PacketSubscribers):
                 f"{d['solenoid_valves']:>016b},"
                 f"{d['measurement_pump_power']:.2f},"
                 f"{p[0]:.2f},{p[1]:.2f},{p[2]:.2f},{p[3]:.2f},"
-                f"{f[0]:.2f},{f[1]:.2f},"
+                f"{f[0]},{f[1]},"
                 f"{d['vol_ul']:.2f}\n")
         if self.log_measurements:
             self.measurement_file.write(line)
@@ -617,10 +618,10 @@ class FluidController(Microcontroller, PacketSubscribers):
             loop_type = np.uint8(args[0])
             assert loop_type in MCU_CONSTANTS.BB_LOOP_TYPES, "loop type is not a bang-bang type"
 
-            t_lower_intermediate = args[1] * MCU_CONSTANTS.SCALE_FACTOR_FLOW
+            t_lower_intermediate = args[1] * MCU_CONSTANTS.MCU_ASSUMED_SCALE_FACTOR_FLOW
             t_lower = np.uint16(t_lower_intermediate)
             assert t_lower_intermediate == t_lower, "Error calculating lower bound"
-            t_upper_intermediate = args[2] * MCU_CONSTANTS.SCALE_FACTOR_FLOW
+            t_upper_intermediate = args[2] * MCU_CONSTANTS.MCU_ASSUMED_SCALE_FACTOR_FLOW
             t_upper = np.uint16(t_upper_intermediate)
             assert t_upper_intermediate == t_upper, "Error calculating upper bound"
 

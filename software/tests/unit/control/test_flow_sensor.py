@@ -1,8 +1,12 @@
 # tests/unit/control/test_flow_sensor.py
+from types import SimpleNamespace
+
 import pytest
 
+from fluidics.control.config import FlowSensorConfig
 from fluidics.control.controller import FluidController, PacketSubscribers
-from fluidics.control.flow_sensor import FlowSensor, FlowSensorSimulation, INVALID_RAW
+from fluidics.control.flow_sensor import (
+    FlowSensor, FlowSensorSimulation, INVALID_RAW, start_flow_sensors)
 from fluidics.control._def import CMD_SET, COMMAND_STATUS
 
 from .packet_helpers import make_status_packet as _make_packet
@@ -35,13 +39,13 @@ class TestFlowSensorReadings:
         fc = FakeController()
         sensor = FlowSensor(fc, index=1, name="s")
         fc.publish(1000)
-        assert sensor.latest_flow_ul_min == pytest.approx(100.0)
+        assert sensor.latest_flow_ul_min == pytest.approx(2000.0)
 
     def test_negative_reading(self):
         fc = FakeController()
         sensor = FlowSensor(fc, index=1, name="s")
         fc.publish(-1000)
-        assert sensor.latest_flow_ul_min == pytest.approx(-100.0)
+        assert sensor.latest_flow_ul_min == pytest.approx(-2000.0)
 
     def test_sentinel_maps_to_none(self):
         fc = FakeController()
@@ -53,7 +57,7 @@ class TestFlowSensorReadings:
         fc = FakeController()
         sensor = FlowSensor(fc, index=1, name="s")
         fc.publish(32500)
-        assert sensor.latest_flow_ul_min == pytest.approx(3250.0)
+        assert sensor.latest_flow_ul_min == pytest.approx(65000.0)
 
     def test_no_reading_before_first_packet(self):
         sensor = FlowSensor(FakeController(), index=1, name="s")
@@ -64,7 +68,7 @@ class TestFlowSensorReadings:
         sensor = FlowSensor(fc, index=1, name="s")
         fc.publish(INVALID_RAW)
         fc.publish(500)
-        assert sensor.latest_flow_ul_min == pytest.approx(50.0)
+        assert sensor.latest_flow_ul_min == pytest.approx(1000.0)
 
 
 class TestFlowSensorSubscribers:
@@ -75,7 +79,7 @@ class TestFlowSensorSubscribers:
         sensor.subscribe(lambda flow, ts: seen.append(flow))
         fc.publish(100)
         fc.publish(200)
-        assert seen == [pytest.approx(10.0), pytest.approx(20.0)]
+        assert seen == [pytest.approx(200.0), pytest.approx(400.0)]
 
     def test_subscriber_sees_none_for_sentinel(self):
         fc = FakeController()
@@ -92,7 +96,7 @@ class TestFlowSensorSubscribers:
         sensor.subscribe(lambda flow, ts: 1 / 0)
         sensor.subscribe(lambda flow, ts: seen.append(flow))
         fc.publish(100)
-        assert seen == [pytest.approx(10.0)]
+        assert seen == [pytest.approx(200.0)]
 
 
 class TestFlowSensorBegin:
@@ -132,7 +136,7 @@ class TestFlowSensorClose:
         fc.publish(100)
         sensor.close()
         fc.publish(200)
-        assert sensor.latest_flow_ul_min == pytest.approx(10.0)
+        assert sensor.latest_flow_ul_min == pytest.approx(200.0)
 
     def test_close_stops_notifying_subscribers(self):
         fc = FakeController()
@@ -157,7 +161,7 @@ class TestFlowSensorClose:
         second = FlowSensor(fc, index=2, name="second")
         second.close()
         fc.publish(1000, flow_2_raw=2000)
-        assert first.latest_flow_ul_min == pytest.approx(100.0)
+        assert first.latest_flow_ul_min == pytest.approx(2000.0)
         assert second.latest_flow_ul_min is None
 
 
@@ -169,15 +173,15 @@ class TestTwoSensorsOnOneController:
         first = FlowSensor(fc, index=1, name="first")
         second = FlowSensor(fc, index=2, name="second")
         fc.publish(1000, flow_2_raw=-2000)
-        assert first.latest_flow_ul_min == pytest.approx(100.0)
-        assert second.latest_flow_ul_min == pytest.approx(-200.0)
+        assert first.latest_flow_ul_min == pytest.approx(2000.0)
+        assert second.latest_flow_ul_min == pytest.approx(-4000.0)
 
     def test_slot_1_sentinel_is_independent_of_slot_0(self):
         fc = FakeController()
         first = FlowSensor(fc, index=1, name="first")
         second = FlowSensor(fc, index=2, name="second")
         fc.publish(1000, flow_2_raw=INVALID_RAW)
-        assert first.latest_flow_ul_min == pytest.approx(100.0)
+        assert first.latest_flow_ul_min == pytest.approx(2000.0)
         assert second.latest_flow_ul_min is None
 
     def test_empty_slot_0_does_not_disturb_a_lone_slot_1_sensor(self):
@@ -188,7 +192,7 @@ class TestTwoSensorsOnOneController:
         fc = FakeController()
         lone = FlowSensor(fc, index=2, name="waste_line")
         fc.publish(INVALID_RAW, flow_2_raw=1500)
-        assert lone.latest_flow_ul_min == pytest.approx(150.0)
+        assert lone.latest_flow_ul_min == pytest.approx(3000.0)
 
     def test_a_raising_sensor_does_not_starve_the_other(self):
         fc = FakeController()
@@ -198,7 +202,7 @@ class TestTwoSensorsOnOneController:
         seen = []
         second.subscribe(lambda flow, ts: seen.append(flow))
         fc.publish(1000, flow_2_raw=2000)
-        assert seen == [pytest.approx(200.0)]
+        assert seen == [pytest.approx(4000.0)]
 
 
 class TestFlowSensorSimulation:
@@ -222,3 +226,61 @@ class TestFlowSensorSimulation:
     def test_thread_is_not_started_on_construction(self):
         sim = FlowSensorSimulation()
         assert not sim.reading_thread.is_alive()
+
+    def test_begin_does_not_start_the_thread(self):
+        """The suite's fake clock turns the publish loop into a busy spin, so
+        a test that only calls begin() must not get a thread it did not ask
+        for. start() is the explicit opt-in."""
+        sim = FlowSensorSimulation()
+        sim.begin()
+        assert not sim.reading_thread.is_alive()
+
+
+class TestStartFlowSensors:
+    """A sensor claims a slot on the packet stream in its constructor, and only
+    close() gives it back. A partial failure that drops the list without
+    closing leaves live handlers with nothing holding a reference to them.
+    """
+
+    def _config(self, count):
+        """The real config model, so a field added to FlowSensorConfig and to
+        the build_flow_sensors call cannot quietly stop being covered here."""
+        return SimpleNamespace(flow_sensors=[
+            FlowSensorConfig(index=i + 1, name=f"s{i + 1}") for i in range(count)
+        ])
+
+    def test_all_sensors_are_initialized_and_subscribed(self):
+        fc = FakeController()
+        sensors = start_flow_sensors(fc, self._config(2))
+        assert len(sensors) == 2
+        assert len(fc._packet_subscribers) == 2
+
+    def test_a_failing_sensor_takes_the_healthy_ones_down_with_it(self, monkeypatch):
+        """Sensor 1 came up, sensor 2 did not. Sensor 1 must not be left
+        publishing into a handler no one can reach."""
+        fc = FakeController()
+        real_begin = FlowSensor.begin
+
+        def begin(self):
+            if self.index == 2:
+                raise RuntimeError("sensor 2 is not connected")
+            return real_begin(self)
+
+        monkeypatch.setattr(FlowSensor, "begin", begin)
+        with pytest.raises(RuntimeError, match="not connected"):
+            start_flow_sensors(fc, self._config(2))
+        assert len(fc._packet_subscribers) == 0
+
+    def test_cleanup_does_not_depend_on_begin_cleaning_up_after_itself(self, monkeypatch):
+        """start() can raise too -- a thread started twice, say -- and by then
+        begin() has returned and the sensor is fully live."""
+        fc = FakeController()
+        monkeypatch.setattr(FlowSensor, "start",
+                            lambda self: (_ for _ in ()).throw(RuntimeError("boom")))
+        with pytest.raises(RuntimeError, match="boom"):
+            start_flow_sensors(fc, self._config(2))
+        assert len(fc._packet_subscribers) == 0
+
+    def test_no_sensors_configured_returns_nothing(self):
+        fc = FakeController()
+        assert start_flow_sensors(fc, SimpleNamespace(flow_sensors=None)) == []
