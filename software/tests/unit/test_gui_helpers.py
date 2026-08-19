@@ -47,6 +47,89 @@ class TestSafeFilenamePart:
         assert gui._safe_filename_part("waste line") == "waste_line"
 
 
+class TestHighlightFollowsCheckedRows:
+    """The worker runs only the checked sequences, so the index it reports is a
+    position in that filtered list -- not a tree row. With a non-contiguous
+    selection, highlighting the raw index lights up the wrong sequence.
+
+    _handle_progress must translate through the rows snapshotted at run start.
+    Called unbound against a stub, since constructing SequencesWidget needs a
+    QApplication.
+    """
+
+    class Label:
+        def __init__(self):
+            self.text = ""
+
+        def setText(self, text):
+            self.text = text
+
+    class Stub:
+        def __init__(self, running_rows):
+            self._running_rows = running_rows
+            self.total_sequences = len(running_rows)
+            self.sequenceLabel = TestHighlightFollowsCheckedRows.Label()
+            self.highlighted = []
+
+        def highlightRow(self, row):
+            self.highlighted.append(row)
+
+    def test_worker_index_maps_to_the_actual_tree_row(self):
+        stub = self.Stub(running_rows=[0, 2, 4])
+        gui.SequencesWidget._handle_progress(stub, 1, 2, "Started")
+        assert stub.highlighted == [2]
+
+    def test_a_sparse_selection_lights_each_checked_row_in_turn(self):
+        stub = self.Stub(running_rows=[1, 3])
+        gui.SequencesWidget._handle_progress(stub, 0, 1, "Started")
+        gui.SequencesWidget._handle_progress(stub, 1, 2, "Started")
+        assert stub.highlighted == [1, 3]
+
+    def test_an_out_of_range_index_clears_the_highlight(self):
+        # Defensive: an index past the snapshot can only come from a worker
+        # bug; better no highlight than a wrong one. (A tree that shrank
+        # mid-run is caught separately, by highlightRow's own bounds check.)
+        stub = self.Stub(running_rows=[0])
+        gui.SequencesWidget._handle_progress(stub, 5, 6, "Started")
+        assert stub.highlighted == [None]
+
+
+class TestCheckedRows:
+    """_checkedRows is the snapshot _handle_progress translates through. It
+    must list the checked rows in tree order, mirroring the filter that
+    getSequences(selected_only=True) applies.
+    """
+
+    class FakeItem:
+        def __init__(self, checked):
+            self._checked = checked
+
+        def checkState(self, column):
+            return gui.Qt.Checked if self._checked else gui.Qt.Unchecked
+
+    class FakeTree:
+        def __init__(self, states):
+            self._items = [TestCheckedRows.FakeItem(s) for s in states]
+
+        def topLevelItemCount(self):
+            return len(self._items)
+
+        def topLevelItem(self, i):
+            return self._items[i]
+
+    class Stub:
+        def __init__(self, tree):
+            self.tree = tree
+
+    def test_returns_checked_rows_in_tree_order(self):
+        stub = self.Stub(self.FakeTree([True, False, True, False, True]))
+        assert gui.SequencesWidget._checkedRows(stub) == [0, 2, 4]
+
+    def test_nothing_checked_gives_no_rows(self):
+        stub = self.Stub(self.FakeTree([False, False]))
+        assert gui.SequencesWidget._checkedRows(stub) == []
+
+
 class TestDrawProtectionUnavailable:
     """Only MERFISHOperations arms the sensors, so on any other application a
     configured warn/stop mode is inert. Silence there would leave the operator

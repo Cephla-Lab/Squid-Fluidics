@@ -174,6 +174,7 @@ class SequencesWidget(QWidget):
 
         self.experiment_ops = None  # Will be set based on the selected application
         self.worker = None
+        self._running_rows = []  # Tree rows of the sequences handed to the worker
 
         if self.config.application == 'Flow Cell':
             self.experiment_ops = MERFISHOperations(self.config, self.syringePump, self.selectorValveSystem,
@@ -416,6 +417,12 @@ class SequencesWidget(QWidget):
         for i in range(self.tree.topLevelItemCount()):
             self.tree.topLevelItem(i).setCheckState(0, Qt.Unchecked)
 
+    def _checkedRows(self):
+        """Tree rows whose checkbox is checked, in order -- index-aligned with
+        getSequences(selected_only=True)."""
+        return [i for i in range(self.tree.topLevelItemCount())
+                if self.tree.topLevelItem(i).checkState(0) == Qt.Checked]
+
     def highlightRow(self, row_index):
         """Highlight the currently running sequence in the tree."""
         white_brush = QBrush(QColor('white'))
@@ -441,6 +448,9 @@ class SequencesWidget(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Invalid Sequence", f"Failed to validate sequences: {str(e)}")
             return
+        # The worker reports positions in this filtered list; remember which
+        # tree row each one came from so the highlight lands on it.
+        self._running_rows = self._checkedRows()
         self.total_sequences = sum(s.get('repeat', 1) for s in selected)
 
         if not selected:
@@ -507,7 +517,8 @@ class SequencesWidget(QWidget):
 
     def _handle_progress(self, index, sequence_num, status):
         self.sequenceLabel.setText(f"{sequence_num}/{self.total_sequences} sequences")
-        self.highlightRow(index)
+        row = self._running_rows[index] if index < len(self._running_rows) else None
+        self.highlightRow(row)
 
     def _handle_warning(self, message):
         self._warnings.append(message)
