@@ -1,16 +1,48 @@
 from time import sleep
 from .experiment_worker import AbortRequested, OperationError
+from .flow_monitor import DrawGuard, FlowFault
 from . import sequence_utils
 
 
 class MERFISHOperations():
-    def __init__(self, config, syringe_pump, selector_valves, temperature_controller=None):
+    def __init__(self, config, syringe_pump, selector_valves,
+                 temperature_controller=None, flow_sensors=None, on_warning=None):
         self.config = config
         self.sp = syringe_pump
         self.sv = selector_valves
         self.tc = temperature_controller
+        self.flow_sensors = flow_sensors or []
+        # Where a draw-protection notice goes. Defaults to stdout, which is all
+        # the CLI needs; the GUI passes something the operator can actually see,
+        # since a `warn`-mode fault deliberately raises nothing and would
+        # otherwise leave no trace on a machine with no console.
+        self.on_warning = on_warning or print
         self.extract_port = self.config.syringe_pump.extract_port
         self.speed_code_limit = self.config.syringe_pump.speed_code_limit
+
+    def _guarded_execute(self, speed_code):
+        """Run the queued chain with the flow sensors watching it.
+
+        The whole protocol lives here rather than at the call sites, because
+        the last step is the forgettable one: a draw that arms and executes but
+        never raises would stop the pump on a fault, unwind cleanly, leave
+        is_aborted False, and return -- and the operation would carry on to its
+        next step as though the draw had succeeded.
+
+        The expectation is the pump's actual rate for the code, not the rate
+        the sequence asked for: flow_rate_to_speed_code quantizes to the 41
+        available codes, so a sequence asking for 480 uL/min gets 500, and
+        measuring against 480 would bias the whole band by the rounding.
+        """
+        guard = DrawGuard(self.flow_sensors,
+                          expected_ul_min=self.sp.get_flow_rate(speed_code),
+                          stop_pump=self.sp.stop,
+                          log=self.on_warning)
+        with guard:
+            self.sp.execute()
+            # Raised here, on the sequence thread: the fault is recorded by the
+            # reader thread, which cannot unwind this operation.
+            guard.raise_if_faulted()
 
     def process_sequence(self, sequence):
         print(sequence)
@@ -45,6 +77,11 @@ class MERFISHOperations():
         """
         Flow reagent from {port}. Finally, fill the tubings before sample with reagent from {fill_tubing_with_port}.
         Only the ports on the last selector valve should be used for {fill_tubing_with_port}, usually a common buffer.
+
+        Both draws run under a DrawGuard. The dispense-to-waste inside
+        _empty_syringe_pump_on_full does not: it goes out the waste port, not
+        through the flow cell, so the sensors would read nothing and every full
+        syringe would fault.
         """
         speed_code = self.sp.flow_rate_to_speed_code(flow_rate)
         try:
@@ -54,7 +91,7 @@ class MERFISHOperations():
             self.sp.extract(self.extract_port, volume, speed_code)
             if self.sp.is_aborted:
                 return
-            self.sp.execute()
+            self._guarded_execute(speed_code)
             if self.sp.is_aborted:
                 return
             if fill_tubing_with_port:
@@ -63,8 +100,13 @@ class MERFISHOperations():
                 self.sp.extract(self.extract_port, self.sv.get_tubing_fluid_amount_to_valve(fill_tubing_with_port), speed_code)
                 if self.sp.is_aborted:
                     return
-                self.sp.execute()
+                self._guarded_execute(speed_code)
 
+        except FlowFault:
+            # Already an OperationError, and it carries the sensor, the band and
+            # the measurement. Falling into the wrapper below would flatten all
+            # of that into a string.
+            raise
         except Exception as e:
             raise OperationError(f"Error in flow_reagent from port: {port}: {str(e)}")
 

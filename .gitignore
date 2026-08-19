@@ -1,3 +1,19 @@
 .DS_Store
 *.pyc
 **/.idea/
+
+# Per-machine hardware config: serial numbers, tubing volumes and reagent port
+# names are specific to one rig, and gui.py loads ./config.yaml automatically,
+# so a committed copy would silently override every other machine's setup.
+# Covers the legacy .json (auto-converted on load) and the per-rig copies kept
+# side by side when more than one instrument is in play. Shareable examples
+# belong in software/sample_config/.
+software/config*.yaml
+software/config*.json
+software/_config*.yaml
+# Local test sequence, swept in by a directory-wide git add. Belongs to the
+# temperature-controller work, not here; add it deliberately if it should ship.
+software/sample_sequences/temperature-test.yaml
+
+# Design docs and plans live in the AI-docs repo, not here.
+docs/superpowers/

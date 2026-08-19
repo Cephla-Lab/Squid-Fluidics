@@ -28,12 +28,19 @@ python -m pytest tests/unit            # Unit tests only
 python -m pytest tests/integration     # Integration tests (simulation classes)
 python -m pytest -v                    # Verbose
 
-# Hardware test scripts (require connected hardware, run from software/)
+# Hardware test scripts -- currently stale and unrunnable, see note below
 python tests/hardware/startup.py
 python tests/hardware/demo.py
 ```
 
 Uses pytest. Hardware tests in `tests/hardware/` are excluded from the default test run. Use `--simulation` for software-only CLI testing.
+
+**`tests/hardware/startup.py` and `tests/hardware/demo.py` are currently stale and will not run**, independent of anything in this change:
+- Both do `from control.controller import ...`, but `software/control/` was renamed to `software/fluidics/control/` before the flow-sensor-driver branch. `python3 -c "import control.controller"` raises `ModuleNotFoundError`.
+- `demo.py` also calls `read_received_packet_nowait()` directly in a loop. That now races the background reader thread that owns the serial port (`FluidController.start_reading()`), since both would be reading the same port concurrently.
+- `startup.py` also has several `send_command_blocking()` call sites (e.g. `CLEAR_LINES`, `UNLOAD_FLUID_VOLUME`) whose firmware-side timeout parameters run 35-50s; they need the matching `timeout=` kwarg on `send_command_blocking()` or it will raise `TimeoutError` at the 30s default before the firmware finishes.
+
+Fixing only the import would leave both scripts unrunnable in a different way, so none of the above has been repaired here -- it's tracked as separate work.
 
 **Dependencies:** PyQt5, pandas, matplotlib, pyserial, cobs, numpy, pydantic, pyyaml
 
@@ -102,6 +109,20 @@ Speed codes (0–40) map to stroke times via `SPEED_SEC_MAPPING`. Use `flow_rate
 - `Flow Reagent` — extract reagent through selector valve, optionally fill tubing with buffer afterward
 - `Priming` / `Clean Up` — prime all ports with their reagents, then fill tubing with wash buffer
 
+### Draw Protection
+
+`Flow Reagent`'s two draws run under a `DrawGuard` (`fluidics/flow_monitor.py`), which watches each configured flow sensor against the pump's actual rate for the speed code. `FlowMonitor` is the rule — a pure function of `(flow, timestamp)` with a ramp-up window and a consecutive-sample debounce; the guard is the plumbing that arms sensors, halts the pump, and raises.
+
+Per sensor, `monitor` is `off` (plot only), `warn` (log and carry on), or `stop` (halt the draw and raise `FlowFault`). Config sets the starting mode; the Flow Sensors tab switches it at runtime. Each draw reads the mode once when it arms.
+
+Notices go to `MERFISHOperations(on_warning=...)`, which becomes the `DrawGuard`'s `log`. It defaults to `print` for the CLI; the GUI passes a channel that marshals to the GUI thread and shows a non-modal line under the progress bar. A `warn` fault raises nothing, so that notice is the only trace it leaves.
+
+**Only Flow Cell is guarded.** `OpenChamberOperations` is never handed the sensors, so a `warn`/`stop` mode configured on an Open Chamber machine is inert; the GUI says so at startup, forces the mode to `off`, and disables the per-sensor control.
+
+Not guarded: the dispense-to-waste inside `_empty_syringe_pump_on_full`, and `Priming`/`Clean Up` — both move liquid out the waste port rather than through the flow cell, so the sensors would read nothing and every one would fault.
+
+`FlowFault` subclasses `OperationError` and is re-raised past `flow_reagent`'s `except Exception` wrapper so its fields survive. Halting uses `SyringePump.stop()`, not `abort()`: `abort()` latches and means "the operator cancelled".
+
 **`OpenChamberOperations`** — syringe pump + disc pump for open chamber:
 - `Add Reagent` / `Clear Tubings and Add Reagent` — push reagent into chamber, disc pump aspirates waste
 - `Wash with Constant Flow` — simultaneous syringe dispense + disc pump aspiration
@@ -117,4 +138,4 @@ Speed codes (0–40) map to stroke times via `SPEED_SEC_MAPPING`. Use `flow_rate
 - Config files in `sample_config/` (YAML), sequence files in `sample_sequences/` (YAML preferred, CSV supported for legacy)
 - The `abort` pattern: hardware classes expose `abort()` / `reset_abort()` and check `is_aborted` before operations
 - `send_command_blocking()` = `send_command()` + `wait_for_completion()` (polls MCU status until not `IN_PROGRESS`)
-- `tests/hardware/startup.py` imports from `control.` not `fluidics.control.` — must be run from `software/` directory
+- `tests/hardware/startup.py` and `tests/hardware/demo.py` still import from `control.`, a stale path from before `software/control/` was renamed to `fluidics/control/` — both are currently broken and unrunnable (see the note under Commands)

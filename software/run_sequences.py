@@ -8,6 +8,7 @@ from fluidics.control.syringe_pump import SyringePumpSimulation, SyringePump
 from fluidics.control.selector_valve import SelectorValveSystem
 from fluidics.control.disc_pump import DiscPump
 from fluidics.control.temperature_controller import TCMControllerSimulation, TCMController
+from fluidics.control.flow_sensor import start_flow_sensors
 from fluidics.merfish_operations import MERFISHOperations
 from fluidics.open_chamber_operations import OpenChamberOperations
 from fluidics.experiment_worker import ExperimentWorker
@@ -71,7 +72,9 @@ def initialize_hardware(simulation, config):
     controller.begin()
     controller.send_command(CMD_SET.CLEAR)
 
-    return controller, syringePump, temperatureController
+    flow_sensors = start_flow_sensors(controller, config, simulation)
+
+    return controller, syringePump, temperatureController, flow_sensors
 
 def update_progress(index, sequence_num, status):
     print(f"Sequence {index} ({sequence_num}): {status}")
@@ -88,8 +91,10 @@ def on_estimate(time_to_finish, n_sequences):
 def main():
     args = parse_args()
 
+    controller = None
     syringePump = None
     temperatureController = None
+    flowSensors = []
     thread = None
 
     try:
@@ -99,7 +104,7 @@ def main():
         # Load config
         config = load_config(args.config)
 
-        controller, syringePump, temperatureController = initialize_hardware(args.simulation, config)
+        controller, syringePump, temperatureController, flowSensors = initialize_hardware(args.simulation, config)
 
         selectorValveSystem = SelectorValveSystem(controller, config)
         if config.application == "Open Chamber":
@@ -107,7 +112,7 @@ def main():
 
         # Run experiment
         if config.application == "Flow Cell":
-            experiment_ops = MERFISHOperations(config, syringePump, selectorValveSystem, temperatureController)
+            experiment_ops = MERFISHOperations(config, syringePump, selectorValveSystem, temperatureController, flowSensors)
         elif config.application == "Open Chamber":
             experiment_ops = OpenChamberOperations(config, syringePump, selectorValveSystem, discPump, temperatureController)
         else:
@@ -135,8 +140,15 @@ def main():
         if syringePump is not None:
             syringePump.reset_abort()
             syringePump.close()
+        for sensor in flowSensors:
+            sensor.close()
         if temperatureController is not None:
             temperatureController.close()
+        # Last: the reader thread owns the MCU port for the whole run, so stop
+        # it and release the port rather than leaving that to __del__. Sensors
+        # detach from the controller above, so nothing is left subscribed.
+        if controller is not None:
+            controller.close()
 
 if __name__ == '__main__':
     main()

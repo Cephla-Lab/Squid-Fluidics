@@ -1,14 +1,156 @@
 import fluidics.control.tecancavro as tecancavro
-import time
+import threading
 from serial.tools import list_ports
 
-class SyringePump:
-    SPEED_SEC_MAPPING = [1.25, 1.30, 1.39, 1.52, 1.71, 1.97, 2.37, 2.77, 3.03, 3.36, 3.77, 
+
+class Interruptible:
+    """Halting a move that is already running, shared by both pump classes.
+
+    Two ways to interrupt, differing only in whether they latch:
+
+      abort()  the operator cancelled. Latches until reset_abort(), so every
+               later operation returns early.
+      stop()   a fault the caller is about to raise on -- a flow fault, say.
+               Does not latch: the run is being failed by whoever called it,
+               and callers read is_aborted to mean "the operator cancelled",
+               so latching here would report a hardware problem as a user
+               action and silently disable the rest of the run.
+
+    Shared rather than written twice because the simulation is where these
+    semantics get tested -- the real pump needs hardware. Two copies would put
+    the tested one and the shipped one out of reach of each other, which is
+    exactly how the sleep-through-abort bug survived 230 passing tests.
+
+    Subclasses supply the two hardware-shaped pieces: _terminate() to halt the
+    plunger, and _move_finished() to say whether it has stopped.
+    """
+
+    def _init_interrupt(self):
+        self.is_busy = False
+        self.is_aborted = False
+        self._interrupt = threading.Event()
+
+    # --- what a real pump does and a simulated one cannot ---
+
+    def _terminate(self):
+        """Halt the plunger. Nothing to halt in simulation."""
+
+    def _move_finished(self):
+        """Whether the move has ended. A simulated move ends when its
+        estimated duration does, so there is nothing further to wait for."""
+        return True
+
+    # --- interruption ---
+
+    def abort(self):
+        self._terminate()
+        self.is_aborted = True
+        self._interrupt.set()
+
+    def reset_abort(self):
+        self.is_aborted = False
+        self._interrupt.clear()
+
+    def stop(self):
+        self._terminate()
+        self._interrupt.set()
+
+    def _arm(self):
+        """Clear any stale interrupt and report whether a chain may run.
+
+        Clearing before reading is_aborted, and abort() setting the flag before
+        the event, is what makes an abort landing anywhere around here still
+        count: either the flag is already true and the caller returns, or the
+        event is set afterwards and wait_for_stop wakes on it.
+        """
+        self._interrupt.clear()
+        return not self.is_aborted
+
+    def wait_for_stop(self, t=0):
+        """Block until the move finishes, or until abort()/stop() interrupts.
+
+        t is the pump's estimate of how long the whole chain will take, which
+        for a 2000 uL draw at 500 uL/min is about 240 s. This used to be
+        time.sleep(t) -- an uninterruptible sleep for the entire move, so an
+        interrupt halted the plunger immediately but the caller stayed asleep
+        and the run did not unwind until the estimate elapsed. Waiting on the
+        event returns the moment either arrives; _move_finished() stays the
+        authoritative end-of-move signal, with the estimate only gating when we
+        start asking.
+        """
+        interrupted = self._interrupt.wait(t)
+        while not interrupted and not self._move_finished():
+            interrupted = self._interrupt.wait(0.5)
+        self.is_busy = False
+
+
+class SpeedCodes:
+    """The speed-code mapping and the conversions either way.
+
+    Shared by the real pump and the simulation because it is arithmetic over
+    self.volume and self.speed_code_limit -- no hardware in it. The simulation
+    used to stub flow_rate_to_speed_code as `return 20`, so a simulated run
+    ignored the sequence's flow rate entirely and every rate produced the same
+    8501 uL/min. Anything that reasons about the actual rate (draw protection
+    does) was measuring against a number the simulation invented.
+    """
+
+    SPEED_SEC_MAPPING = [1.25, 1.30, 1.39, 1.52, 1.71, 1.97, 2.37, 2.77, 3.03, 3.36, 3.77,
                         4.30, 5.00, 6.00, 7.50, 10.00, 15.00, 30.00, 31.58, 33.33, 35.29,
                         37.50, 40.00, 42.86, 46.15, 50.00, 54.55, 60.00, 66.67, 75.00, 85.71,
                         100.00, 120.00, 150.00, 200.00, 300.00, 333.33, 375.00, 428.57, 500.00, 600.00]
                         # Maps to speed code 0-40
 
+    def get_flow_rate(self, speed_code):
+        """Flow rate for a speed code, in uL/min.
+
+        uL/min throughout: it is what sequences are written in, what
+        flow_rate_to_speed_code takes, and what the flow sensor reports. This
+        used to return mL/min, which made it the only function in the pump API
+        on a different scale from its own inverse.
+        """
+        return round(self.volume * 60 / self.SPEED_SEC_MAPPING[speed_code], 2)
+
+    def flow_rate_to_speed_code(self, target_flow_rate):
+        """
+        Map any flow rate to the closest speed code of the syringe pump
+
+        :param flow_rate: ul/min
+        :return: speed code (int)
+        """
+        # TODO: move this to utils
+        target_time = self.volume * 60 / target_flow_rate
+
+        left = 0
+        right = len(self.SPEED_SEC_MAPPING) - 1
+
+        # If target is beyond the range, return the closest endpoint
+        if target_time <= self.SPEED_SEC_MAPPING[self.speed_code_limit]:
+            return self.speed_code_limit
+        if target_time >= self.SPEED_SEC_MAPPING[-1]:
+            return len(self.SPEED_SEC_MAPPING) - 1
+
+        # Binary search
+        while left < right:
+            if right - left == 1:
+                if abs(self.SPEED_SEC_MAPPING[left] - target_time) <= abs(self.SPEED_SEC_MAPPING[right] - target_time):
+                    return left
+                return right
+
+            mid = (left + right) // 2
+            mid_value = self.SPEED_SEC_MAPPING[mid]
+
+            if mid_value == target_time:
+                return mid
+            elif mid_value > target_time:
+                right = mid
+            else:
+                left = mid
+
+        return left
+
+
+class SyringePump(SpeedCodes, Interruptible):
     def __init__(self, sn, syringe_ul, speed_code_limit, waste_port, num_ports=4, slope=14, debug=False):
         if sn is not None:
             for d in list_ports.comports():
@@ -31,9 +173,7 @@ class SyringePump:
         self.chained_volume = 0
 
         self.get_plunger_position()
-
-        self.is_busy = False
-        self.is_aborted = False
+        self._init_interrupt()
 
         print("Syringe pump initialized.")
 
@@ -59,7 +199,7 @@ class SyringePump:
         self.chained_volume = 0
 
     def execute(self, block_pump=False):
-        if self.is_aborted:
+        if not self._arm():
             return
         self.is_busy = True
         t = self.syringe.executeChain(minimal_reset=True)
@@ -101,64 +241,11 @@ class SyringePump:
         self.chained_volume = 0
         return self.get_time_to_finish()
 
-    def abort(self):
+    def _terminate(self):
         self.syringe.terminateCmd()
-        self.is_aborted = True
 
-    def reset_abort(self):
-        self.is_aborted = False
-
-    def wait_for_stop(self, t=0):
-        time.sleep(t)
-        while True:
-            if self.is_aborted:
-                self.is_busy = False
-                return
-            if self.syringe._checkReady():
-                self.is_busy = False
-                break
-            time.sleep(0.5)
-
-    def get_flow_rate(self, speed_code):
-        return round(self.volume * 60 / (self.SPEED_SEC_MAPPING[speed_code] * 1000), 2)
-
-    def flow_rate_to_speed_code(self, target_flow_rate):
-        """
-        Map any flow rate to the closest speed code of the syringe pump
-        
-        :param flow_rate: ul/min
-        :return: speed code (int)
-        """
-        # TODO: move this to utils
-        target_time = self.volume * 60 / target_flow_rate
-
-        left = 0
-        right = len(self.SPEED_SEC_MAPPING) - 1
-
-        # If target is beyond the range, return the closest endpoint
-        if target_time <= self.SPEED_SEC_MAPPING[self.speed_code_limit]:
-            return self.speed_code_limit
-        if target_time >= self.SPEED_SEC_MAPPING[-1]:
-            return len(self.SPEED_SEC_MAPPING) - 1
-
-        # Binary search
-        while left < right:
-            if right - left == 1:
-                if abs(self.SPEED_SEC_MAPPING[left] - target_time) <= abs(self.SPEED_SEC_MAPPING[right] - target_time):
-                    return left
-                return right
-
-            mid = (left + right) // 2
-            mid_value = self.SPEED_SEC_MAPPING[mid]
-
-            if mid_value == target_time:
-                return mid
-            elif mid_value > target_time:
-                right = mid
-            else:
-                left = mid
-
-        return left
+    def _move_finished(self):
+        return self.syringe._checkReady()
 
     def close(self, to_waste=False):
         if to_waste:
@@ -166,19 +253,13 @@ class SyringePump:
             self.execute()
         del self.com_link
 
-class SyringePumpSimulation():
-    SPEED_SEC_MAPPING = [1.25, 1.30, 1.39, 1.52, 1.71, 1.97, 2.37, 2.77, 3.03, 3.36, 3.77, 
-                        4.30, 5.00, 6.00, 7.50, 10.00, 15.00, 30.00, 31.58, 33.33, 35.29,
-                        37.50, 40.00, 42.86, 46.15, 50.00, 54.55, 60.00, 66.67, 75.00, 85.71,
-                        100.00, 120.00, 150.00, 200.00, 300.00, 333.33, 375.00, 428.57, 500.00, 600.00]
-                        # Maps to speed code 0-40
-
+class SyringePumpSimulation(SpeedCodes, Interruptible):
     def __init__(self, sn, syringe_ul, speed_code_limit, waste_port, num_ports=4, slope=14):
         self.syringe = None
         self.volume = syringe_ul
+        self.speed_code_limit = speed_code_limit
         self.range = 3000
-        self.is_busy = False
-        self.is_aborted = False
+        self._init_interrupt()
         self.get_plunger_position()
         print("Simulated syringe pump.")
 
@@ -202,6 +283,8 @@ class SyringePumpSimulation():
         pass
 
     def execute(self, block_pump=False):
+        if not self._arm():
+            return
         self.is_busy = True
         self.wait_for_stop(5)
 
@@ -216,23 +299,6 @@ class SyringePumpSimulation():
 
     def dispense_to_waste(self, speed_code=None):
         return 5
-
-    def abort(self):
-        self.is_aborted = True
-
-    def reset_abort(self):
-        self.is_aborted = False
-
-    def wait_for_stop(self, t=0):
-        time.sleep(t)
-        self.is_busy = False
-        return
-
-    def get_flow_rate(self, speed_code):
-        return round(self.volume * 60 / (self.SPEED_SEC_MAPPING[speed_code] * 1000), 2)
-
-    def flow_rate_to_speed_code(self, target_flow_rate):
-        return 20
 
     def close(self, to_waste=False):
         pass

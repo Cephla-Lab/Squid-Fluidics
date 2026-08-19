@@ -72,6 +72,32 @@ class TemperatureControllerConfig(BaseModel):
     stabilization_timeout_seconds: float = Field(default=300, gt=0)
 
 
+class FlowSensorConfig(BaseModel):
+    """One SLF3X flow sensor on the Teensy's I2C bus.
+
+    index is the I2C bus the sensor sits on (1 = Wire1, 2 = Wire2). Bus 0
+    is excluded: it is shared with the selector valves, whose driver emits
+    a general-call transaction after every command.
+
+    The monitor fields are per-sensor tuning for draw protection, consumed in
+    the operations layer:
+
+      off   read and plot only; the sensor never stops anything
+      warn  log a fault and carry on -- the mode to run first on a new setup,
+            to see what the rule would have fired on before it can halt a run
+      stop  halt the draw and fail the sequence
+
+    monitor is the starting mode only; the GUI switches it per sensor at
+    runtime. Bad tuning is otherwise only discoverable by restarting a run.
+    """
+    index: Literal[1, 2]
+    name: str
+    monitor: Literal["off", "warn", "stop"] = "off"
+    ramp_up_seconds: float = Field(default=3.0, gt=0)
+    tolerance_fraction: float = Field(default=0.3, gt=0, le=1)
+    max_flow_rate_ul_min: float = Field(default=2000, gt=0)
+
+
 class FluidicsConfig(BaseModel):
     config_version: str
     microcontroller: MicrocontrollerConfig
@@ -80,7 +106,32 @@ class FluidicsConfig(BaseModel):
     sample_selection_inlet: Optional[SampleSelectionInletConfig] = None
     samples: Optional[SamplesConfig] = None
     temperature_controller: Optional[TemperatureControllerConfig] = None
+    flow_sensors: Optional[List[FlowSensorConfig]] = Field(default=None, min_length=1)
     application: Literal["Flow Cell", "Open Chamber"]
+
+    @model_validator(mode='after')
+    def _check_flow_sensors(self):
+        if self.flow_sensors is None:
+            return self
+
+        indices = [s.index for s in self.flow_sensors]
+        if len(set(indices)) != len(indices):
+            raise ValueError("flow_sensors entries must have unique index values")
+
+        names = [s.name for s in self.flow_sensors]
+        if len(set(names)) != len(names):
+            raise ValueError("flow_sensors entries must have unique name values")
+
+        # Two is the hardware ceiling: slot i is transmitted at packet bytes
+        # 23 + 2*i, and a third would grow the packet past MCU_MSG_LENGTH.
+        # Unique indices already bound the count, so this only fires if the
+        # Literal on `index` is ever widened.
+        if len(self.flow_sensors) > 2:
+            raise ValueError(
+                "at most two flow sensors are supported; the status packet has "
+                "room for two readings (bytes 23-24 and 25-26)"
+            )
+        return self
 
 
 # --- Legacy JSON to v2.0 YAML Conversion ---

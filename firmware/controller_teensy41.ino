@@ -43,7 +43,11 @@ uint32_t fs_front_time, fs_back_time, fs_back_neg_time;
 RheoLink selectorvalves[SELECTORVALVE_QTY];
 
 // SLF3X flowrate sensor
-SLF3X flowsensor;
+// Slot 0 is the process sensor (bus 1 / Wire1): it alone drives
+// global_flowrate_reading, volume integration and the CLEAR_LINES guard.
+// Slot 1 (bus 2 / Wire2) is telemetry -- transmitted, but not fed back.
+// Both start with init false, so an unpopulated slot reports INT16_MAX.
+SLF3X flowsensors[SLF3X_MAX];
 bool flowsensor_debounce = false;
 uint32_t flow_time;
 bool flowsensor_debounce_neg = false;
@@ -121,15 +125,20 @@ void loop() {
       selectorvalve_status[i] = byte(selectorvalves[i].read_register(RheoLink_STATUS));
     }
     // PRESSURE
+    // Sized SSCX_MAX, not SSCX_QTY: indices 0 and 1 are read unconditionally
+    // below and further down in the state machine, so with SSCX_QTY 0 this was
+    // a zero-length array and those reads went out of bounds into whatever the
+    // stack held. Zero-initialized so an unpopulated sensor reads as 0 rather
+    // than garbage.
     uint16_t press_readings[2];
-    uint16_t pressure_results[SSCX_QTY];
+    uint16_t pressure_results[SSCX_MAX] = {0};
     for (uint8_t i = 0; i < SSCX_QTY; i++) {
       pressuresensors[i].read(press_readings);
       pressure_results[i] = press_readings[SSCX_PRESS_IDX];
     }
     // FLOWRATE
     int16_t flow_readings[3];
-    flowsensor.read(flow_readings);
+    flowsensors[0].read(flow_readings);   // slot 0 only: this feeds the control loop
     bool flowsensor_fluid_present = !(flow_readings[SLF3X_FLAG_IDX] & SLF3X_AIR_IN_LINE);
     double flowrate = flowsensor_fluid_present ? SLF3X_to_uLmin(flow_readings[SLF3X_FLOW_IDX]) : 0;
 
@@ -414,8 +423,10 @@ void sendStatusPacket() {
         byte 17-18  : pressure sensor 2 reading
         byte 19-20  : pressure sensor 3 reading
         byte 21-22  : pressure sensor 4 reading
-        byte 23-24  : flow sensor 1 reading
-        byte 25-26  : flow sensor 2 reading
+        byte 23-24  : flow sensor slot 0 reading (bus 1 / Wire1)
+        byte 25-26  : flow sensor slot 1 reading (bus 2 / Wire2)
+                      INT16_MAX (32767) means no sensor or a failed read, and
+                      is distinct from 0, which means measured zero flow.
         byte 27     : elapsed time since the start of the last internal program (in seconds)
         byte 28-29  : total volume (ul), range: 0 - 5000
   */
@@ -482,13 +493,16 @@ void sendStatusPacket() {
     buffer_tx[22] = ierr & 0xFF;
   }
 
+  // One pair of bytes per slot. An uninitialized or failed sensor needs no
+  // special case: SLF3X::read() pre-fills INT16_MAX and returns early when
+  // !init, so an empty slot transmits the sentinel the host already reads as
+  // "no reading". It must not transmit 0 -- that means "measured zero flow".
   int16_t flow_readings[3];
-  flowsensor.read(flow_readings);
-  buffer_tx[23] = byte(flow_readings[SLF3X_FLOW_IDX] >> 8);
-  buffer_tx[24] = byte(flow_readings[SLF3X_FLOW_IDX] & 0xFF);
-
-  buffer_tx[25] = 0; // We don't have a second flow sensor
-  buffer_tx[26] = 0;
+  for (uint8_t i = 0; i < SLF3X_MAX; i++) {
+    flowsensors[i].read(flow_readings);
+    buffer_tx[23 + (2 * i)] = byte(flow_readings[SLF3X_FLOW_IDX] >> 8);
+    buffer_tx[24 + (2 * i)] = byte(flow_readings[SLF3X_FLOW_IDX] & 0xFF);
+  }
 
   buffer_tx[27] = byte(time_since_cmd_started / 1000); // byte(time_cmd_operation  / 1000);
 
@@ -532,9 +546,12 @@ void onPacketReceived(const uint8_t* buffer, size_t size) {
         // Stop all operations
         disableControlLoops();
         valves.clear_all();
-        uint8_t err;
+        // Accumulate rather than assign: plain assignment kept only the last
+        // valve's result, so a failure on any earlier valve was reported as
+        // success. Initialized because the loop body may not run at all.
+        uint8_t err = 0;
         for (uint8_t i = 0; i < SELECTORVALVE_QTY; i++) {
-          err = selectorvalves[i].set_position(1, true, RheoLink_TIMEOUT);
+          err |= selectorvalves[i].set_position(1, true, RheoLink_TIMEOUT);
         }
 
         time_since_last_tx = 0;
@@ -625,24 +642,21 @@ void onPacketReceived(const uint8_t* buffer, size_t size) {
           execution_status = CMD_INVALID;
           return;
         }
+        uint8_t bus = buffer[3];
         uint8_t medium = buffer[4];
         bool do_crc = buffer[5];
         bool result;
 
-        if (buffer[3] == 0) {
-          result = flowsensor.begin(SLF3X_WIRE0, medium, do_crc);
-        }
-        else if (buffer[3] == 1) {
-          result = flowsensor.begin(SLF3X_WIRE1, medium, do_crc);
-        }
-        else if (buffer[3] == 2) {
-          result = flowsensor.begin(SLF3X_WIRE2, medium, do_crc);
-        }
-        else {
+        // The bus fixes the slot: bus 1 -> slot 0 -> packet bytes 23-24,
+        // bus 2 -> slot 1 -> bytes 25-26. Bus 0 (Wire) is rejected; it carries
+        // the selector valves, whose transactions would stall flow reads.
+        if (bus < SLF3X_FIRST_BUS || bus >= SLF3X_FIRST_BUS + SLF3X_MAX) {
           state = INTERNAL_STATE_IDLE;
           execution_status = CMD_INVALID;
           return;
         }
+        uint8_t slot = bus - SLF3X_FIRST_BUS;
+        result = flowsensors[slot].begin(*SLF3X_BUS_BY_SLOT[slot], medium, do_crc);
 
         if (result) {
           execution_status = COMPLETED_WITHOUT_ERRORS;
@@ -1050,7 +1064,11 @@ void onPacketReceived(const uint8_t* buffer, size_t size) {
           return;
         }
         // Check if bubble and flow sensors are initialized
-        if (!fluidsensor_front.init || !fluidsensor_back.init || !flowsensor.init) {
+        // Slot 0 only. Requiring slot 1 would break every single-sensor rig;
+        // OR-ing across slots would let this run with a dead slot 0, whose
+        // INT16_MAX has bit 0 set -> reads as AIR_IN_LINE -> the debounce latch
+        // never sets -> the state machine calls the lines clear immediately.
+        if (!fluidsensor_front.init || !fluidsensor_back.init || !flowsensors[0].init) {
           state = INTERNAL_STATE_IDLE;
           execution_status = CMD_EXECUTION_ERROR;
           return;

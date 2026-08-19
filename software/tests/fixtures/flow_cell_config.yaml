@@ -85,4 +85,8 @@ reagent_selection:
       port_27: 900
       port_28: 900
   common_tubing_fluid_amount_ul: 800
+flow_sensors:
+  - index: 1
+    name: syringe_draw
+    monitor: "off"
 application: Flow Cell

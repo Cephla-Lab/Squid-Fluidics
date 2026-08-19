@@ -4,17 +4,35 @@ from fluidics.control.syringe_pump import SyringePump, SyringePumpSimulation
 
 
 def _make_sim_with_real_speed_code(speed_code_limit=10):
-    """Create a SyringePumpSimulation with SyringePump's flow_rate_to_speed_code bound.
-
-    SyringePump can't be instantiated without hardware, so we bind its
-    flow_rate_to_speed_code method onto a SyringePumpSimulation instance.
-    We must also set speed_code_limit manually since SyringePumpSimulation
-    discards that constructor parameter.
+    """A simulated pump. Both classes inherit the conversions from SpeedCodes,
+    so the simulation's answers are the real pump's answers -- this used to
+    require binding SyringePump's method onto the instance by hand.
     """
-    p = SyringePumpSimulation(sn=None, syringe_ul=5000, speed_code_limit=speed_code_limit, waste_port=1)
-    p.speed_code_limit = speed_code_limit
-    p.flow_rate_to_speed_code = SyringePump.flow_rate_to_speed_code.__get__(p)
-    return p
+    return SyringePumpSimulation(sn=None, syringe_ul=5000,
+                                 speed_code_limit=speed_code_limit, waste_port=1)
+
+
+class TestSpeedCodesIsShared:
+    """The simulation used to stub flow_rate_to_speed_code as `return 20`, so a
+    simulated run ran every sequence at one rate no matter what it asked for --
+    and anything reasoning about the actual rate measured against a number the
+    simulation had invented.
+    """
+
+    def test_the_simulation_honours_the_requested_rate(self):
+        sim = _make_sim_with_real_speed_code()
+        assert sim.flow_rate_to_speed_code(500) != sim.flow_rate_to_speed_code(5000)
+
+    @pytest.mark.parametrize("rate", [500, 2000, 5000, 10000, 60000])
+    def test_the_simulation_agrees_with_the_real_pump(self, rate):
+        sim = _make_sim_with_real_speed_code()
+        real = SyringePump.flow_rate_to_speed_code.__get__(sim)
+        assert sim.flow_rate_to_speed_code(rate) == real(rate)
+
+    def test_the_simulation_keeps_its_speed_code_limit(self):
+        """It used to discard the constructor argument, so the clamp that keeps
+        a run below a dangerous rate did nothing in simulation."""
+        assert _make_sim_with_real_speed_code(speed_code_limit=17).speed_code_limit == 17
 
 
 class TestSpeedSecMapping:
@@ -65,7 +83,7 @@ class TestFlowRateToSpeedCode:
 
         flow_rate_to_speed_code computes target_time = volume * 60 / rate and
         compares directly against SPEED_SEC_MAPPING, so we derive rates from
-        that formula (without the *1000 used in get_flow_rate).
+        that formula, which get_flow_rate now inverts exactly.
         """
         pump_sim.speed_code_limit = 0
         mapping = SyringePump.SPEED_SEC_MAPPING
@@ -78,20 +96,27 @@ class TestFlowRateToSpeedCode:
 
 class TestGetFlowRate:
     def test_known_values(self):
-        """get_flow_rate returns volume * 60 / (mapping[code] * 1000)."""
+        """get_flow_rate returns volume * 60 / mapping[code], in uL/min."""
         p = SyringePumpSimulation(sn=None, syringe_ul=5000, speed_code_limit=10, waste_port=1)
-        # speed code 0 -> 1.25 sec -> 5000*60/(1.25*1000) = 240.0
-        assert p.get_flow_rate(0) == 240.0
-        # speed code 40 -> 600.0 sec -> 5000*60/(600*1000) = 0.5
-        assert p.get_flow_rate(40) == 0.5
+        # speed code 0 -> 1.25 sec -> 5000*60/1.25 = 240000 uL/min
+        assert p.get_flow_rate(0) == 240000.0
+        # speed code 40 -> 600.0 sec -> 5000*60/600 = 500 uL/min,
+        # which is the rate MERFISH runs at.
+        assert p.get_flow_rate(40) == 500.0
+
+    def test_get_flow_rate_inverts_flow_rate_to_speed_code(self):
+        """The two are now on one scale, so they round-trip.
+
+        Before this they differed by 1000x -- get_flow_rate in mL/min,
+        flow_rate_to_speed_code in uL/min -- which is exactly the trap draw
+        protection would have hit when comparing measured against expected.
+        """
+        p = _make_sim_with_real_speed_code(speed_code_limit=0)
+        for code in range(41):
+            assert p.flow_rate_to_speed_code(p.get_flow_rate(code)) == code
 
     def test_flow_rate_to_speed_code_round_trips(self):
-        """flow_rate_to_speed_code round-trips when given rates in its own units.
-
-        Note: get_flow_rate and flow_rate_to_speed_code use different unit
-        conventions (get_flow_rate divides by 1000 extra), so we test
-        flow_rate_to_speed_code's self-consistency separately.
-        """
+        """flow_rate_to_speed_code round-trips against the mapping directly."""
         p = _make_sim_with_real_speed_code(speed_code_limit=0)
         mapping = SyringePump.SPEED_SEC_MAPPING
         for code in range(41):

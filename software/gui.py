@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import csv
 import time
@@ -20,6 +21,7 @@ from fluidics.control.syringe_pump import SyringePump, SyringePumpSimulation
 from fluidics.control.selector_valve import SelectorValveSystem
 from fluidics.control.disc_pump import DiscPump
 from fluidics.control.temperature_controller import TCMController, TCMControllerSimulation
+from fluidics.control.flow_sensor import start_flow_sensors
 
 from fluidics.control._def import CMD_SET
 from fluidics.control.tecancavro.tecanapi import TecanAPITimeout
@@ -35,6 +37,7 @@ from fluidics.sequences import (
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
+from matplotlib.ticker import FuncFormatter
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -160,7 +163,8 @@ class SequencesWidget(QWidget):
 
     sequence_running = pyqtSignal(bool)
 
-    def __init__(self, config, syringe, selector_valves, disc_pump, temperature_controller):
+    def __init__(self, config, syringe, selector_valves, disc_pump, temperature_controller,
+                 flow_sensors=None):
         super().__init__()
         self.config = config
         self.syringePump = syringe
@@ -172,7 +176,9 @@ class SequencesWidget(QWidget):
         self.worker = None
 
         if self.config.application == 'Flow Cell':
-            self.experiment_ops = MERFISHOperations(self.config, self.syringePump, self.selectorValveSystem, self.temperatureController)
+            self.experiment_ops = MERFISHOperations(self.config, self.syringePump, self.selectorValveSystem,
+                                                   self.temperatureController, flow_sensors,
+                                                   on_warning=self.reportWarning)
         elif self.config.application == "Open Chamber":
             self.experiment_ops = OpenChamberOperations(self.config, self.syringePump, self.selectorValveSystem, self.discPump, self.temperatureController)
         else:
@@ -228,6 +234,14 @@ class SequencesWidget(QWidget):
         self.progressBar = QProgressBar()
         self.sequenceLabel = QLabel("0/0 sequences")
         self.timeLabel = QLabel("00:00:00 remaining")
+        # Draw-protection notices land here rather than in a QMessageBox: a
+        # `warn`-mode fault can fire once per draw, and a modal dialog per draw
+        # would be unusable during the very run it is meant to inform.
+        self.warningLabel = QLabel()
+        self.warningLabel.setStyleSheet("color: #b36b00;")
+        self.warningLabel.setWordWrap(True)
+        self.warningLabel.setVisible(False)
+        self._warnings = []
 
         progressSection = QVBoxLayout()
         progressLabelLayout = QHBoxLayout()
@@ -236,6 +250,7 @@ class SequencesWidget(QWidget):
         progressLabelLayout.addWidget(self.timeLabel)
         progressSection.addLayout(progressLabelLayout)
         progressSection.addWidget(self.progressBar)
+        progressSection.addWidget(self.warningLabel)
 
         layout.addLayout(progressSection)
 
@@ -439,6 +454,9 @@ class SequencesWidget(QWidget):
             'on_estimate': self.setTimeEstimate
         }
 
+        self._warnings.clear()
+        self.warningLabel.setVisible(False)
+
         self.runButton.setEnabled(False)
         self.abortButton.setEnabled(True)
         self.sequence_running.emit(True)
@@ -473,6 +491,8 @@ class SequencesWidget(QWidget):
         if event.type() == WorkerEvent.EVENT_TYPE:
             if event.callback_name == 'update_progress':
                 self._handle_progress(*event.args)
+            elif event.callback_name == 'show_warning':
+                self._handle_warning(*event.args)
             elif event.callback_name == 'show_error':
                 self._handle_error(*event.args)
             elif event.callback_name == 'on_finished':
@@ -488,6 +508,18 @@ class SequencesWidget(QWidget):
     def _handle_progress(self, index, sequence_num, status):
         self.sequenceLabel.setText(f"{sequence_num}/{self.total_sequences} sequences")
         self.highlightRow(index)
+
+    def _handle_warning(self, message):
+        self._warnings.append(message)
+        count = len(self._warnings)
+        prefix = "\u26a0 " if count == 1 else f"\u26a0 {count} notices, latest: "
+        self.warningLabel.setText(prefix + message)
+        self.warningLabel.setVisible(True)
+
+    def reportWarning(self, message):
+        """Called from the MCU reader thread, so it must not touch widgets."""
+        print(message)
+        self._post_event('show_warning', message)
 
     def _handle_error(self, error_message):
         QMessageBox.critical(self, "Error", error_message)
@@ -611,7 +643,9 @@ class ManualControlWidget(QWidget):
         speed_code_limit = self.config.syringe_pump.speed_code_limit
         for code in range(speed_code_limit, len(self.syringePump.SPEED_SEC_MAPPING)):
             rate = self.syringePump.get_flow_rate(code)
-            self.speedCombo.addItem(f"{rate} mL/min", code)
+            # uL/min, matching what sequences are written in -- picking a speed
+            # here and typing a flow_rate into a sequence now use one scale.
+            self.speedCombo.addItem(f"{rate:,.0f} µL/min", code)
         self.speedCombo.setCurrentIndex(40 - self.config.syringe_pump.speed_code_limit)  # Set default to code 40
         leftLayout.addWidget(QLabel("Speed:"), 1, 0)
         leftLayout.addWidget(self.speedCombo, 1, 1)
@@ -793,6 +827,12 @@ class ManualControlWidget(QWidget):
         super().closeEvent(event)
 
 
+def _safe_filename_part(text):
+    """Reduce free-form text to something safe to embed in a filename."""
+    cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", text).strip("._")
+    return cleaned or "sensor"
+
+
 class MplCanvas(FigureCanvasQTAgg):
     def __init__(self, parent=None, width=5, height=4, dpi=100):
         fig = Figure(figsize=(width, height), dpi=dpi)
@@ -800,7 +840,165 @@ class MplCanvas(FigureCanvasQTAgg):
         super(MplCanvas, self).__init__(fig)
 
 
-class TemperatureChannelWidget(QWidget):
+class TimeSeriesPlotWidget(QWidget):
+    """Shared scaffolding for the live sensor plots.
+
+    Owns the rolling time window, the query-interval throttle, and the CSV
+    recording lifecycle. Subclasses own their data series and how they draw
+    them, via the four hooks below.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.times = []
+        self.query_interval = 1
+        self.window_size = 60
+        self.last_update = 0
+        self.file = None
+        self.writer = None
+
+    # --- subclass hooks ---
+
+    def _record_filename(self):
+        """Filename for a new CSV recording."""
+        raise NotImplementedError
+
+    def _record_header(self):
+        """Header row for a new CSV recording."""
+        raise NotImplementedError
+
+    def _refresh_plot(self):
+        """Redraw the canvas. Implementations end with _finalize_plot()."""
+        raise NotImplementedError
+
+    # --- shared UI ---
+
+    def _build_plot_box(self, title, min_interval):
+        """Build the plot group: interval/window controls, canvas, record button.
+
+        Sets self.interval_input, self.window_input, self.canvas, and
+        self.record_btn, and wires them to the shared handlers.
+        """
+        self.query_interval = min_interval
+
+        plot_box = QGroupBox(title)
+        plot_layout = QVBoxLayout()
+
+        plot_controls = QWidget()
+        pc_layout = QHBoxLayout(plot_controls)
+        pc_layout.addWidget(QLabel("Query Interval:"))
+        self.interval_input = QSpinBox()
+        self.interval_input.setMinimum(min_interval)
+        self.interval_input.setValue(min_interval)
+        self.interval_input.setSuffix(" s")
+        pc_layout.addWidget(self.interval_input)
+        pc_layout.addWidget(QLabel("Window Size:"))
+        self.window_input = QSpinBox()
+        self.window_input.setMinimum(10)
+        self.window_input.setMaximum(3600)
+        self.window_input.setValue(self.window_size)
+        self.window_input.setSuffix(" s")
+        pc_layout.addWidget(self.window_input)
+        plot_layout.addWidget(plot_controls)
+
+        self.canvas = MplCanvas(self, width=5, height=4, dpi=100)
+        plot_layout.addWidget(self.canvas)
+
+        self.record_btn = QPushButton("Start Recording")
+        plot_layout.addWidget(self.record_btn)
+        plot_box.setLayout(plot_layout)
+
+        self.record_btn.clicked.connect(self._toggle_record)
+        self.interval_input.valueChanged.connect(self._set_interval)
+        self.window_input.valueChanged.connect(self._set_window)
+
+        return plot_box
+
+    def _set_interval(self, value):
+        self.query_interval = value
+
+    def _set_window(self, value):
+        self.window_size = value
+        self._refresh_plot()
+
+    # --- shared plotting ---
+
+    def _trim_window(self, *series):
+        """Drop samples now outside the window, keeping series aligned to times.
+
+        The caller appends to self.times and its own lists, then names those
+        lists here. Keeping the append and the trim at one call site is why
+        there is no _series() hook: a hook would split the correspondence
+        across two methods, where a wrong order silently misfiles values.
+        """
+        while self.times and self.times[-1] - self.times[0] > self.window_size:
+            self.times.pop(0)
+            for data in series:
+                data.pop(0)
+
+    def _finalize_plot(self, ax, ylabel, title):
+        """Apply the shared axis treatment and draw."""
+        current_time = self.times[-1]
+        ax.set_xlim([current_time - self.window_size, current_time])
+        ax.set_xlabel("Seconds Ago")
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
+        ax.grid(True)
+        # The x axis holds absolute timestamps but reads as "seconds ago", so
+        # relabel through a formatter rather than set_xticklabels(): the latter
+        # pins fixed strings to whatever ticks existed at call time, which
+        # desynchronizes on resize or zoom and warns about a FixedFormatter
+        # without a matching FixedLocator.
+        ax.xaxis.set_major_formatter(
+            FuncFormatter(lambda x, _pos: f"{current_time - x:.0f}"))
+        self.canvas.draw()
+
+    @staticmethod
+    def _padded_limits(values):
+        """y-limits with 10% headroom, or None if there is nothing to scale to."""
+        if not values:
+            return None
+        y_min, y_max = min(values), max(values)
+        padding = (y_max - y_min) * 0.1 if y_max != y_min else 1.0
+        return y_min - padding, y_max + padding
+
+    # --- shared recording ---
+
+    def _toggle_record(self):
+        if self.record_btn.text() == "Start Recording":
+            self.record_btn.setText("Stop Recording")
+            self.file = open(self._record_filename(), "w", newline="")
+            self.writer = csv.writer(self.file)
+            self.writer.writerow(self._record_header())
+        else:
+            self.record_btn.setText("Start Recording")
+            self.close_recording()
+
+    def close_recording(self):
+        if self.file is not None:
+            self.file.close()
+            self.file = None
+            self.writer = None
+
+
+class SensorTabWidget(QWidget):
+    """Container laying out one plot widget per channel or sensor.
+
+    Qt delivers closeEvent only to top-level windows, so a tab embedded in a
+    QTabWidget never gets one. FluidicsControlGUI.closeEvent calls
+    close_recordings() on each tab explicitly instead.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.plot_widgets = []
+
+    def close_recordings(self):
+        for widget in self.plot_widgets:
+            widget.close_recording()
+
+
+class TemperatureChannelWidget(TimeSeriesPlotWidget):
     """One channel's worth of temperature UI: target/actual readout, plot,
     record toggle, query interval, window size."""
 
@@ -812,18 +1010,18 @@ class TemperatureChannelWidget(QWidget):
         self.channel = channel  # 1-based
 
         self.temps = []
-        self.times = []
         self.targets = []
-        self.query_interval = 2
-        self.window_size = 60
-        self.last_update = 0
-        self.file = None
-        self.writer = None
 
         self.reading_signal.connect(self._on_reading)
 
         self._build_ui()
         self.temp_input.setText(f"{self.controller.target_temperatures[channel - 1]:.2f}")
+
+    def _record_filename(self):
+        return f"temp_ch{self.channel}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+
+    def _record_header(self):
+        return ["Time", "Actual Temperature", "Target Temperature"]
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -849,32 +1047,8 @@ class TemperatureChannelWidget(QWidget):
         control_layout.addLayout(row)
         control.setLayout(control_layout)
 
-        plot_box = QGroupBox(f"Channel {self.channel} Plot")
-        plot_layout = QVBoxLayout()
-
-        plot_controls = QWidget()
-        pc_layout = QHBoxLayout(plot_controls)
-        pc_layout.addWidget(QLabel("Query Interval:"))
-        self.interval_input = QSpinBox()
-        self.interval_input.setMinimum(2)
-        self.interval_input.setValue(2)
-        self.interval_input.setSuffix(" s")
-        pc_layout.addWidget(self.interval_input)
-        pc_layout.addWidget(QLabel("Window Size:"))
-        self.window_input = QSpinBox()
-        self.window_input.setMinimum(10)
-        self.window_input.setMaximum(3600)
-        self.window_input.setValue(60)
-        self.window_input.setSuffix(" s")
-        pc_layout.addWidget(self.window_input)
-        plot_layout.addWidget(plot_controls)
-
-        self.canvas = MplCanvas(self, width=5, height=4, dpi=100)
-        plot_layout.addWidget(self.canvas)
-
-        self.record_btn = QPushButton("Start Recording")
-        plot_layout.addWidget(self.record_btn)
-        plot_box.setLayout(plot_layout)
+        # Temperature moves slowly; polling faster than 2 s buys nothing.
+        plot_box = self._build_plot_box(f"Channel {self.channel} Plot", min_interval=2)
 
         layout.addWidget(control)
         layout.addWidget(plot_box)
@@ -882,33 +1056,20 @@ class TemperatureChannelWidget(QWidget):
         self.set_btn.clicked.connect(self._set_clicked)
         self.save_btn.clicked.connect(self._save_clicked)
         self.output_btn.toggled.connect(self._on_output_toggled)
-        self.record_btn.clicked.connect(self._toggle_record)
-        self.interval_input.valueChanged.connect(self._set_interval)
-        self.window_input.valueChanged.connect(self._set_window)
 
         self._sync_output_button()
-
-    def _set_interval(self, value):
-        self.query_interval = value
-
-    def _set_window(self, value):
-        self.window_size = value
-        self._refresh_plot()
 
     def _on_reading(self, temp, current_time):
         if current_time - self.last_update < self.query_interval:
             return
         self.temp_label.setText(f"{temp:.1f}°C")
         target = self.controller.target_temperatures[self.channel - 1]
+        self.times.append(current_time)
         self.temps.append(temp)
         self.targets.append(target)
-        self.times.append(current_time)
+        self._trim_window(self.temps, self.targets)
         if self.writer is not None:
             self.writer.writerow([datetime.fromtimestamp(current_time), temp, target])
-        while self.times and current_time - self.times[0] > self.window_size:
-            self.times.pop(0)
-            self.temps.pop(0)
-            self.targets.pop(0)
         self._refresh_plot()
         self.last_update = current_time
 
@@ -919,19 +1080,11 @@ class TemperatureChannelWidget(QWidget):
         ax.clear()
         ax.plot(self.times, self.temps, "b-", label="Actual")
         ax.plot(self.times, self.targets, "r--", label="Target")
-        y_min = min(min(self.temps), min(self.targets))
-        y_max = max(max(self.temps), max(self.targets))
-        padding = (y_max - y_min) * 0.1 if y_max != y_min else 1.0
-        ax.set_ylim([y_min - padding, y_max + padding])
-        current_time = self.times[-1]
-        ax.set_xlim([current_time - self.window_size, current_time])
-        ax.set_xlabel("Seconds Ago")
-        ax.set_ylabel("Temperature (°C)")
-        ax.set_title(f"Channel {self.channel} Temperature")
-        ax.grid(True)
+        limits = self._padded_limits(self.temps + self.targets)
+        if limits:
+            ax.set_ylim(list(limits))
         ax.legend()
-        ax.set_xticklabels([f"{x:.0f}" for x in current_time - ax.get_xticks()])
-        self.canvas.draw()
+        self._finalize_plot(ax, "Temperature (°C)", f"Channel {self.channel} Temperature")
 
     def _set_clicked(self):
         try:
@@ -958,28 +1111,7 @@ class TemperatureChannelWidget(QWidget):
                   f"channel {self.channel}: {e}")
         self._sync_output_button()
 
-    def _toggle_record(self):
-        if self.record_btn.text() == "Start Recording":
-            self.record_btn.setText("Stop Recording")
-            filename = f"temp_ch{self.channel}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-            self.file = open(filename, "w", newline="")
-            self.writer = csv.writer(self.file)
-            self.writer.writerow(["Time", "Actual Temperature", "Target Temperature"])
-        else:
-            self.record_btn.setText("Start Recording")
-            if self.file is not None:
-                self.file.close()
-                self.file = None
-                self.writer = None
-
-    def close_recording(self):
-        if self.file is not None:
-            self.file.close()
-            self.file = None
-            self.writer = None
-
-
-class TemperatureControlWidget(QWidget):
+class TemperatureControlWidget(SensorTabWidget):
     """Container that lays out one TemperatureChannelWidget per channel."""
 
     readings_signal = pyqtSignal(list)  # list[float] of length controller.channels
@@ -989,10 +1121,9 @@ class TemperatureControlWidget(QWidget):
         self.controller = controller
 
         layout = QHBoxLayout(self)
-        self.channel_widgets = []
         for c in range(1, controller.channels + 1):
             cw = TemperatureChannelWidget(controller, c)
-            self.channel_widgets.append(cw)
+            self.plot_widgets.append(cw)
             layout.addWidget(cw)
 
         self.readings_signal.connect(self._fanout)
@@ -1005,13 +1136,138 @@ class TemperatureControlWidget(QWidget):
 
     def _fanout(self, temps):
         current_time = datetime.now().timestamp()
-        for cw, t in zip(self.channel_widgets, temps):
+        for cw, t in zip(self.plot_widgets, temps):
             cw.reading_signal.emit(t, current_time)
 
-    def closeEvent(self, event):
-        for cw in self.channel_widgets:
-            cw.close_recording()
-        event.accept()
+
+class FlowSensorWidget(TimeSeriesPlotWidget):
+    """One flow sensor's readout, plot, and CSV recording."""
+
+    reading_signal = pyqtSignal(object, float)  # (flow_ul_min or None, timestamp)
+
+    def __init__(self, sensor, draw_protection=True, parent=None):
+        super().__init__(parent)
+        self.sensor = sensor
+        self.draw_protection = draw_protection
+
+        self.flows = []
+
+        self.reading_signal.connect(self._on_reading)
+        self._build_ui()
+        self.sensor.subscribe(self._on_callback)
+
+    def _record_filename(self):
+        # sensor.name is free-form config text; keep it out of the path itself
+        # so a name containing a separator writes here rather than elsewhere.
+        return f"flow_{_safe_filename_part(self.sensor.name)}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+
+    def _record_header(self):
+        return ["Time", "Flow Rate (uL/min)"]
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+
+        readout = QGroupBox(f"{self.sensor.name} (I2C index {self.sensor.index})")
+        readout_layout = QHBoxLayout()
+        self.flow_label = QLabel("--")
+        readout_layout.addWidget(QLabel("Flow rate:"))
+        readout_layout.addWidget(self.flow_label)
+        readout_layout.addStretch()
+
+        # Draw protection, switchable mid-run. Each draw reads the mode once
+        # when it arms, so changing this affects the next draw, not the one
+        # already running. Being able to move a sensor from warn to stop
+        # without restarting is the point: the tolerance and ramp-up that suit
+        # a given setup are found by watching warnings, and a restart to try
+        # the next value costs a whole run.
+        self.monitor_combo = QComboBox()
+        self.monitor_combo.addItems(["off", "warn", "stop"])
+        self.monitor_combo.setCurrentText(self.sensor.monitor)
+        self.monitor_combo.setToolTip(
+            "off: plot only.\n"
+            "warn: log a flow fault and carry on.\n"
+            "stop: halt the draw and fail the sequence."
+        )
+        self.monitor_combo.currentTextChanged.connect(self._on_monitor_changed)
+        if not self.draw_protection:
+            # Only MERFISHOperations arms the sensors. Leaving the control live
+            # on an application that consumes nothing would offer the operator
+            # a safety switch wired to nothing, which is worse than not
+            # offering it -- so show what it actually is: off, and unavailable.
+            self.monitor_combo.setCurrentText("off")
+            self.monitor_combo.setEnabled(False)
+            self.monitor_combo.setToolTip(
+                "Draw protection is only available for the Flow Cell "
+                "application."
+            )
+        readout_layout.addWidget(QLabel("Draw protection:"))
+        readout_layout.addWidget(self.monitor_combo)
+        readout.setLayout(readout_layout)
+
+        plot_box = self._build_plot_box("Plot", min_interval=1)
+
+        layout.addWidget(readout)
+        layout.addWidget(plot_box)
+
+    def _on_monitor_changed(self, mode):
+        self.sensor.monitor = mode
+        print(f"Flow sensor '{self.sensor.name}': draw protection set to {mode}.")
+
+    def _on_callback(self, flow, timestamp):
+        # Runs in the controller's reader thread; marshal to the GUI thread.
+        self.reading_signal.emit(flow, timestamp)
+
+    def _on_reading(self, flow, current_time):
+        # Write every sample to CSV regardless of the plot's query interval:
+        # interval_input bottoms out at 1 Hz, which is roughly one sample in
+        # every 17 at the 60 ms packet cadence and would erase anything the
+        # recording is actually meant to catch (e.g. a ~180 ms dropout).
+        if self.writer is not None:
+            self.writer.writerow([datetime.fromtimestamp(current_time),
+                                  "" if flow is None else f"{flow:.2f}"])
+
+        if current_time - self.last_update < self.query_interval:
+            return
+
+        if flow is None:
+            self.flow_label.setText("invalid")
+        else:
+            self.flow_label.setText(f"{flow:.1f} µL/min")
+
+        # None is appended as-is: matplotlib renders it as a gap, which is
+        # what an invalid reading should look like rather than a 3276.7 spike.
+        self.times.append(current_time)
+        self.flows.append(flow)
+        self._trim_window(self.flows)
+
+        self._refresh_plot()
+        self.last_update = current_time
+
+    def _refresh_plot(self):
+        if not self.times:
+            return
+        ax = self.canvas.axes
+        ax.clear()
+        ax.plot(self.times, self.flows, "b-")
+
+        # Scale to the real readings only; invalid samples carry no magnitude.
+        limits = self._padded_limits([f for f in self.flows if f is not None])
+        if limits:
+            ax.set_ylim(list(limits))
+
+        self._finalize_plot(ax, "Flow Rate (µL/min)", self.sensor.name)
+
+
+class FlowSensorControlWidget(SensorTabWidget):
+    """Container laying out one FlowSensorWidget per configured sensor."""
+
+    def __init__(self, sensors, draw_protection=True):
+        super().__init__()
+        layout = QHBoxLayout(self)
+        for sensor in sensors:
+            sw = FlowSensorWidget(sensor, draw_protection=draw_protection)
+            self.plot_widgets.append(sw)
+            layout.addWidget(sw)
 
 
 class FluidicsControlGUI(QMainWindow):
@@ -1020,6 +1276,10 @@ class FluidicsControlGUI(QMainWindow):
         self.config = load_config_file()
         self.simulation = is_simulation
         self.temperatureController = None
+        self.flowSensors = []
+        # Tabs that own CSV recordings. closeEvent flushes them on exit, since
+        # Qt never delivers a close event to a tab-embedded child widget.
+        self.sensorTabs = []
 
         self.initialize_hardware(self.simulation, self.config)
         self.selectorValveSystem = SelectorValveSystem(self.controller, self.config)
@@ -1039,7 +1299,7 @@ class FluidicsControlGUI(QMainWindow):
         self.tabWidget = QTabWidget()
 
         # "Settings and Manual Control" tab
-        runExperimentsTab = SequencesWidget(self.config, self.syringePump, self.selectorValveSystem, self.discPump, self.temperatureController)
+        runExperimentsTab = SequencesWidget(self.config, self.syringePump, self.selectorValveSystem, self.discPump, self.temperatureController, self.flowSensors)
         manualControlTab = ManualControlWidget(self.config, self.syringePump, self.selectorValveSystem, self.discPump)
         # TODO: integrate temperature controller ui
 
@@ -1048,6 +1308,15 @@ class FluidicsControlGUI(QMainWindow):
         if self.temperatureController is not None:
             temperatureControlTab = TemperatureControlWidget(self.temperatureController)
             self.tabWidget.addTab(temperatureControlTab, "Temperature Control")
+            self.sensorTabs.append(temperatureControlTab)
+
+        if self.flowSensors:
+            draw_protection = self.config.application == "Flow Cell"
+            self._warn_if_draw_protection_unavailable(draw_protection)
+            flowSensorTab = FlowSensorControlWidget(self.flowSensors,
+                                                    draw_protection=draw_protection)
+            self.tabWidget.addTab(flowSensorTab, "Flow Sensors")
+            self.sensorTabs.append(flowSensorTab)
 
         self.setCentralWidget(self.tabWidget)
         runExperimentsTab.sequence_running.connect(self.set_manual_control_tab_state)
@@ -1099,6 +1368,41 @@ class FluidicsControlGUI(QMainWindow):
         self.controller.begin()
         self.controller.send_command(CMD_SET.CLEAR)
 
+        try:
+            self.flowSensors = start_flow_sensors(self.controller, config, simulation)
+        except Exception as e:
+            # start_flow_sensors closes whatever it had already brought up, so
+            # nothing is left subscribed to the packet stream. The message
+            # names the sensor and its index.
+            msg = f"Failed to initialize flow sensors: {e}"
+            print(msg)
+            self.flowSensors = []
+            QMessageBox.warning(
+                self, "Flow Sensor",
+                f"{msg}\n\nCheck that the sensor is connected to the matching "
+                f"I2C index. The Flow Sensor tab will not be available."
+            )
+
+    def _warn_if_draw_protection_unavailable(self, draw_protection):
+        """Say so loudly when a configured mode will not be acted on.
+
+        Only MERFISHOperations arms the sensors, so on any other application a
+        config asking for warn or stop is inert. Silence there would leave the
+        operator believing a draw is protected when nothing is watching it.
+        """
+        if draw_protection:
+            return
+        configured = [s.name for s in self.flowSensors if s.monitor != "off"]
+        if not configured:
+            return
+        for sensor in self.flowSensors:
+            sensor.monitor = "off"
+        msg = (f"Draw protection is configured for {', '.join(configured)} but "
+               f"is only available for the Flow Cell application. The sensors "
+               f"will read and plot; they will not stop a draw.")
+        print(msg)
+        QMessageBox.warning(self, "Flow Sensor", msg)
+
     def set_manual_control_tab_state(self, is_running):
         manual_control_tab_index = 1
         self.tabWidget.setTabEnabled(manual_control_tab_index, not is_running)
@@ -1106,6 +1410,15 @@ class FluidicsControlGUI(QMainWindow):
     def closeEvent(self, event):
         if self.temperatureController is not None:
             self.temperatureController.close()
+
+        # Qt only sends QCloseEvent to top-level windows, so a tab embedded in
+        # self.tabWidget never gets one. Flush their CSV recordings here so
+        # quitting mid-recording doesn't leave a file handle dangling.
+        for tab in self.sensorTabs:
+            tab.close_recordings()
+        for sensor in self.flowSensors:
+            sensor.close()
+        self.controller.close()
 
         if self.config.application == "Open Chamber":
             self.syringePump.close()

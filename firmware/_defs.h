@@ -36,6 +36,25 @@ const uint8_t SELECTORVALVE_ADDRS[] = {0x0E, 0x10, 0x12, 0x00, 0x00}; // 0x00 is
 #define SLF3X_WIRE2   Wire2
 #define PERFORM_CRC  true
 
+// Flow sensor packet slots. Slot i is transmitted at status bytes 23 + 2*i, so
+// two is the ceiling: a third would have to grow the packet past
+// FROM_MCU_MSG_LENGTH, which every host rejects.
+//
+// The host addresses a sensor by BUS, and the bus fixes the slot: bus 1 (Wire1)
+// is slot 0, bus 2 (Wire2) is slot 1. There is no separate slot field, so the
+// INITIALIZE_FLOW_SENSOR payload is unchanged. Bus 0 (Wire) is not a valid flow
+// sensor bus -- it is shared with the selector valves, whose blocking retry and
+// poll loops would stall flow reads for hundreds of ms during a valve move.
+//
+// Slot 0 is the process sensor: it alone feeds global_flowrate_reading, volume
+// integration and the CLEAR_LINES guard. Slot 1 is telemetry.
+#define SLF3X_MAX          2
+#define SLF3X_FIRST_BUS    1   // bus index of slot 0
+// Slot -> bus, in one place. Same shape as PRESSURE_CS above: the mapping is a
+// table rather than a branch, so widening SLF3X_MAX cannot leave a dispatch
+// arm behind.
+TwoWire* const SLF3X_BUS_BY_SLOT[SLF3X_MAX] = {&SLF3X_WIRE1, &SLF3X_WIRE2};
+
 #define SSCX_SPI     SPI
 #define SSCX_QTY      0 // 0 are installed here
 #define SSCX_MAX      4 // Support up to 4 pressure sensors

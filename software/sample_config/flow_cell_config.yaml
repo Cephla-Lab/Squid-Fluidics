@@ -85,4 +85,29 @@ reagent_selection:
       port_27: 900
       port_28: 900
   common_tubing_fluid_amount_ul: 800
+# Optional -- omit the whole section if no flow sensor is fitted.
+#
+# index is the sensor's physical position on the board, which is its I2C bus
+# and fixes which packet bytes carry it: 1 = Wire1 = bytes 23-24, 2 = Wire2 =
+# bytes 25-26. Bus 0 is not supported; it carries the selector valves, whose
+# transactions would stall flow reads during a valve move.
+#
+# One or two sensors, in any combination. A single sensor may sit at index 2
+# with nothing at index 1 -- it reads bytes 25-26 and 23-24 report no sensor.
+# Note only index 1 feeds the firmware's closed-loop flow control and the
+# CLEAR_LINES guard; a sensor at index 2 is read and plotted but not fed back.
+flow_sensors:
+- index: 1
+  name: syringe_draw
+  # Draw protection. Keep it quoted -- bare off is a YAML boolean.
+  #   off   read and plot only
+  #   warn  log a flow fault and carry on
+  #   stop  halt the draw and fail the sequence
+  # This is the starting mode; the GUI switches it per sensor at runtime. Start
+  # a new setup on "warn" and watch what the rule would have fired on before
+  # letting it halt a run. All four fields are optional; shown at their defaults.
+  monitor: "off"
+  ramp_up_seconds: 3.0
+  tolerance_fraction: 0.3
+  max_flow_rate_ul_min: 2000
 application: Flow Cell

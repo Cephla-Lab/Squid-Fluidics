@@ -200,3 +200,114 @@ class TestTemperatureControllerConfig:
     def test_timeout_must_be_positive(self):
         with pytest.raises(ValidationError):
             FluidicsConfig(**self._config_with_tc(stabilization_timeout_seconds=0))
+
+
+class TestFlowSensorConfig:
+    def test_absent_section_is_none(self):
+        config = FluidicsConfig(**_make_config_dict())
+        assert config.flow_sensors is None
+
+    def test_minimal_sensor_takes_defaults(self):
+        config = FluidicsConfig(**_make_config_dict(
+            flow_sensors=[{"index": 1, "name": "syringe_draw"}]
+        ))
+        sensor = config.flow_sensors[0]
+        assert sensor.index == 1
+        assert sensor.name == "syringe_draw"
+        assert sensor.monitor == "off"
+        assert sensor.ramp_up_seconds == 3.0
+        assert sensor.tolerance_fraction == 0.3
+        assert sensor.max_flow_rate_ul_min == 2000
+
+    def test_explicit_values_override_defaults(self):
+        config = FluidicsConfig(**_make_config_dict(
+            flow_sensors=[{
+                "index": 2, "name": "waste_line", "monitor": "off",
+                "ramp_up_seconds": 1.5, "tolerance_fraction": 0.1,
+                "max_flow_rate_ul_min": 1500,
+            }]
+        ))
+        sensor = config.flow_sensors[0]
+        assert sensor.monitor == "off"
+        assert sensor.ramp_up_seconds == 1.5
+        assert sensor.tolerance_fraction == 0.1
+        assert sensor.max_flow_rate_ul_min == 1500
+
+    @pytest.mark.parametrize("bad_index", [0, 3, -1])
+    def test_index_must_be_1_or_2(self, bad_index):
+        with pytest.raises(ValidationError):
+            FluidicsConfig(**_make_config_dict(
+                flow_sensors=[{"index": bad_index, "name": "s"}]
+            ))
+
+    def test_unknown_monitor_mode_rejected(self):
+        with pytest.raises(ValidationError):
+            FluidicsConfig(**_make_config_dict(
+                flow_sensors=[{"index": 1, "name": "s", "monitor": "halt"}]
+            ))
+
+    def test_monitor_off_accepted(self):
+        config = FluidicsConfig(**_make_config_dict(
+            flow_sensors=[{"index": 1, "name": "s", "monitor": "off"}]
+        ))
+        assert config.flow_sensors[0].monitor == "off"
+
+    @pytest.mark.parametrize("mode", ["warn", "stop"])
+    def test_active_monitor_modes_accepted(self, mode):
+        config = FluidicsConfig(**_make_config_dict(
+            flow_sensors=[{"index": 1, "name": "s", "monitor": mode}]
+        ))
+        assert config.flow_sensors[0].monitor == mode
+
+    @pytest.mark.parametrize("field,bad_value", [
+        ("ramp_up_seconds", 0),
+        ("ramp_up_seconds", -1),
+        ("tolerance_fraction", 0),
+        ("tolerance_fraction", 1.5),
+        ("max_flow_rate_ul_min", 0),
+    ])
+    def test_out_of_range_values_rejected(self, field, bad_value):
+        with pytest.raises(ValidationError):
+            FluidicsConfig(**_make_config_dict(
+                flow_sensors=[{"index": 1, "name": "s", field: bad_value}]
+            ))
+
+    def test_duplicate_index_rejected(self):
+        with pytest.raises(ValidationError, match="index"):
+            FluidicsConfig(**_make_config_dict(flow_sensors=[
+                {"index": 1, "name": "a"},
+                {"index": 1, "name": "b"},
+            ]))
+
+    def test_duplicate_name_rejected(self):
+        with pytest.raises(ValidationError, match="name"):
+            FluidicsConfig(**_make_config_dict(flow_sensors=[
+                {"index": 1, "name": "same"},
+                {"index": 2, "name": "same"},
+            ]))
+
+    def test_two_sensors_accepted(self):
+        config = FluidicsConfig(**_make_config_dict(flow_sensors=[
+            {"index": 1, "name": "syringe_draw"},
+            {"index": 2, "name": "waste_line"},
+        ]))
+        assert [s.index for s in config.flow_sensors] == [1, 2]
+
+    def test_a_lone_sensor_on_index_2_is_valid(self):
+        """One sensor in board slot 2, nothing in slot 1. It reads packet
+        bytes 25-26 while 23-24 carry the no-sensor sentinel -- a normal
+        wiring, not an error.
+        """
+        config = FluidicsConfig(**_make_config_dict(
+            flow_sensors=[{"index": 2, "name": "waste_line"}]
+        ))
+        assert config.flow_sensors[0].index == 2
+
+    def test_empty_list_rejected(self):
+        with pytest.raises(ValidationError):
+            FluidicsConfig(**_make_config_dict(flow_sensors=[]))
+
+    def test_fixture_config_has_flow_sensor(self, fixtures_dir):
+        config = load_config(str(fixtures_dir / "flow_cell_config.yaml"))
+        assert config.flow_sensors is not None
+        assert config.flow_sensors[0].index == 1

@@ -6,9 +6,31 @@ from datetime import datetime
 import os
 from pathlib import Path
 import numpy as np
+import threading
 from time import time, sleep
 
 SERIAL_NUMBER_DEBUGGING = '11972480'
+
+# How long the reader thread naps when the port has nothing waiting. The MCU
+# transmits every 60 ms, so anything well under that adds no meaningful latency
+# while keeping idle wakeups down.
+READER_IDLE_SLEEP_S = 0.005
+
+
+def to_int16(raw):
+    '''Reinterpret an unsigned 16-bit value as signed int16.
+
+    Equivalent to np.int16(raw) for raw in [0, 65535], but numpy's out-of-range
+    cast is deprecated (warns) on this NumPy version and raises OverflowError on
+    NumPy 2.x — every negative flow/volume/valve-mask reading has the high bit
+    set and would hit that path.
+    '''
+    return raw - 65536 if raw > 32767 else raw
+
+
+def raw_to_psi(raw_pressure):
+    '''Convert a raw SSCX pressure count to psi.'''
+    return (raw_pressure - MCU_CONSTANTS._output_min) * (MCU_CONSTANTS._p_max - MCU_CONSTANTS._p_min) / (MCU_CONSTANTS._output_max - MCU_CONSTANTS._output_min) + MCU_CONSTANTS._p_min
 
 def print_message(msg):
     '''
@@ -33,6 +55,87 @@ def uint_to_bytes(uint, n_bytes):
         shifted = uint >> shift_amt
         out.append(np.uint8(shifted & 0xFF))
     return out
+
+class Subscribers:
+    '''A callback list with isolated dispatch.
+
+    Producers here run on a background thread while consumers register and
+    deregister from another, and one bad consumer must not take out the rest.
+    Used for the controller's packet stream and, one layer up, for a flow
+    sensor's scaled readings — the two differ only in payload.
+    '''
+
+    def __init__(self, label):
+        self._label = label          # names the producer in failure messages
+        self._lock = threading.Lock()
+        self._callbacks = []
+
+    def subscribe(self, callback):
+        '''Register a callback. Runs on the producer's thread, so it must not
+        block — a slow subscriber delays every other consumer.
+        '''
+        with self._lock:
+            self._callbacks.append(callback)
+
+    def unsubscribe(self, callback):
+        '''Deregister by identity. A no-op if absent, and idempotent.
+
+        Filters rather than calling list.remove(), which matches with __eq__ —
+        that would invoke arbitrary subscriber comparison and raise ValueError
+        for a callback already gone. Absence has to be tolerated because
+        close() is legitimately reachable twice: begin() calls it on its
+        failure path, and teardown calls it again.
+        '''
+        with self._lock:
+            self._callbacks = [c for c in self._callbacks if c is not callback]
+
+    def clear(self):
+        with self._lock:
+            self._callbacks = []
+
+    def __len__(self):
+        with self._lock:
+            return len(self._callbacks)
+
+    def notify(self, *args):
+        '''Dispatch to every subscriber, isolating each from the others.
+
+        The snapshot is taken under the lock but dispatched outside it, so a
+        subscriber may unsubscribe itself re-entrantly and a slow consumer
+        cannot block registration. Each call is wrapped separately rather than
+        the loop as a whole: with one try around the loop, a raising subscriber
+        would starve every subscriber after it, forever, at 17 packets/second.
+        '''
+        with self._lock:
+            callbacks = list(self._callbacks)
+
+        for callback in callbacks:
+            try:
+                callback(*args)
+            except Exception as e:
+                print_message(f"{self._label} subscriber failed: {e}")
+
+
+class PacketSubscribers:
+    '''Mixin giving a controller a packet-stream subscriber list.
+
+    Two flow sensors is the case that forced this — a single callback slot
+    meant the second sensor silently displaced the first.
+    '''
+
+    def _init_packet_subscribers(self):
+        self._packet_subscribers = Subscribers("Packet")
+
+    def subscribe_packets(self, callback):
+        '''Register callback(parsed_packet), called once per received packet.'''
+        self._packet_subscribers.subscribe(callback)
+
+    def unsubscribe_packets(self, callback):
+        self._packet_subscribers.unsubscribe(callback)
+
+    def _notify_packet_subscribers(self, parsed):
+        self._packet_subscribers.notify(parsed)
+
 
 # Define basic input/output from the microcontroller
 class Microcontroller():
@@ -128,8 +231,15 @@ class Microcontroller():
                 return None
             # If it is 0, we have a full packet to decode. Clear the read buffer
             else:
-                output = cobs.decode(bytearray(self.read_buffer))
-                self.read_buffer = []
+                try:
+                    output = cobs.decode(bytearray(self.read_buffer))
+                finally:
+                    # Clear on failure as well as success. The byte loop above
+                    # always consumes through a delimiter, so a corrupt frame is
+                    # fully drained by the time we get here — keeping its bytes
+                    # would prepend them to the next frame and make every later
+                    # decode fail too, until a spurious 0x00 happened to resync.
+                    self.read_buffer = []
 
         # If we aren't using COBS, use fixed-length command rx
         else:
@@ -150,7 +260,7 @@ class Microcontroller():
         return output
     
 
-class FluidController(Microcontroller):
+class FluidController(Microcontroller, PacketSubscribers):
     def __init__(self, serial_number, use_cobs = True, log_measurements = False, debug = False):
         '''
         Initialize logging and microcontroller connection. This class inherits from Microcontroller
@@ -164,7 +274,7 @@ class FluidController(Microcontroller):
 
         if(self.log_measurements):
             self.measurement_file = open(os.path.join(Path.home(),"Downloads","Fluidic Controller Logged Measurement_" + datetime.now().strftime('%Y-%m-%d %H-%M-%S.%f') + ".csv"), "w+")
-            self.measurement_file.write("timestamp,rx_uid,rx_cmd,cmd_status,mcu_state,bs1,bs2,mcu_time,sv0,sv1,sv2,sv3,sv4,valves,pump,p0,p1,p2,p3,f1,f2,vol_uL\n")
+            self.measurement_file.write("timestamp,rx_uid,rx_cmd,cmd_status,mcu_state,bs1,bs2,mcu_time,sv0,sv1,sv2,sv3,sv4,valves,pump,p0,p1,p2,p3,f1_raw,f2_raw,vol_uL\n")
             self.counter_measurement_file_flush = 1
 
         self.cmd_uid = 0
@@ -177,27 +287,78 @@ class FluidController(Microcontroller):
 
         self.recorded_data = {}
 
+        self._init_status_state()
+
         super().__init__(self.serial_number, self.use_cobs)
 
         return
 
-    def __del__(self):
-        '''Close the logfile if it's being used, reset, and disconnect'''
-        if self.log_measurements:
+    def close(self):
+        '''Stop the reader thread, flush the log, and release the serial port.
+
+        Callers should invoke this explicitly rather than leaving the port to
+        __del__: the reader thread owns the port for the process's lifetime, so
+        without an orderly stop the device can stay busy and a second run in the
+        same process cannot reopen it.
+
+        Idempotent, and safe on a partially-constructed object. Defensive
+        attribute lookups matter because if __init__ raised partway through
+        (e.g. the log file failed to open, before _init_status_state() or
+        Microcontroller.__init__() ran), GC still calls __del__ on the
+        half-built object; plain attribute access would raise AttributeError
+        here and mask whatever error __init__ originally raised.
+        '''
+        if getattr(self, '_reader_thread', None) is not None:
+            self.stop_reading()
+        if getattr(self, 'measurement_file', None) is not None:
             self.measurement_file.close()
-        if self.serial is not None:
+            self.measurement_file = None
+        if getattr(self, 'serial', None) is not None:
             self.serial.close()
-        return
+            self.serial = None
+
+    def __del__(self):
+        self.close()
+
+    def begin(self):
+        '''Connect to the microcontroller, then start the reader thread that owns the port.'''
+        super().begin()
+        self.start_reading()
     
-    def wait_for_completion(self):
-        '''Keep polling for status until it is no longer IN_PROGRESS, return the status'''
-        mcu_data = self.get_mcu_status()
-        status = mcu_data['MCU_command_execution_status']
-        while status == COMMAND_STATUS.IN_PROGRESS:
-            mcu_data = self.get_mcu_status()
-            status = mcu_data['MCU_command_execution_status']
-        
-        return status
+    def wait_for_completion(self, timeout=30):
+        '''Block until the MCU reports a terminal status for the command we just sent.
+
+        Matches on both the command UID and the publish sequence number
+        (`_status_seq`, bumped by `_publish_status`), not UID alone. UID is not
+        enough: CMD_SET.CLEAR resets both the host's and the firmware's UID
+        counter to 0 (controller_teensy41.ino), so two consecutive CLEAR
+        commands share UID 0. Without the sequence check, the terminal packet
+        still sitting there from the *first* CLEAR -- same UID, already
+        published -- would be accepted for the second one before it had even
+        reached the firmware. Requiring seq > seq-at-send restricts acceptance
+        to a packet the reader thread published after this command went out,
+        which is the guarantee this method's contract actually needs.
+
+        Bounded even if the MCU has never sent a single packet (unplugged,
+        crashed, wrong serial port): this polls a non-blocking snapshot
+        (`_peek_status`) rather than `get_mcu_status()`, which would block
+        forever waiting for the first packet and defeat the timeout entirely.
+        '''
+        deadline = time() + timeout
+        while True:
+            data, seq = self._peek_status()
+            if (data is not None
+                    and data['MCU_received_command_UID'] == self.cmd_uid
+                    and seq > self._seq_at_send):
+                status = data['MCU_command_execution_status']
+                if status != COMMAND_STATUS.IN_PROGRESS:
+                    return status
+            if time() > deadline:
+                raise TimeoutError(
+                    f"MCU did not complete command {self.cmd_sent} "
+                    f"(uid {self.cmd_uid}) within {timeout}s"
+                )
+            sleep(0.005)
     
     def add_uid_to_cmd(self, cmd):
         '''Break cmd_uid into two bytes and overwrite the first two bytes of the command array with the uid'''
@@ -205,16 +366,9 @@ class FluidController(Microcontroller):
         cmd[1] = self.cmd_uid & 0xFF
         return cmd
     
-    def get_mcu_status(self):
-        '''
-        Read a fixed-length packet from the microcontroller. If there is data available, unpack it. If in debug mode, print out the data. If we are aving logs, write to disc
-        '''
-        msg = None
-        while msg is None:
-            msg = self.read_received_packet_nowait(discard_buffer=True)
-        assert (len(msg) == MCU_MSG_LENGTH), f"Expected message of len {MCU_CMD_LENGTH}, got len {len(msg)}"
+    def _parse_packet(self, msg):
+        '''Decode a 30-byte MCU status packet into a dict. Pure — no I/O.
 
-        '''
         #########################################################
         #########   MCU -> Computer message structure   #########
         #########################################################
@@ -234,12 +388,8 @@ class FluidController(Microcontroller):
         byte 25-26  : flow sensor 2 reading
         byte 27     : elapsed time since the start of the last internal program (in seconds)
         byte 28-29  : total volume (ul), range: 0 - 5000
-
         '''
-        if self.debug:
-            print(str(list(msg)))
-
-        MCU_received_command_UID = (msg[0] << 8) + msg[1] 
+        MCU_received_command_UID = (msg[0] << 8) + msg[1]
         MCU_received_command = msg[2]
         MCU_command_execution_status = msg[3]
         MCU_interal_program = msg[4]
@@ -252,79 +402,30 @@ class FluidController(Microcontroller):
         selector_valve_4_pos = msg[9]
         selector_valve_5_pos = msg[10]
 
-        solenoid_valves = np.int16((int(msg[11])<<8) + msg[12])
+        solenoid_valves = to_int16((int(msg[11]) << 8) + msg[12])
 
-        measurement_pump_power = MCU_CONSTANTS.TTP_MAX_PW * float((int(msg[13])<<8)+msg[14])/np.iinfo(np.uint16).max
+        measurement_pump_power = MCU_CONSTANTS.TTP_MAX_PW * float((int(msg[13]) << 8) + msg[14]) / np.iinfo(np.uint16).max
 
-        _pressure_1_raw = (int(msg[15])<<8) + msg[16]
-        _pressure_2_raw = (int(msg[17])<<8) + msg[18]
-        _pressure_3_raw = (int(msg[19])<<8) + msg[20]
-        _pressure_4_raw = (int(msg[21])<<8) + msg[22]
-        
-        def raw_to_psi(raw_pressure):
-            return (raw_pressure - MCU_CONSTANTS._output_min) * (MCU_CONSTANTS._p_max - MCU_CONSTANTS._p_min) / (MCU_CONSTANTS._output_max - MCU_CONSTANTS._output_min) + MCU_CONSTANTS._p_min
+        _pressure_1_raw = (int(msg[15]) << 8) + msg[16]
+        _pressure_2_raw = (int(msg[17]) << 8) + msg[18]
+        _pressure_3_raw = (int(msg[19]) << 8) + msg[20]
+        _pressure_4_raw = (int(msg[21]) << 8) + msg[22]
 
         pressure_1 = raw_to_psi(_pressure_1_raw)
         pressure_2 = raw_to_psi(_pressure_2_raw)
         pressure_3 = raw_to_psi(_pressure_3_raw)
         pressure_4 = raw_to_psi(_pressure_4_raw)
-        
-        flow_1 = float(np.int16((int(msg[23])<<8)+msg[24]))/MCU_CONSTANTS.SCALE_FACTOR_FLOW
-        flow_2 = float(np.int16((int(msg[25])<<8)+msg[26]))/MCU_CONSTANTS.SCALE_FACTOR_FLOW
+
+        # Raw int16 exactly as received. 32767 is the SLF3X "no reading"
+        # sentinel, which the driver compares against before scaling.
+        flow_1_raw = to_int16((int(msg[23]) << 8) + msg[24])
+        flow_2_raw = to_int16((int(msg[25]) << 8) + msg[26])
+
         MCU_CMD_time_elapsed = msg[27]
 
-        vol_ul = (float(np.int16((int(msg[28])<<8)+msg[29]))/np.iinfo(np.int16).max)*MCU_CONSTANTS.VOLUME_UL_MAX
+        vol_ul = (float(to_int16((int(msg[28]) << 8) + msg[29])) / np.iinfo(np.int16).max) * MCU_CONSTANTS.VOLUME_UL_MAX
 
-        # Write the data to file
-        if self.log_measurements or self.debug:
-            line = (f"{datetime.now().strftime('%m/%d %H:%M:%S')},"
-                    f"{MCU_received_command_UID},"
-                    f"{MCU_received_command},"
-                    f"{MCU_command_execution_status},"
-                    f"{MCU_interal_program},"
-                    f"{bubble_sensor_1_state:>04b},"
-                    f"{bubble_sensor_2_state:>04b},"
-                    f"{MCU_CMD_time_elapsed},"
-                    f"{selector_valve_1_pos},"
-                    f"{selector_valve_2_pos},"
-                    f"{selector_valve_3_pos},"
-                    f"{selector_valve_4_pos},"
-                    f"{selector_valve_5_pos},"
-                    f"{solenoid_valves:>016b},"
-                    f"{measurement_pump_power:.2f},"
-                    f"{pressure_1:.2f},"
-                    f"{pressure_2:.2f},"
-                    f"{pressure_3:.2f},"
-                    f"{pressure_4:.2f},"
-                    f"{flow_1:.2f},"
-                    f"{flow_2:.2f},"
-                    f"{vol_ul:.2f}\n")
-            if self.log_measurements:
-                self.measurement_file.write(line)
-                self.counter_measurement_file_flush += 1
-                if self.counter_measurement_file_flush >= 500:
-                    self.counter_measurement_file_flush = 0
-                    self.measurement_file.flush()
-            if self.debug:
-                print(line)
-
-        # this block of code should only be used when get_mcu_status is executed at fixed interval (< 1s)
-        '''
-        # Check for mismatch between received command and transmitted command
-        if (MCU_received_command != self.cmd_sent) or (MCU_received_command_UID != self.cmd_uid):
-            if self.timestamp_last_mismatch is None:
-                self.timestamp_last_mismatch = time()
-            else:
-                dt = time() - self.timestamp_last_mismatch
-                assert (dt < T_DIFF_COMPUTER_MCU_MISMATCH_FAULT_THRESHOLD_SECONDS), f"Command mismatch for {dt} seconds"
-                print((MCU_received_command, self.cmd_sent))
-                print((MCU_received_command_UID, self.cmd_uid))
-        else:
-            self.timestamp_last_mismatch = None
-        '''
-
-        # Load latest data into a shared dict
-        self.recorded_data = {
+        return {
             "MCU_received_command_UID": MCU_received_command_UID,
             "MCU_received_command": MCU_received_command,
             "MCU_command_execution_status": MCU_command_execution_status,
@@ -335,11 +436,124 @@ class FluidController(Microcontroller):
             "solenoid_valves": solenoid_valves,
             "measurement_pump_power": measurement_pump_power,
             "pressures": [pressure_1, pressure_2, pressure_3, pressure_4],
-            "flowrates": [flow_1, flow_2],
-            "vol_ul": vol_ul
+            # Raw counts only. Turning these into uL/min needs the installed
+            # sensor's scale factor, which lives with the driver that knows
+            # which part it is talking to (flow_sensor.py). Scaling here as
+            # well would be a second copy, free to disagree -- and it did.
+            "flowrates_raw": [flow_1_raw, flow_2_raw],
+            "vol_ul": vol_ul,
         }
 
-        return self.recorded_data
+    def _init_status_state(self):
+        '''Set up shared packet state. Called from __init__ and by tests.'''
+        self._status_lock = threading.Lock()
+        self._latest_status = None
+        self._status_seq = 0
+        self._seq_at_send = 0
+        self._reader_thread = None
+        self._terminate_reader = False
+        self._init_packet_subscribers()
+
+    def _publish_status(self, parsed):
+        '''Store a parsed packet, bump the sequence, notify subscribers.'''
+        with self._status_lock:
+            self._latest_status = parsed
+            self._status_seq += 1
+            self.recorded_data = parsed
+
+        self._log_packet(parsed)
+        self._notify_packet_subscribers(parsed)
+
+    def _reader_loop(self):
+        while not self._terminate_reader:
+            try:
+                msg = self.read_received_packet_nowait()
+                if msg is None:
+                    sleep(READER_IDLE_SLEEP_S)
+                    continue
+                if len(msg) != MCU_MSG_LENGTH:
+                    continue
+                self._publish_status(self._parse_packet(msg))
+            except Exception as e:
+                # A corrupt COBS frame raises from cobs.decode, and the port
+                # raises during shutdown. Neither should kill the only thread
+                # feeding every consumer — drop the frame and carry on.
+                # read_received_packet_nowait clears its own buffer on a failed
+                # decode, so the next frame resyncs deterministically.
+                if not self._terminate_reader:
+                    print_message(f"Reader thread error: {e}")
+                sleep(READER_IDLE_SLEEP_S)
+
+    def start_reading(self):
+        '''Begin consuming packets. The reader thread owns the serial port.'''
+        if self._reader_thread is not None:
+            return
+        self._terminate_reader = False
+        self._reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
+        self._reader_thread.start()
+
+    def stop_reading(self):
+        self._terminate_reader = True
+        if self._reader_thread is not None:
+            self._reader_thread.join(timeout=2)
+            self._reader_thread = None
+
+    def _log_packet(self, d):
+        if not (self.log_measurements or self.debug):
+            return
+        b1, b2 = d["bubble_sensor_states"]
+        sv = d["selector_valves_pos"]
+        p = d["pressures"]
+        f = d["flowrates_raw"]
+        line = (f"{datetime.now().strftime('%m/%d %H:%M:%S')},"
+                f"{d['MCU_received_command_UID']},"
+                f"{d['MCU_received_command']},"
+                f"{d['MCU_command_execution_status']},"
+                f"{d['MCU_interal_program']},"
+                f"{b1:>04b},{b2:>04b},"
+                f"{d['MCU_CMD_time_elapsed']},"
+                f"{sv[0]},{sv[1]},{sv[2]},{sv[3]},{sv[4]},"
+                f"{d['solenoid_valves']:>016b},"
+                f"{d['measurement_pump_power']:.2f},"
+                f"{p[0]:.2f},{p[1]:.2f},{p[2]:.2f},{p[3]:.2f},"
+                f"{f[0]},{f[1]},"
+                f"{d['vol_ul']:.2f}\n")
+        if self.log_measurements:
+            self.measurement_file.write(line)
+            self.counter_measurement_file_flush += 1
+            if self.counter_measurement_file_flush >= 500:
+                self.counter_measurement_file_flush = 0
+                self.measurement_file.flush()
+        if self.debug:
+            print(line)
+
+    def _peek_status(self):
+        '''Non-blocking: return (parsed packet copy, publish sequence number),
+        or (None, None) if the reader thread has not published anything yet.
+
+        Both values are read from a single lock acquisition so they describe
+        the same packet -- reading them separately could interleave with the
+        reader thread publishing a new one in between. Used by callers (like
+        wait_for_completion) that must enforce their own timeout instead of
+        blocking indefinitely, unlike get_mcu_status().
+        '''
+        with self._status_lock:
+            if self._latest_status is not None:
+                return dict(self._latest_status), self._status_seq
+        return None, None
+
+    def get_mcu_status(self):
+        '''Return the most recent packet as a dict, waiting for the first one.
+
+        Blocks indefinitely if no packet has ever been published (e.g. called
+        before the MCU has sent anything). Callers that need a bound on that
+        wait -- such as wait_for_completion -- must use _peek_status() instead.
+        '''
+        while True:
+            data, _ = self._peek_status()
+            if data is not None:
+                return data
+            sleep(0.001)
 
     def send_command(self, command, *args):
         '''
@@ -404,10 +618,10 @@ class FluidController(Microcontroller):
             loop_type = np.uint8(args[0])
             assert loop_type in MCU_CONSTANTS.BB_LOOP_TYPES, "loop type is not a bang-bang type"
 
-            t_lower_intermediate = args[1] * MCU_CONSTANTS.SCALE_FACTOR_FLOW
+            t_lower_intermediate = args[1] * MCU_CONSTANTS.MCU_ASSUMED_SCALE_FACTOR_FLOW
             t_lower = np.uint16(t_lower_intermediate)
             assert t_lower_intermediate == t_lower, "Error calculating lower bound"
-            t_upper_intermediate = args[2] * MCU_CONSTANTS.SCALE_FACTOR_FLOW
+            t_upper_intermediate = args[2] * MCU_CONSTANTS.MCU_ASSUMED_SCALE_FACTOR_FLOW
             t_upper = np.uint16(t_upper_intermediate)
             assert t_upper_intermediate == t_upper, "Error calculating upper bound"
 
@@ -725,30 +939,55 @@ class FluidController(Microcontroller):
 
         self.add_uid_to_cmd(command_array)
         self.send_mcu_command(command_array)
+        # Record the publish sequence right after transmitting -- the write is
+        # synchronous, so anything published before it returns is unambiguously
+        # stale. Capturing this before send_mcu_command() would leave a window
+        # between releasing the lock and the bytes actually leaving the host,
+        # during which the reader thread could consume one of the firmware's
+        # unconditional 60 ms idle packets and bump _status_seq, making a
+        # packet that predates this command satisfy `seq > _seq_at_send`. See
+        # wait_for_completion's docstring for why UID matching alone isn't
+        # enough to catch that.
+        with self._status_lock:
+            self._seq_at_send = self._status_seq
         pass
 
-    def send_command_blocking(self, command, *args):
-        '''Send a command, then write logs while waiting for it to complete'''
+    def send_command_blocking(self, command, *args, timeout=30):
+        '''Send a command, then write logs while waiting for it to complete.
+
+        timeout is keyword-only (falls out naturally after *args) and passed
+        straight through to wait_for_completion. The 30 s default suits fast
+        commands, but several firmware operations (e.g. CLEAR_LINES,
+        UNLOAD_FLUID_VOLUME) take a caller-supplied timeout parameter of their
+        own that routinely runs 35-50 s; callers issuing those must pass a
+        matching timeout here or this will raise before the firmware finishes.
+        '''
         self.send_command(command, *args)
-        return self.wait_for_completion()
-
-    def delay(self, dt):
-        '''Keep logging data for time t'''
-        tf = time() + dt
-        while time() <= tf:
-            self.get_mcu_status()
-        pass
+        return self.wait_for_completion(timeout=timeout)
 
 
-class FluidControllerSimulation():
+class FluidControllerSimulation(PacketSubscribers):
     def __init__(self, serial_number, use_cobs = True, log_measurements = False, debug = False):
         self.data = {
             'selector_valves_pos': {0: 1, 1: 1, 2: 1, 3: 1, 4: 1}
         }
+        # Never fires — this class has no packet stream — but a real FlowSensor
+        # against a simulated controller is a supported combination, so it must
+        # offer the same subscribe/unsubscribe surface.
+        self._init_packet_subscribers()
         return
 
     def begin(self):
         print("Simulated fluid controller.")
+
+    def start_reading(self):
+        pass
+
+    def stop_reading(self):
+        pass
+
+    def close(self):
+        pass
 
     def send_command(self, command, *args):
         sleep(1)
@@ -756,13 +995,13 @@ class FluidControllerSimulation():
             self.data['selector_valves_pos'][args[0]] = args[1]
         return
 
-    def send_command_blocking(self, command, *args):
+    def send_command_blocking(self, command, *args, timeout=30):
         sleep(2)
         if command == CMD_SET.SET_ROTARY_VALVE:
             self.data['selector_valves_pos'][args[0]] = args[1]
         return
 
-    def wait_for_completion(self):
+    def wait_for_completion(self, timeout=30):
         pass
 
     def get_mcu_status(self):
