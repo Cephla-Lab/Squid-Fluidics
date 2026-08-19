@@ -160,7 +160,7 @@ class TestRecordingSaveDialog:
             return ["Time", "Flow Rate (uL/min)"]
 
         def close_recording(self):
-            gui.TimeSeriesPlotWidget.close_recording(self)
+            return gui.TimeSeriesPlotWidget.close_recording(self)
 
     @pytest.fixture
     def dialogs(self, monkeypatch, tmp_path):
@@ -220,6 +220,16 @@ class TestRecordingSaveDialog:
         gui.TimeSeriesPlotWidget._toggle_record(self.Stub())
         assert dialogs.defaults[1] == str(
             tmp_path / "data" / "flow_test_20260819_000000.csv")
+
+    def test_stopping_with_no_open_file_shows_no_notice(self, dialogs):
+        # close_recordings() at app exit can close the file while the button
+        # still reads "Stop Recording"; a click then must not crash or report
+        # a phantom save.
+        stub = self.Stub()
+        stub.record_btn.setText("Stop Recording")
+        gui.TimeSeriesPlotWidget._toggle_record(stub)
+        assert dialogs.info == []
+        assert stub.record_btn.text() == "Start Recording"
 
     def test_a_failed_open_reports_and_stays_unstarted(self, dialogs, tmp_path):
         dialogs.chosen = str(tmp_path / "no_such_dir" / "run1.csv")

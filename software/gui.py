@@ -997,17 +997,21 @@ class TimeSeriesPlotWidget(QWidget):
             self.writer.writerow(self._record_header())
             self.record_btn.setText("Stop Recording")
         else:
-            saved_path = os.path.abspath(self.file.name)
             self.record_btn.setText("Start Recording")
-            self.close_recording()
-            QMessageBox.information(self, "Recording Saved",
-                                    f"Recording saved to:\n{saved_path}")
+            saved_path = self.close_recording()
+            if saved_path:
+                QMessageBox.information(self, "Recording Saved",
+                                        f"Recording saved to:\n{saved_path}")
 
     def close_recording(self):
-        if self.file is not None:
-            self.file.close()
-            self.file = None
-            self.writer = None
+        """Close the recording if one is open; returns its path, else None."""
+        if self.file is None:
+            return None
+        saved_path = self.file.name
+        self.file.close()
+        self.file = None
+        self.writer = None
+        return saved_path
 
 
 class SensorTabWidget(QWidget):
