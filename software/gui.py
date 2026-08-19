@@ -338,13 +338,11 @@ class SequencesWidget(QWidget):
     def getSequences(self, selected_only=False):
         """Read the tree back into a list of sequence dicts."""
         sequences = []
-        for i in range(self.tree.topLevelItemCount()):
+        rows = self._checkedRows() if selected_only else range(self.tree.topLevelItemCount())
+        for i in rows:
             item = self.tree.topLevelItem(i)
             seq_type = item.data(0, Qt.UserRole)
             include = item.checkState(0) == Qt.Checked
-
-            if selected_only and not include:
-                continue
 
             seq = {'type': seq_type, 'include': include}
 
@@ -418,8 +416,9 @@ class SequencesWidget(QWidget):
             self.tree.topLevelItem(i).setCheckState(0, Qt.Unchecked)
 
     def _checkedRows(self):
-        """Tree rows whose checkbox is checked, in order -- index-aligned with
-        getSequences(selected_only=True)."""
+        """Tree rows whose checkbox is checked, in order. getSequences reads
+        exactly these rows when selected_only=True, so a snapshot of this list
+        stays index-aligned with the sequences handed to the worker."""
         return [i for i in range(self.tree.topLevelItemCount())
                 if self.tree.topLevelItem(i).checkState(0) == Qt.Checked]
 
@@ -517,7 +516,7 @@ class SequencesWidget(QWidget):
 
     def _handle_progress(self, index, sequence_num, status):
         self.sequenceLabel.setText(f"{sequence_num}/{self.total_sequences} sequences")
-        row = self._running_rows[index] if index < len(self._running_rows) else None
+        row = self._running_rows[index] if 0 <= index < len(self._running_rows) else None
         self.highlightRow(row)
 
     def _handle_warning(self, message):

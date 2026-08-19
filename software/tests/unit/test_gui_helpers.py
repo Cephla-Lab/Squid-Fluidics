@@ -58,11 +58,8 @@ class TestHighlightFollowsCheckedRows:
     """
 
     class Label:
-        def __init__(self):
-            self.text = ""
-
         def setText(self, text):
-            self.text = text
+            pass
 
     class Stub:
         def __init__(self, running_rows):
@@ -74,16 +71,11 @@ class TestHighlightFollowsCheckedRows:
         def highlightRow(self, row):
             self.highlighted.append(row)
 
-    def test_worker_index_maps_to_the_actual_tree_row(self):
-        stub = self.Stub(running_rows=[0, 2, 4])
-        gui.SequencesWidget._handle_progress(stub, 1, 2, "Started")
-        assert stub.highlighted == [2]
-
     def test_a_sparse_selection_lights_each_checked_row_in_turn(self):
-        stub = self.Stub(running_rows=[1, 3])
-        gui.SequencesWidget._handle_progress(stub, 0, 1, "Started")
-        gui.SequencesWidget._handle_progress(stub, 1, 2, "Started")
-        assert stub.highlighted == [1, 3]
+        stub = self.Stub(running_rows=[0, 2, 4])
+        for index in range(3):
+            gui.SequencesWidget._handle_progress(stub, index, index + 1, "Started")
+        assert stub.highlighted == [0, 2, 4]
 
     def test_an_out_of_range_index_clears_the_highlight(self):
         # Defensive: an index past the snapshot can only come from a worker
@@ -93,11 +85,18 @@ class TestHighlightFollowsCheckedRows:
         gui.SequencesWidget._handle_progress(stub, 5, 6, "Started")
         assert stub.highlighted == [None]
 
+    def test_a_negative_index_clears_the_highlight_too(self):
+        # Python indexing would wrap -1 to the last checked row -- the guard
+        # must treat it like any other impossible index.
+        stub = self.Stub(running_rows=[0, 2])
+        gui.SequencesWidget._handle_progress(stub, -1, 0, "Started")
+        assert stub.highlighted == [None]
+
 
 class TestCheckedRows:
-    """_checkedRows is the snapshot _handle_progress translates through. It
-    must list the checked rows in tree order, mirroring the filter that
-    getSequences(selected_only=True) applies.
+    """_checkedRows is both the row filter getSequences(selected_only=True)
+    iterates and the snapshot _handle_progress translates through, so it must
+    list the checked rows in tree order.
     """
 
     class FakeItem:
