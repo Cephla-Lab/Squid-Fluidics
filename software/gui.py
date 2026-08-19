@@ -858,6 +858,10 @@ class TimeSeriesPlotWidget(QWidget):
     them, via the four hooks below.
     """
 
+    # Where the save dialog opens; every plot shares it, so consecutive
+    # recordings land next to each other. Session-only, no persistence.
+    _last_record_dir = os.getcwd()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.times = []
@@ -976,13 +980,28 @@ class TimeSeriesPlotWidget(QWidget):
 
     def _toggle_record(self):
         if self.record_btn.text() == "Start Recording":
-            self.record_btn.setText("Stop Recording")
-            self.file = open(self._record_filename(), "w", newline="")
+            default = os.path.join(TimeSeriesPlotWidget._last_record_dir,
+                                   self._record_filename())
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Save Recording", default, "CSV Files (*.csv)")
+            if not path:
+                return
+            try:
+                self.file = open(path, "w", newline="")
+            except OSError as e:
+                QMessageBox.critical(self, "Recording Not Started",
+                                     f"Could not create {path}:\n{e}")
+                return
+            TimeSeriesPlotWidget._last_record_dir = os.path.dirname(path)
             self.writer = csv.writer(self.file)
             self.writer.writerow(self._record_header())
+            self.record_btn.setText("Stop Recording")
         else:
+            saved_path = os.path.abspath(self.file.name)
             self.record_btn.setText("Start Recording")
             self.close_recording()
+            QMessageBox.information(self, "Recording Saved",
+                                    f"Recording saved to:\n{saved_path}")
 
     def close_recording(self):
         if self.file is not None:

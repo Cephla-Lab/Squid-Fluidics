@@ -7,6 +7,7 @@ module-level pure functions are covered here.
 """
 
 import os
+from types import SimpleNamespace
 
 import pytest
 
@@ -127,6 +128,106 @@ class TestCheckedRows:
     def test_nothing_checked_gives_no_rows(self):
         stub = self.Stub(self.FakeTree([False, False]))
         assert gui.SequencesWidget._checkedRows(stub) == []
+
+
+class TestRecordingSaveDialog:
+    """Start Recording asks where to save, pre-filled with the generated
+    filename; Stop Recording reports the full path it saved to. Called unbound
+    against a stub, since constructing TimeSeriesPlotWidget needs a
+    QApplication.
+    """
+
+    class Button:
+        def __init__(self, text):
+            self._text = text
+
+        def text(self):
+            return self._text
+
+        def setText(self, text):
+            self._text = text
+
+    class Stub:
+        def __init__(self):
+            self.record_btn = TestRecordingSaveDialog.Button("Start Recording")
+            self.file = None
+            self.writer = None
+
+        def _record_filename(self):
+            return "flow_test_20260819_000000.csv"
+
+        def _record_header(self):
+            return ["Time", "Flow Rate (uL/min)"]
+
+        def close_recording(self):
+            gui.TimeSeriesPlotWidget.close_recording(self)
+
+    @pytest.fixture
+    def dialogs(self, monkeypatch, tmp_path):
+        """Route the file dialog and message boxes; pin the shared last-dir."""
+        calls = SimpleNamespace(defaults=[], chosen="", info=[], error=[])
+
+        def fake_get_save_filename(parent, caption, default, filter):
+            calls.defaults.append(default)
+            return calls.chosen, filter
+
+        monkeypatch.setattr(gui.QFileDialog, "getSaveFileName",
+                            fake_get_save_filename)
+        monkeypatch.setattr(gui.QMessageBox, "information",
+                            lambda parent, title, text: calls.info.append(text))
+        monkeypatch.setattr(gui.QMessageBox, "critical",
+                            lambda parent, title, text: calls.error.append(text))
+        monkeypatch.setattr(gui.TimeSeriesPlotWidget, "_last_record_dir",
+                            str(tmp_path))
+        return calls
+
+    def test_cancelling_the_dialog_leaves_recording_unstarted(self, dialogs):
+        stub = self.Stub()
+        gui.TimeSeriesPlotWidget._toggle_record(stub)
+        assert stub.file is None
+        assert stub.record_btn.text() == "Start Recording"
+
+    def test_the_dialog_is_prefilled_with_the_generated_name(self, dialogs, tmp_path):
+        stub = self.Stub()
+        gui.TimeSeriesPlotWidget._toggle_record(stub)
+        assert dialogs.defaults == [str(tmp_path / "flow_test_20260819_000000.csv")]
+
+    def test_starting_writes_the_header_at_the_chosen_path(self, dialogs, tmp_path):
+        path = tmp_path / "run1.csv"
+        dialogs.chosen = str(path)
+        stub = self.Stub()
+        gui.TimeSeriesPlotWidget._toggle_record(stub)
+        assert stub.record_btn.text() == "Stop Recording"
+        stub.close_recording()
+        # read_text() collapses csv's \r\n line ending via universal newlines.
+        assert path.read_text() == "Time,Flow Rate (uL/min)\n"
+
+    def test_stopping_reports_where_the_file_was_saved(self, dialogs, tmp_path):
+        dialogs.chosen = str(tmp_path / "run1.csv")
+        stub = self.Stub()
+        gui.TimeSeriesPlotWidget._toggle_record(stub)
+        gui.TimeSeriesPlotWidget._toggle_record(stub)
+        assert stub.file is None
+        assert stub.record_btn.text() == "Start Recording"
+        assert len(dialogs.info) == 1
+        assert str(tmp_path / "run1.csv") in dialogs.info[0]
+
+    def test_the_chosen_directory_is_remembered_for_the_next_dialog(self, dialogs, tmp_path):
+        (tmp_path / "data").mkdir()
+        dialogs.chosen = str(tmp_path / "data" / "run1.csv")
+        gui.TimeSeriesPlotWidget._toggle_record(self.Stub())
+        dialogs.chosen = ""
+        gui.TimeSeriesPlotWidget._toggle_record(self.Stub())
+        assert dialogs.defaults[1] == str(
+            tmp_path / "data" / "flow_test_20260819_000000.csv")
+
+    def test_a_failed_open_reports_and_stays_unstarted(self, dialogs, tmp_path):
+        dialogs.chosen = str(tmp_path / "no_such_dir" / "run1.csv")
+        stub = self.Stub()
+        gui.TimeSeriesPlotWidget._toggle_record(stub)
+        assert len(dialogs.error) == 1
+        assert stub.file is None
+        assert stub.record_btn.text() == "Start Recording"
 
 
 class TestDrawProtectionUnavailable:
