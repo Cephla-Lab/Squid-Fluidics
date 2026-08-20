@@ -16,17 +16,11 @@ from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, pyqtSlot, Q_ARG, QMeta
 from PyQt5.QtGui import QColor, QBrush
 
 from fluidics.control.config import load_config
-from fluidics.control.controller import FluidController, FluidControllerSimulation
-from fluidics.control.syringe_pump import SyringePump, SyringePumpSimulation
-from fluidics.control.selector_valve import SelectorValveSystem
-from fluidics.control.disc_pump import DiscPump
-from fluidics.control.temperature_controller import TCMController, TCMControllerSimulation
-from fluidics.control.flow_sensor import start_flow_sensors
-
-from fluidics.control._def import CMD_SET
 from fluidics.control.tecancavro.tecanapi import TecanAPITimeout
-from fluidics.merfish_operations import MERFISHOperations
-from fluidics.open_chamber_operations import OpenChamberOperations
+from fluidics.devices import (
+    ISSUE_FLOW_SENSORS, ISSUE_TEMPERATURE_CONTROLLER,
+    build_devices, build_operations,
+)
 from fluidics.experiment_worker import ExperimentWorker
 from fluidics.sequences import (
     load_sequences, save_sequences_yaml, get_included_sequences,
@@ -163,27 +157,20 @@ class SequencesWidget(QWidget):
 
     sequence_running = pyqtSignal(bool)
 
-    def __init__(self, config, syringe, selector_valves, disc_pump, temperature_controller,
-                 flow_sensors=None):
+    def __init__(self, config, devices):
         super().__init__()
         self.config = config
-        self.syringePump = syringe
-        self.selectorValveSystem = selector_valves
-        self.discPump = disc_pump
-        self.temperatureController = temperature_controller
+        self.devices = devices
+        self.syringePump = devices.syringe_pump
+        self.selectorValveSystem = devices.selector_valves
+        self.discPump = devices.disc_pump
+        self.temperatureController = devices.temperature_controller
 
-        self.experiment_ops = None  # Will be set based on the selected application
         self.worker = None
         self._running_rows = []  # Tree rows of the sequences handed to the worker
 
-        if self.config.application == 'Flow Cell':
-            self.experiment_ops = MERFISHOperations(self.config, self.syringePump, self.selectorValveSystem,
-                                                   self.temperatureController, flow_sensors,
-                                                   on_warning=self.reportWarning)
-        elif self.config.application == "Open Chamber":
-            self.experiment_ops = OpenChamberOperations(self.config, self.syringePump, self.selectorValveSystem, self.discPump, self.temperatureController)
-        else:
-            raise ValueError(f"Unsupported application: {self.config.application!r}")
+        self.experiment_ops = build_operations(config, devices,
+                                               on_warning=self.reportWarning)
 
         self.initUI()
 
@@ -574,11 +561,7 @@ class SequencesWidget(QWidget):
 
     def abortSequences(self):
         if self.worker and self.experiment_ops:
-            self.syringePump.abort()
-            if self.discPump is not None:
-                self.discPump.abort()
-            if self.temperatureController is not None:
-                self.temperatureController.abort()
+            self.devices.abort()
             self.worker.abort()
             self.abortButton.setEnabled(False)
 
@@ -1308,19 +1291,18 @@ class FluidicsControlGUI(QMainWindow):
         super().__init__()
         self.config = load_config_file()
         self.simulation = is_simulation
-        self.temperatureController = None
-        self.flowSensors = []
         # Tabs that own CSV recordings. closeEvent flushes them on exit, since
         # Qt never delivers a close event to a tab-embedded child widget.
         self.sensorTabs = []
 
-        self.initialize_hardware(self.simulation, self.config)
-        self.selectorValveSystem = SelectorValveSystem(self.controller, self.config)
-
-        if self.config.application == "Open Chamber":
-            self.discPump = DiscPump(self.controller)
-        else:
-            self.discPump = None
+        self.devices = build_devices(self.config, self.simulation,
+                                     on_issue=self._report_bringup_issue)
+        self.controller = self.devices.controller
+        self.syringePump = self.devices.syringe_pump
+        self.selectorValveSystem = self.devices.selector_valves
+        self.discPump = self.devices.disc_pump
+        self.temperatureController = self.devices.temperature_controller
+        self.flowSensors = self.devices.flow_sensors
 
         self.initUI()
 
@@ -1332,7 +1314,7 @@ class FluidicsControlGUI(QMainWindow):
         self.tabWidget = QTabWidget()
 
         # "Settings and Manual Control" tab
-        runExperimentsTab = SequencesWidget(self.config, self.syringePump, self.selectorValveSystem, self.discPump, self.temperatureController, self.flowSensors)
+        runExperimentsTab = SequencesWidget(self.config, self.devices)
         manualControlTab = ManualControlWidget(self.config, self.syringePump, self.selectorValveSystem, self.discPump)
         # TODO: integrate temperature controller ui
 
@@ -1354,67 +1336,25 @@ class FluidicsControlGUI(QMainWindow):
         self.setCentralWidget(self.tabWidget)
         runExperimentsTab.sequence_running.connect(self.set_manual_control_tab_state)
 
-    def initialize_hardware(self, simulation, config):
-        if simulation:
-            self.controller = FluidControllerSimulation(config.microcontroller.serial_number)
-            self.syringePump = SyringePumpSimulation(
-                                sn=config.syringe_pump.serial_number,
-                                syringe_ul=config.syringe_pump.volume_ul,
-                                speed_code_limit=config.syringe_pump.speed_code_limit,
-                                waste_port=config.syringe_pump.waste_port)
-            if config.temperature_controller is not None:
-                tc_cfg = config.temperature_controller
-                self.temperatureController = TCMControllerSimulation(
-                    sn=tc_cfg.serial_number,
-                    channels=tc_cfg.channels,
-                    tolerance_celsius=tc_cfg.tolerance_celsius,
-                    stabilization_timeout_seconds=tc_cfg.stabilization_timeout_seconds,
-                )
-        else:
-            self.controller = FluidController(config.microcontroller.serial_number)
-            self.syringePump = SyringePump(
-                                sn=config.syringe_pump.serial_number,
-                                syringe_ul=config.syringe_pump.volume_ul,
-                                speed_code_limit=config.syringe_pump.speed_code_limit,
-                                waste_port=config.syringe_pump.waste_port)
-            if config.temperature_controller is not None:
-                try:
-                    tc_cfg = config.temperature_controller
-                    self.temperatureController = TCMController(
-                        sn=tc_cfg.serial_number,
-                        channels=tc_cfg.channels,
-                        tolerance_celsius=tc_cfg.tolerance_celsius,
-                        stabilization_timeout_seconds=tc_cfg.stabilization_timeout_seconds,
-                    )
-                except Exception as e:
-                    msg = f"Failed to initialize temperature controller: {e}"
-                    print(msg)
-                    self.temperatureController = None
-                    QMessageBox.warning(
-                        self,
-                        "Temperature Controller",
-                        f"{msg}\n\nCheck that the serial number in config.yaml "
-                        f"matches a connected device. The Temperature Control "
-                        f"tab will not be available."
-                    )
+    # What build_devices reports through on_issue is entry-point-neutral; the
+    # dialog title and the "which tab you will be missing" guidance are the
+    # GUI's to add.
+    _BRINGUP_HINTS = {
+        ISSUE_TEMPERATURE_CONTROLLER: (
+            "Temperature Controller",
+            "\n\nCheck that the serial number in config.yaml matches a "
+            "connected device. The Temperature Control tab will not be "
+            "available."),
+        ISSUE_FLOW_SENSORS: (
+            "Flow Sensor",
+            "\n\nCheck that the sensor is connected to the matching I2C "
+            "index. The Flow Sensor tab will not be available."),
+    }
 
-        self.controller.begin()
-        self.controller.send_command(CMD_SET.CLEAR)
-
-        try:
-            self.flowSensors = start_flow_sensors(self.controller, config, simulation)
-        except Exception as e:
-            # start_flow_sensors closes whatever it had already brought up, so
-            # nothing is left subscribed to the packet stream. The message
-            # names the sensor and its index.
-            msg = f"Failed to initialize flow sensors: {e}"
-            print(msg)
-            self.flowSensors = []
-            QMessageBox.warning(
-                self, "Flow Sensor",
-                f"{msg}\n\nCheck that the sensor is connected to the matching "
-                f"I2C index. The Flow Sensor tab will not be available."
-            )
+    def _report_bringup_issue(self, kind, message):
+        print(message)
+        title, hint = self._BRINGUP_HINTS.get(kind, ("Hardware", ""))
+        QMessageBox.warning(self, title, message + hint)
 
     def _warn_if_draw_protection_unavailable(self, draw_protection):
         """Say so loudly when a configured mode will not be acted on.
@@ -1441,22 +1381,15 @@ class FluidicsControlGUI(QMainWindow):
         self.tabWidget.setTabEnabled(manual_control_tab_index, not is_running)
 
     def closeEvent(self, event):
-        if self.temperatureController is not None:
-            self.temperatureController.close()
-
         # Qt only sends QCloseEvent to top-level windows, so a tab embedded in
         # self.tabWidget never gets one. Flush their CSV recordings here so
         # quitting mid-recording doesn't leave a file handle dangling.
         for tab in self.sensorTabs:
             tab.close_recordings()
-        for sensor in self.flowSensors:
-            sensor.close()
-        self.controller.close()
 
-        if self.config.application == "Open Chamber":
-            self.syringePump.close()
-        elif self.config.application == "Flow Cell":
-            self.syringePump.close(True)
+        # DeviceSet.close owns the device teardown ordering, including
+        # emptying the syringe to waste on Flow Cell.
+        self.devices.close()
         super().closeEvent(event)
 
 
