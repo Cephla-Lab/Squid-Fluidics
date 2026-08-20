@@ -284,3 +284,49 @@ class TestStartFlowSensors:
     def test_no_sensors_configured_returns_nothing(self):
         fc = FakeController()
         assert start_flow_sensors(fc, SimpleNamespace(flow_sensors=None)) == []
+
+
+class TestFaultChannel:
+    """The driver never detects faults itself; draw protection publishes each
+    trip through the sensor so whoever records the sensor can file the verdict
+    beside the readings. The channel is a second Subscribers list, so it
+    inherits the isolation the reading channel already has.
+    """
+
+    @staticmethod
+    def _fault_like():
+        # The channel does not inspect the payload; any object stands in.
+        return SimpleNamespace(sensor_name="s")
+
+    def test_subscriber_receives_the_published_fault(self):
+        sensor = FlowSensor(FakeController(), index=1, name="s")
+        seen = []
+        sensor.subscribe_faults(lambda mode, fault, ts: seen.append((mode, fault, ts)))
+        fault = self._fault_like()
+        sensor.notify_fault("warn", fault, 123.0)
+        assert seen == [("warn", fault, 123.0)]
+
+    def test_a_failing_fault_subscriber_does_not_break_others(self):
+        sensor = FlowSensor(FakeController(), index=1, name="s")
+        seen = []
+        sensor.subscribe_faults(lambda *a: (_ for _ in ()).throw(RuntimeError("bad")))
+        sensor.subscribe_faults(lambda mode, fault, ts: seen.append(mode))
+        sensor.notify_fault("warn", self._fault_like(), 1.0)
+        assert seen == ["warn"]
+
+    def test_close_drops_fault_subscribers(self):
+        sensor = FlowSensor(FakeController(), index=1, name="s")
+        seen = []
+        sensor.subscribe_faults(lambda *a: seen.append(a))
+        sensor.close()
+        sensor.notify_fault("warn", self._fault_like(), 1.0)
+        assert seen == []
+
+    def test_the_simulation_offers_the_same_channel(self):
+        sensor = FlowSensorSimulation(index=1, name="sim")
+        seen = []
+        sensor.subscribe_faults(lambda mode, fault, ts: seen.append((mode, ts)))
+        sensor.notify_fault("stop", self._fault_like(), 2.0)
+        sensor.close()
+        sensor.notify_fault("stop", self._fault_like(), 3.0)
+        assert seen == [("stop", 2.0)]

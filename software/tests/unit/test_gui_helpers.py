@@ -7,11 +7,13 @@ module-level pure functions are covered here.
 """
 
 import os
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
 
 import gui
+from fluidics.flow_monitor import FlowFault
 
 
 class TestSafeFilenamePart:
@@ -288,3 +290,70 @@ class TestDrawProtectionUnavailable:
         stub = self._run([self.Sensor("s", "stop")], draw_protection=True)
         assert shown == []
         assert stub.flowSensors[0].monitor == "stop"
+
+
+class RecordingWriter:
+    """A csv.writer stand-in. Shared with test_gui_flow_widget."""
+
+    def __init__(self):
+        self.rows = []
+
+    def writerow(self, row):
+        self.rows.append(list(row))
+
+
+def make_flow_fault():
+    """The canonical fault the recording tests format. Shared with
+    test_gui_flow_widget so the two suites cannot drift onto different
+    'canonical' faults."""
+    return FlowFault(sensor_name="syringe_draw", expected_ul_min=500.0,
+                     tolerance_fraction=0.3, measured_ul_min=12.0,
+                     out_of_band_seconds=0.18, consecutive_samples=3)
+
+
+class TestFlowRecordingRows:
+    """What lands in the flow CSV. Called unbound against a stub, since
+    constructing FlowSensorWidget needs a QApplication.
+
+    The Fault column is the durable trace of a draw-protection trip -- the
+    progress-bar notice is cleared at the next run -- so the fault row must
+    line up with the header and carry the trip's own timestamp.
+    """
+
+    def stub(self, writer="unset"):
+        return SimpleNamespace(
+            writer=RecordingWriter() if writer == "unset" else writer,
+            # Park the throttle so _on_reading returns right after the CSV
+            # write instead of running the plot path, which needs widgets.
+            last_update=float("inf"),
+            query_interval=1,
+        )
+
+    def test_every_row_matches_the_header_width(self):
+        stub = self.stub()
+        gui.FlowSensorWidget._on_reading(stub, 500.0, 100.0)
+        gui.FlowSensorWidget._on_fault(stub, "warn", make_flow_fault(), 100.06)
+        header = gui.FlowSensorWidget._record_header(stub)
+        assert header == ["Time", "Flow Rate (uL/min)", "Fault"]
+        assert all(len(row) == len(header) for row in stub.writer.rows)
+
+    def test_a_reading_row_leaves_the_fault_field_empty(self):
+        stub = self.stub()
+        gui.FlowSensorWidget._on_reading(stub, 500.0, 100.0)
+        assert stub.writer.rows[0][1] == "500.00"
+        assert stub.writer.rows[0][2] == ""
+
+    def test_a_fault_row_names_the_mode_and_the_fault(self):
+        stub = self.stub()
+        gui.FlowSensorWidget._on_fault(stub, "warn", make_flow_fault(), 100.06)
+        row = stub.writer.rows[0]
+        assert row[0] == datetime.fromtimestamp(100.06)
+        assert row[1] == ""
+        assert row[2].startswith("warn: ")
+        assert "syringe_draw" in row[2]
+        assert "12" in row[2]          # the measured value survives into the CSV
+
+    def test_no_recording_no_rows_no_crash(self):
+        stub = self.stub(writer=None)
+        gui.FlowSensorWidget._on_reading(stub, 500.0, 100.0)
+        gui.FlowSensorWidget._on_fault(stub, "stop", make_flow_fault(), 100.06)

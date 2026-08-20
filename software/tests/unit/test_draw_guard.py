@@ -26,6 +26,7 @@ class FakeSensor:
         self.ramp_up_seconds = ramp_up_seconds
         self.tolerance_fraction = tolerance_fraction
         self.subscribers = []
+        self.faults = []          # (mode, fault, timestamp) published back to us
 
     def subscribe(self, callback):
         self.subscribers.append(callback)
@@ -33,6 +34,9 @@ class FakeSensor:
     def unsubscribe(self, callback):
         if callback in self.subscribers:
             self.subscribers.remove(callback)
+
+    def notify_fault(self, mode, fault, timestamp):
+        self.faults.append((mode, fault, timestamp))
 
     def feed(self, flow, timestamp):
         for callback in list(self.subscribers):
@@ -225,6 +229,89 @@ class TestWarnPolicy:
         sensor = FakeSensor(monitor="warn")
         draw(guard_for(sensor, log=lines.append), sensor, [0.0] * 500)
         assert len(lines) == 1
+
+
+class TestFaultPublication:
+    """A trip is published back to the sensor that saw it, so a recording of
+    that sensor can file the verdict beside the readings it was made from.
+    This is the durable half of a `warn` fault -- the log line is cleared or
+    lost with the session.
+    """
+
+    def test_a_healthy_draw_publishes_nothing(self):
+        sensor = FakeSensor(monitor="stop")
+        draw(guard_for(sensor), sensor, [500.0] * 50)
+        assert sensor.faults == []
+
+    def test_a_warn_trip_is_published_with_its_mode_and_timestamp(self):
+        sensor = FakeSensor(monitor="warn")
+        draw(guard_for(sensor), sensor, [0.0] * 10)
+        assert len(sensor.faults) == 1
+        mode, fault, timestamp = sensor.faults[0]
+        assert mode == "warn"
+        assert isinstance(fault, FlowFault)
+        assert fault.sensor_name == "s"
+        # The tripping sample's own timestamp, so the row lands where the
+        # readings around it do.
+        assert timestamp == pytest.approx(time.time() + 3 * 0.06)
+
+    def test_a_stop_trip_is_published_after_the_pump_is_halted(self):
+        stops_before_publish = []
+        pump = RecordingPump()
+        sensor = FakeSensor(monitor="stop")
+        sensor.notify_fault = lambda mode, fault, ts: stops_before_publish.append(pump.stops)
+        g = guard_for(sensor, pump=pump)
+        with pytest.raises(FlowFault):
+            draw(g, sensor, [0.0] * 10)
+        assert stops_before_publish == [1]
+
+    def test_published_once_per_draw_not_once_per_sample(self):
+        sensor = FakeSensor(monitor="warn")
+        draw(guard_for(sensor), sensor, [0.0] * 500)
+        assert len(sensor.faults) == 1
+
+    def test_a_late_sample_publishes_nothing(self):
+        """After __exit__ the guard no longer speaks for the draw -- not to the
+        pump, not to the log, and not to the sensor's record."""
+        for mode in ("warn", "stop"):
+            sensor = FakeSensor(monitor=mode)
+            g = guard_for(sensor)
+            with g:
+                handler = sensor.subscribers[0]
+            _replay(handler, [0.0] * 10)
+            assert sensor.faults == []
+
+    def test_a_lost_claim_publishes_even_if_the_draw_disarms_mid_handler(self):
+        """The winner's stop unblocks the sequence thread, which can disarm the
+        guard before the losing sensor's handler finishes. The publish decision
+        must come from the claim-time snapshot inside _claim's locked section;
+        a later re-read of _active would misfile this in-draw trip as a late
+        sample and drop it from the sensor's record."""
+        sensor = FakeSensor(monitor="stop")
+        g = guard_for(sensor)
+        with g:
+            handler = sensor.subscribers[0]
+            # Another sensor won the claim while this draw was still armed.
+            g._claim = lambda fault: (False, True)
+        # __exit__ has disarmed by the time the reader thread finishes
+        # dispatching this sample to the losing handler.
+        _replay(handler, [0.0] * 10)
+        assert [m for m, f, t in sensor.faults] == ["stop"]
+
+    def test_a_stop_sensor_that_loses_the_claim_still_publishes_its_own_fault(self):
+        """First cause wins the raise, but the second sensor genuinely saw a
+        fault; its recording should say so."""
+        first = FakeSensor(name="first", monitor="stop")
+        second = FakeSensor(name="second", monitor="stop")
+        g = guard_for(first, second)
+        with pytest.raises(FlowFault):
+            with g:
+                _feed(first, [0.0] * 10)
+                _feed(second, [0.0] * 10)
+                g.raise_if_faulted()
+        assert [m for m, f, t in first.faults] == ["stop"]
+        assert [m for m, f, t in second.faults] == ["stop"]
+        assert second.faults[0][1].sensor_name == "second"
 
 
 class TestTwoSensors:

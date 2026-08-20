@@ -31,6 +31,7 @@ class ScriptedSensor:
         self.tolerance_fraction = tolerance_fraction
         self.subscribers = []
         self.guarded_draws = 0
+        self.faults = []          # (mode, fault, timestamp) published back to us
 
     def subscribe(self, callback):
         self.subscribers.append(callback)
@@ -38,6 +39,9 @@ class ScriptedSensor:
     def unsubscribe(self, callback):
         if callback in self.subscribers:
             self.subscribers.remove(callback)
+
+    def notify_fault(self, mode, fault, timestamp):
+        self.faults.append((mode, fault, timestamp))
 
     def play(self, samples=10, step=0.06):
         """One draw's worth of packets.
@@ -212,6 +216,15 @@ class TestWarningsAreReportable:
         ops.process_sequence(SEQ)
         assert len(lines) == 1
         assert "syringe_draw" in lines[0]
+
+    def test_the_fault_is_published_back_to_the_sensor(self, warned):
+        """The durable half: whatever records the sensor (the GUI's CSV) gets
+        the verdict beside the readings, even though warn raises nothing."""
+        ops, _lines = warned
+        sensor = ops.flow_sensors[0]
+        ops.process_sequence(SEQ)
+        assert [mode for mode, fault, ts in sensor.faults] == ["warn"]
+        assert sensor.faults[0][1].sensor_name == "syringe_draw"
 
     def test_a_stop_also_reports_before_it_raises(self, warned):
         """The operator sees why the run is about to fail, not just that it

@@ -68,6 +68,7 @@ class FlowSensor:
         self._latest = None
         self._lock = threading.Lock()
         self._subscribers = Subscribers(f"Flow sensor '{name}'")
+        self._fault_subscribers = Subscribers(f"Flow sensor '{name}' faults")
 
         # Stored once so close() can unsubscribe the same object: a bound method
         # is a new object on every attribute access (a.m is a.m is False in
@@ -122,6 +123,23 @@ class FlowSensor:
     def unsubscribe(self, callback):
         self._subscribers.unsubscribe(callback)
 
+    def subscribe_faults(self, callback):
+        """Register callback(mode: str, fault: FlowFault, timestamp: float).
+
+        The driver never detects faults itself -- draw protection does, per
+        draw, and publishes each trip here so whoever records this sensor can
+        file the verdict beside the readings. mode is the policy the draw was
+        armed under ("warn" or "stop"); timestamp is the tripping sample's, on
+        the same clock as the reading subscription.
+
+        No unsubscribe: the one subscriber (the GUI widget) lives as long as
+        the sensor, and close() drops the list. Add it when a caller needs it.
+        """
+        self._fault_subscribers.subscribe(callback)
+
+    def notify_fault(self, mode, fault, timestamp):
+        self._fault_subscribers.notify(mode, fault, timestamp)
+
     def close(self):
         """Detach from the packet stream and drop our own subscribers.
 
@@ -130,6 +148,7 @@ class FlowSensor:
         teardown calls it again.
         """
         self._subscribers.clear()
+        self._fault_subscribers.clear()
         self.fc.unsubscribe_packets(self._packet_handler)
 
     def _on_packet(self, parsed):
@@ -163,6 +182,7 @@ class FlowSensorSimulation:
 
         self.simulated_flow_ul_min = 500.0
         self._subscribers = Subscribers(f"Flow sensor '{name}'")
+        self._fault_subscribers = Subscribers(f"Flow sensor '{name}' faults")
 
         self.terminate_reading_thread = False
         self.reading_thread = threading.Thread(target=self._reading_loop, daemon=True)
@@ -191,11 +211,18 @@ class FlowSensorSimulation:
     def unsubscribe(self, callback):
         self._subscribers.unsubscribe(callback)
 
+    def subscribe_faults(self, callback):
+        self._fault_subscribers.subscribe(callback)
+
+    def notify_fault(self, mode, fault, timestamp):
+        self._fault_subscribers.notify(mode, fault, timestamp)
+
     def close(self):
         self.terminate_reading_thread = True
         if self.reading_thread.is_alive():
             self.reading_thread.join(timeout=2)
         self._subscribers.clear()
+        self._fault_subscribers.clear()
 
     def _reading_loop(self):
         while not self.terminate_reading_thread:
