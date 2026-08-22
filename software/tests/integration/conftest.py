@@ -7,6 +7,28 @@ from fluidics.control.disc_pump import DiscPump
 from fluidics.control.selector_valve import SelectorValveSystem
 from fluidics.control.syringe_pump import SyringePumpSimulation
 from fluidics.control.temperature_controller import TCMControllerSimulation
+from fluidics.devices import build_devices
+
+
+@pytest.fixture
+def built():
+    """build_devices that closes what it built when the test ends.
+
+    Not housekeeping: start_flow_sensors starts the simulated sensor's publish
+    thread, and a leaked DeviceSet keeps it running for the rest of the suite.
+    Teardown also asserts the close reported no errors, so a test cannot pass
+    while quietly leaving a device it built in a state that will not shut down.
+    """
+    device_sets = []
+
+    def _build(config, **kwargs):
+        devices = build_devices(config, **kwargs)
+        device_sets.append(devices)
+        return devices
+
+    yield _build
+    close_errors = [e for d in device_sets for e in d.close()]
+    assert close_errors == []
 
 
 @pytest.fixture
