@@ -85,5 +85,8 @@ class VALVE_POSITIONS:
   FLUID_STOP_FLOW    = 0b0000000000010101
   VALVES_VENT_VB0    = 0b0000000000110101
   FLUID_TO_VB1       = 0b0000000000011000
+  # Python-only named masks -- SET_SOLENOID_VALVES accepts any uint16, and the
+  # firmware's ValvesStates_t does not name these two. Pinned as such in
+  # test_firmware_mirror.py; a new Python-only name must be added there too.
   TEST_PRESSURE      = 0b0000000000001010
   TEST_VACUUM        = 0b0000000000010001
