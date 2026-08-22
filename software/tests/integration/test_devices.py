@@ -1,0 +1,333 @@
+# tests/integration/test_devices.py
+"""The single bring-up both entry points share.
+
+build_devices is the one place hardware gets constructed, started, and (via
+DeviceSet.close) released; these tests pin what the two entry points used to
+each spell out by hand -- which classes come up per application, how a
+survivable failure degrades, and that teardown runs everything even when a
+step fails.
+"""
+
+import pytest
+
+import fluidics.devices as devices_module
+from fluidics.control.config import TemperatureControllerConfig
+from fluidics.control.controller import FluidControllerSimulation
+from fluidics.control.disc_pump import DiscPump
+from fluidics.control.flow_sensor import FlowSensorSimulation
+from fluidics.control.selector_valve import SelectorValveSystem
+from fluidics.control.syringe_pump import SyringePumpSimulation
+from fluidics.control.temperature_controller import TCMControllerSimulation
+from fluidics.devices import DeviceSet, build_devices, build_operations
+from fluidics.merfish_operations import MERFISHOperations
+from fluidics.open_chamber_operations import OpenChamberOperations
+
+
+class RecordingIssues:
+    def __init__(self):
+        self.issues = []
+
+    def __call__(self, kind, message):
+        self.issues.append((kind, message))
+
+
+@pytest.fixture
+def built():
+    """build_devices that closes what it built when the test ends.
+
+    Not housekeeping: start_flow_sensors starts the simulated sensor's publish
+    thread, and under the suite's fake clock that thread busy-spins until
+    close() joins it -- a leaked DeviceSet slows every test after it.
+    """
+    device_sets = []
+
+    def _build(config, **kwargs):
+        devices = build_devices(config, **kwargs)
+        device_sets.append(devices)
+        return devices
+
+    yield _build
+    for devices in device_sets:
+        devices.close()
+
+
+class TestBuildDevicesSimulation:
+    def test_flow_cell_builds_the_flow_cell_stack(self, flow_cell_config, built):
+        devices = built(flow_cell_config, simulation=True)
+        assert isinstance(devices.controller, FluidControllerSimulation)
+        assert isinstance(devices.syringe_pump, SyringePumpSimulation)
+        assert isinstance(devices.selector_valves, SelectorValveSystem)
+        assert devices.disc_pump is None
+        # The fixture config declares one sensor and no temperature controller.
+        assert len(devices.flow_sensors) == 1
+        assert isinstance(devices.flow_sensors[0], FlowSensorSimulation)
+        assert devices.temperature_controller is None
+
+    def test_open_chamber_gets_a_disc_pump_and_no_sensors(self, open_chamber_config, built):
+        devices = built(open_chamber_config, simulation=True)
+        assert isinstance(devices.disc_pump, DiscPump)
+        assert devices.flow_sensors == []
+
+    def test_a_configured_temperature_controller_is_built(self, flow_cell_config, built):
+        flow_cell_config.temperature_controller = TemperatureControllerConfig(
+            serial_number="TC1", channels=1)
+        devices = built(flow_cell_config, simulation=True)
+        assert isinstance(devices.temperature_controller, TCMControllerSimulation)
+        assert devices.temperature_controller.channels == 1
+
+    def test_no_issues_reported_on_a_clean_bringup(self, flow_cell_config, built):
+        issues = RecordingIssues()
+        built(flow_cell_config, simulation=True, on_issue=issues)
+        assert issues.issues == []
+
+
+class TestSurvivableFailures:
+    """The GUI's degradation policy, now shared: a missing temperature
+    controller or failed flow sensors are reported and left out, not fatal.
+    """
+
+    def test_a_failing_temperature_controller_degrades_on_hardware(
+            self, flow_cell_config, monkeypatch, built):
+        flow_cell_config.temperature_controller = TemperatureControllerConfig(
+            serial_number="TC1")
+        # Real mode, with the hardware classes stood in so only the TCM fails.
+        monkeypatch.setattr(devices_module, "FluidController",
+                            FluidControllerSimulation)
+        monkeypatch.setattr(devices_module, "SyringePump", SyringePumpSimulation)
+
+        def explode(**kwargs):
+            raise IOError("no TCM on port")
+
+        monkeypatch.setattr(devices_module, "TCMController", explode)
+
+        issues = RecordingIssues()
+        devices = built(flow_cell_config, simulation=False,
+                        on_issue=issues)
+        assert devices.temperature_controller is None
+        assert [kind for kind, _ in issues.issues] == ["temperature_controller"]
+        assert "no TCM on port" in issues.issues[0][1]
+
+    def test_failing_flow_sensors_degrade_to_none_at_all(
+            self, flow_cell_config, monkeypatch, built):
+        def explode(controller, config, simulation):
+            raise RuntimeError("sensor 1 failed to initialize")
+
+        monkeypatch.setattr(devices_module, "start_flow_sensors", explode)
+        issues = RecordingIssues()
+        devices = built(flow_cell_config, simulation=True,
+                        on_issue=issues)
+        assert devices.flow_sensors == []
+        assert [kind for kind, _ in issues.issues] == ["flow_sensors"]
+
+    def test_an_unsurvivable_failure_closes_what_already_started(
+            self, flow_cell_config, monkeypatch):
+        """A stuck valve must not leave the sensors it outlived subscribed to
+        a packet stream nobody owns -- nor the controller's reader thread
+        holding the MCU port, nor the temperature controller's port open.
+
+        The TCM's close raises here, proving each cleanup is shielded: the
+        controller after it must still close, and the operator must still see
+        the valve error, not the close error that happened while unwinding."""
+        def explode(controller, config):
+            raise RuntimeError("current position is 3; expected 1")
+
+        monkeypatch.setattr(devices_module, "SelectorValveSystem", explode)
+
+        def recording_subclass(base, fail_close=False):
+            class Recording(base):
+                last = None
+
+                def __init__(self, *args, **kwargs):
+                    super().__init__(*args, **kwargs)
+                    type(self).last = self
+                    self.closes = 0
+
+                def close(self):
+                    self.closes += 1
+                    if fail_close:
+                        raise IOError("close failed")
+
+            return Recording
+
+        RecordingController = recording_subclass(FluidControllerSimulation)
+        RecordingTCM = recording_subclass(TCMControllerSimulation,
+                                          fail_close=True)
+
+        monkeypatch.setattr(devices_module, "FluidControllerSimulation",
+                            RecordingController)
+        monkeypatch.setattr(devices_module, "TCMControllerSimulation",
+                            RecordingTCM)
+        flow_cell_config.temperature_controller = TemperatureControllerConfig(
+            serial_number="TC1")
+
+        started = []
+        original = devices_module.start_flow_sensors
+
+        def spying_start(controller, config, simulation):
+            sensors = original(controller, config, simulation)
+            started.extend(sensors)
+            return sensors
+
+        monkeypatch.setattr(devices_module, "start_flow_sensors", spying_start)
+        with pytest.raises(RuntimeError, match="expected 1"):
+            build_devices(flow_cell_config, simulation=True)
+        assert len(started) == 1
+        assert all(s.terminate_reading_thread for s in started)
+        assert RecordingController.last.closes == 1
+        assert RecordingTCM.last.closes == 1
+
+
+class TestBuildOperations:
+    def test_flow_cell_selects_merfish_operations(self, flow_cell_config, built):
+        devices = built(flow_cell_config, simulation=True)
+        notices = []
+        channel = notices.append
+        ops = build_operations(flow_cell_config, devices, on_warning=channel)
+        assert isinstance(ops, MERFISHOperations)
+        assert ops.flow_sensors == devices.flow_sensors
+        assert ops.on_warning is channel
+
+    def test_open_chamber_selects_open_chamber_operations(self, open_chamber_config, built):
+        devices = built(open_chamber_config, simulation=True)
+        ops = build_operations(open_chamber_config, devices)
+        assert isinstance(ops, OpenChamberOperations)
+        assert ops.dp is devices.disc_pump
+
+    def test_an_unknown_application_raises(self, flow_cell_config, built):
+        devices = built(flow_cell_config, simulation=True)
+        flow_cell_config.application = "Petri Dish"
+        with pytest.raises(ValueError, match="Petri Dish"):
+            build_operations(flow_cell_config, devices)
+
+
+class RecordingPump:
+    """Appends to a shared event list so tests can assert cross-device order."""
+
+    def __init__(self, events=None):
+        self.events = events if events is not None else []
+
+    def reset_abort(self):
+        self.events.append(("pump", "reset_abort"))
+
+    def close(self, to_waste=False):
+        self.events.append(("pump", "close", to_waste))
+
+
+class ClosableStub:
+    def __init__(self, name="device", events=None, fail=False):
+        self.name = name
+        self.events = events if events is not None else []
+        self.fail = fail
+        self.closed = 0
+
+    def close(self):
+        self.closed += 1
+        self.events.append((self.name, "close"))
+        if self.fail:
+            raise IOError("port already gone")
+
+
+def device_set(config, pump=None, controller=None, tc=None, sensors=()):
+    return DeviceSet(config, controller if controller is not None else ClosableStub(),
+                     pump if pump is not None else RecordingPump(),
+                     selector_valves=None, disc_pump=None,
+                     temperature_controller=tc, flow_sensors=list(sensors))
+
+
+class Abortable:
+    def __init__(self, name, events):
+        self.name = name
+        self.events = events
+
+    def abort(self):
+        self.events.append(self.name)
+
+
+class TestDeviceSetAbort:
+    """One fan-out list for both entry points -- the GUI's Abort button and
+    the CLI's Ctrl+C call this instead of each keeping its own device list."""
+
+    def test_aborts_every_abortable_device(self, flow_cell_config):
+        events = []
+        devices = DeviceSet(flow_cell_config, controller=None,
+                            syringe_pump=Abortable("pump", events),
+                            selector_valves=None,
+                            disc_pump=Abortable("disc_pump", events),
+                            temperature_controller=Abortable("tc", events),
+                            flow_sensors=[])
+        devices.abort()
+        assert events == ["pump", "disc_pump", "tc"]
+
+    def test_absent_devices_are_skipped(self, flow_cell_config):
+        events = []
+        devices = DeviceSet(flow_cell_config, controller=None,
+                            syringe_pump=Abortable("pump", events),
+                            selector_valves=None, disc_pump=None,
+                            temperature_controller=None, flow_sensors=[])
+        devices.abort()
+        assert events == ["pump"]
+
+
+class TestDeviceSetClose:
+    def test_flow_cell_parks_the_syringe_empty(self, flow_cell_config):
+        pump = RecordingPump()
+        device_set(flow_cell_config, pump=pump).close()
+        assert pump.events == [("pump", "reset_abort"), ("pump", "close", True)]
+
+    def test_open_chamber_does_not(self, open_chamber_config):
+        pump = RecordingPump()
+        device_set(open_chamber_config, pump=pump).close()
+        assert pump.events == [("pump", "reset_abort"), ("pump", "close", False)]
+
+    def test_an_explicit_choice_beats_the_application_default(self, flow_cell_config):
+        pump = RecordingPump()
+        device_set(flow_cell_config, pump=pump).close(empty_syringe=False)
+        assert pump.events == [("pump", "reset_abort"), ("pump", "close", False)]
+
+    def test_the_teardown_order_is_tc_sensors_pump_controller(self, flow_cell_config):
+        """The docstring calls the ends load-bearing: sensors detach from the
+        packet stream before the controller stops the reader thread, and the
+        controller goes last because that thread owns the MCU port. Pin the
+        whole sequence so a reorder cannot pass silently."""
+        events = []
+        devices = device_set(
+            flow_cell_config,
+            pump=RecordingPump(events),
+            controller=ClosableStub("controller", events),
+            tc=ClosableStub("tc", events),
+            sensors=[ClosableStub("sensor", events)])
+        devices.close()
+        assert events == [
+            ("tc", "close"),
+            ("sensor", "close"),
+            ("pump", "reset_abort"),
+            ("pump", "close", True),
+            ("controller", "close"),
+        ]
+
+    def test_every_step_runs_even_when_one_fails_and_the_error_is_returned(
+            self, flow_cell_config):
+        """Teardown is the one place "keep going" beats "unwind": whatever
+        cannot be closed now never gets another chance. The failure still
+        reaches the caller, so a run with a wedged teardown cannot exit 0."""
+        tc = ClosableStub(fail=True)
+        controller = ClosableStub()
+        sensor = ClosableStub()
+        devices = device_set(flow_cell_config, controller=controller, tc=tc,
+                             sensors=[sensor])
+        errors = devices.close()
+        assert tc.closed == 1
+        assert sensor.closed == 1
+        assert controller.closed == 1
+        assert len(errors) == 1
+        assert isinstance(errors[0], IOError)
+
+    def test_a_clean_close_returns_no_errors(self, flow_cell_config):
+        assert device_set(flow_cell_config).close() == []
+
+    def test_close_is_idempotent(self, flow_cell_config):
+        pump = RecordingPump()
+        devices = device_set(flow_cell_config, pump=pump)
+        devices.close()
+        assert devices.close() == []
+        assert pump.events == [("pump", "reset_abort"), ("pump", "close", True)]

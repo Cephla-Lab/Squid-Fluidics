@@ -3,16 +3,8 @@ import sys
 import threading
 from fluidics.sequences import load_sequences, get_included_sequences
 from fluidics.control.config import load_config
-from fluidics.control.controller import FluidControllerSimulation, FluidController
-from fluidics.control.syringe_pump import SyringePumpSimulation, SyringePump
-from fluidics.control.selector_valve import SelectorValveSystem
-from fluidics.control.disc_pump import DiscPump
-from fluidics.control.temperature_controller import TCMControllerSimulation, TCMController
-from fluidics.control.flow_sensor import start_flow_sensors
-from fluidics.merfish_operations import MERFISHOperations
-from fluidics.open_chamber_operations import OpenChamberOperations
+from fluidics.devices import build_devices, build_operations
 from fluidics.experiment_worker import ExperimentWorker
-from fluidics.control._def import CMD_SET
 
 
 def parse_args():
@@ -35,47 +27,6 @@ def parse_args():
     )
     return parser.parse_args()
 
-def initialize_hardware(simulation, config):
-    temperatureController = None
-
-    if simulation:
-        controller = FluidControllerSimulation(config.microcontroller.serial_number)
-        syringePump = SyringePumpSimulation(
-            sn=config.syringe_pump.serial_number,
-            syringe_ul=config.syringe_pump.volume_ul,
-            speed_code_limit=config.syringe_pump.speed_code_limit,
-            waste_port=config.syringe_pump.waste_port)
-        if config.temperature_controller is not None:
-            tc_cfg = config.temperature_controller
-            temperatureController = TCMControllerSimulation(
-                sn=tc_cfg.serial_number,
-                channels=tc_cfg.channels,
-                tolerance_celsius=tc_cfg.tolerance_celsius,
-                stabilization_timeout_seconds=tc_cfg.stabilization_timeout_seconds,
-            )
-    else:
-        controller = FluidController(config.microcontroller.serial_number)
-        syringePump = SyringePump(
-            sn=config.syringe_pump.serial_number,
-            syringe_ul=config.syringe_pump.volume_ul,
-            speed_code_limit=config.syringe_pump.speed_code_limit,
-            waste_port=config.syringe_pump.waste_port)
-        if config.temperature_controller is not None:
-            tc_cfg = config.temperature_controller
-            temperatureController = TCMController(
-                sn=tc_cfg.serial_number,
-                channels=tc_cfg.channels,
-                tolerance_celsius=tc_cfg.tolerance_celsius,
-                stabilization_timeout_seconds=tc_cfg.stabilization_timeout_seconds,
-            )
-
-    controller.begin()
-    controller.send_command(CMD_SET.CLEAR)
-
-    flow_sensors = start_flow_sensors(controller, config, simulation)
-
-    return controller, syringePump, temperatureController, flow_sensors
-
 def update_progress(index, sequence_num, status):
     print(f"Sequence {index} ({sequence_num}): {status}")
 
@@ -91,11 +42,10 @@ def on_estimate(time_to_finish, n_sequences):
 def main():
     args = parse_args()
 
-    controller = None
-    syringePump = None
-    temperatureController = None
-    flowSensors = []
+    devices = None
+    worker = None
     thread = None
+    close_errors = []
 
     try:
         # Load sequences
@@ -104,19 +54,8 @@ def main():
         # Load config
         config = load_config(args.config)
 
-        controller, syringePump, temperatureController, flowSensors = initialize_hardware(args.simulation, config)
-
-        selectorValveSystem = SelectorValveSystem(controller, config)
-        if config.application == "Open Chamber":
-            discPump = DiscPump(controller)
-
-        # Run experiment
-        if config.application == "Flow Cell":
-            experiment_ops = MERFISHOperations(config, syringePump, selectorValveSystem, temperatureController, flowSensors)
-        elif config.application == "Open Chamber":
-            experiment_ops = OpenChamberOperations(config, syringePump, selectorValveSystem, discPump, temperatureController)
-        else:
-            raise ValueError(f"Unsupported application: {config.application!r}")
+        devices = build_devices(config, args.simulation)
+        experiment_ops = build_operations(config, devices)
 
         callbacks = {
             'update_progress': update_progress,
@@ -131,24 +70,39 @@ def main():
 
         thread.join()
 
+    except KeyboardInterrupt:
+        # `except Exception` would not catch this, so without it Ctrl+C fell
+        # straight into finally, tearing down devices -- including the Flow
+        # Cell park-to-waste move -- underneath a worker thread still driving
+        # the pump on the same serial port. Quiesce the run first: abort wakes
+        # the worker out of any wait (incubation, wait_for_stop), the join
+        # lets it unwind through its own error path, and only then does the
+        # finally block touch the hardware, single-threaded.
+        print("Interrupted; stopping the run before closing devices...",
+              file=sys.stderr)
+        if worker is not None:
+            worker.abort()
+        if devices is not None:
+            devices.abort()
+        if thread is not None:
+            thread.join()
+        sys.exit(130)
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         if thread is not None:
             thread.join()
         sys.exit(1)
     finally:
-        if syringePump is not None:
-            syringePump.reset_abort()
-            syringePump.close()
-        for sensor in flowSensors:
-            sensor.close()
-        if temperatureController is not None:
-            temperatureController.close()
-        # Last: the reader thread owns the MCU port for the whole run, so stop
-        # it and release the port rather than leaving that to __del__. Sensors
-        # detach from the controller above, so nothing is left subscribed.
-        if controller is not None:
-            controller.close()
+        # DeviceSet.close owns the teardown ordering: sensors detach before the
+        # controller stops the reader thread that owns the MCU port.
+        if devices is not None:
+            close_errors = devices.close()
+
+    # Reached only when the run itself succeeded (the error paths above exit
+    # through sys.exit, skipping this). A run whose teardown failed must not
+    # report clean: the syringe may not be parked and a port may still be held.
+    if close_errors:
+        sys.exit(2)
 
 if __name__ == '__main__':
     main()
