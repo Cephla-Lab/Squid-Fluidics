@@ -1177,6 +1177,7 @@ class FlowSensorWidget(TimeSeriesPlotWidget):
     """One flow sensor's readout, plot, and CSV recording."""
 
     reading_signal = pyqtSignal(object, float)  # (flow_ul_min or None, timestamp)
+    fault_signal = pyqtSignal(str, object, float)  # (mode, FlowFault, timestamp)
 
     def __init__(self, sensor, draw_protection=True, parent=None):
         super().__init__(parent)
@@ -1186,8 +1187,10 @@ class FlowSensorWidget(TimeSeriesPlotWidget):
         self.flows = []
 
         self.reading_signal.connect(self._on_reading)
+        self.fault_signal.connect(self._on_fault)
         self._build_ui()
         self.sensor.subscribe(self._on_callback)
+        self.sensor.subscribe_faults(self._on_fault_callback)
 
     def _record_filename(self):
         # sensor.name is free-form config text; keep it out of the path itself
@@ -1195,7 +1198,7 @@ class FlowSensorWidget(TimeSeriesPlotWidget):
         return f"flow_{_safe_filename_part(self.sensor.name)}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
 
     def _record_header(self):
-        return ["Time", "Flow Rate (uL/min)"]
+        return ["Time", "Flow Rate (uL/min)", "Fault"]
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -1250,6 +1253,21 @@ class FlowSensorWidget(TimeSeriesPlotWidget):
         # Runs in the controller's reader thread; marshal to the GUI thread.
         self.reading_signal.emit(flow, timestamp)
 
+    def _on_fault_callback(self, mode, fault, timestamp):
+        # Runs in the controller's reader thread; marshal to the GUI thread.
+        self.fault_signal.emit(mode, fault, timestamp)
+
+    def _on_fault(self, mode, fault, timestamp):
+        # A draw-protection trip, filed beside the readings it was judged
+        # from. This is the only durable trace a `warn` fault leaves: the
+        # progress-bar notice is cleared at the next run and stdout may not
+        # exist. Its own row rather than a mark on the nearest reading, so the
+        # verdict carries the tripping sample's timestamp even if the reading
+        # row it belongs to was written a queue-slot earlier.
+        if self.writer is not None:
+            self.writer.writerow([datetime.fromtimestamp(timestamp), "",
+                                  f"{mode}: {fault}"])
+
     def _on_reading(self, flow, current_time):
         # Write every sample to CSV regardless of the plot's query interval:
         # interval_input bottoms out at 1 Hz, which is roughly one sample in
@@ -1257,7 +1275,7 @@ class FlowSensorWidget(TimeSeriesPlotWidget):
         # recording is actually meant to catch (e.g. a ~180 ms dropout).
         if self.writer is not None:
             self.writer.writerow([datetime.fromtimestamp(current_time),
-                                  "" if flow is None else f"{flow:.2f}"])
+                                  "" if flow is None else f"{flow:.2f}", ""])
 
         if current_time - self.last_update < self.query_interval:
             return

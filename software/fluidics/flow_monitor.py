@@ -153,6 +153,12 @@ class DrawGuard:
     path is the one that matters: a draw that raises must still leave the
     packet stream clean, or every later draw accumulates another dead handler
     faulting against a stale expectation.
+
+    A trip is also published back to the sensor that saw it, via
+    sensor.notify_fault(mode, fault, timestamp), so anything recording that
+    sensor (the GUI's CSV) can file the verdict beside the readings it was
+    made from. `log` stays the operator-facing channel; notify_fault is the
+    per-sensor record.
     """
 
     def __init__(self, sensors, expected_ul_min, stop_pump, log=print):
@@ -191,7 +197,7 @@ class DrawGuard:
                 tolerance_fraction=sensor.tolerance_fraction,
             )
             rule.start(started_at)
-            handler = self._make_handler(mode, rule)
+            handler = self._make_handler(sensor, mode, rule)
             self._handlers.append((sensor, handler))
             sensor.subscribe(handler)
         return self
@@ -221,7 +227,7 @@ class DrawGuard:
         if fault is not None:
             raise fault
 
-    def _make_handler(self, mode, rule):
+    def _make_handler(self, sensor, mode, rule):
         """One closure per sensor, holding its own rule and mode."""
         stop = (mode == "stop")
         done = False
@@ -244,19 +250,35 @@ class DrawGuard:
             if not stop:
                 if self._still_running():
                     self.log(f"WARNING: {fault}")
+                    sensor.notify_fault(mode, fault, timestamp)
                 return
 
-            if not self._claim(fault):
+            claimed, was_active = self._claim(fault)
+            if not was_active:
+                # A late sample: the draw is over and this guard no longer
+                # speaks for anything, including the sensor's own record.
+                # was_active comes from inside _claim's locked section, not a
+                # second _still_running() read: the winner's stop unblocks the
+                # sequence thread, which can disarm the guard before this
+                # (losing) handler gets here, and a re-read would then misfile
+                # an in-draw trip as late.
                 return
-            self.log(f"Stopping draw: {fault}")
-            # terminateCmd() from the reader thread, while the sequence thread
-            # sits in wait_for_stop -- the same crossing abort() already makes
-            # from the Qt thread. If it raises we must not take the reader down
-            # with it; the fault is already recorded and will still be raised.
-            try:
-                self.stop_pump()
-            except Exception as e:
-                self.log(f"Failed to stop the pump after a flow fault: {e}")
+            if claimed:
+                self.log(f"Stopping draw: {fault}")
+                # terminateCmd() from the reader thread, while the sequence
+                # thread sits in wait_for_stop -- the same crossing abort()
+                # already makes from the Qt thread. If it raises we must not
+                # take the reader down with it; the fault is already recorded
+                # and will still be raised.
+                try:
+                    self.stop_pump()
+                except Exception as e:
+                    self.log(f"Failed to stop the pump after a flow fault: {e}")
+            # Published win or lose: losing the claim only means another sensor
+            # faulted first, not that this one saw nothing. Its recording
+            # should carry its own observation. After the pump halt, so the
+            # bookkeeping never delays the stop.
+            sensor.notify_fault(mode, fault, timestamp)
 
         return handle
 
@@ -268,17 +290,24 @@ class DrawGuard:
 
     def _claim(self, fault):
         """Record `fault` if the draw is still running and nothing has faulted
-        yet. True if it was recorded, which is also the caller's permission to
-        stop the pump -- checking and claiming under one lock leaves no window
-        where a second sensor, or a sample arriving after __exit__, could stop
-        a pump this guard no longer speaks for.
+        yet. Returns (claimed, was_active).
 
-        First cause wins, and two sensors can fault on the same packet. Without
-        that the second overwrites the first and the operator is told about
-        whichever sensor happened to be later in the list.
+        claimed is the caller's permission to stop the pump -- checking and
+        claiming under one lock leaves no window where a second sensor, or a
+        sample arriving after __exit__, could stop a pump this guard no longer
+        speaks for. First cause wins, and two sensors can fault on the same
+        packet: without that the second overwrites the first and the operator
+        is told about whichever sensor happened to be later in the list.
+
+        was_active is whether the draw was still armed at that same locked
+        moment, so a losing sensor can tell "another sensor beat me" (publish
+        my own fault) from "the draw is already over" (stay silent) without a
+        second, later read of _active.
         """
         with self._lock:
-            if not self._active or self._fault is not None:
-                return False
+            if not self._active:
+                return False, False
+            if self._fault is not None:
+                return False, True
             self._fault = fault
-            return True
+            return True, True
