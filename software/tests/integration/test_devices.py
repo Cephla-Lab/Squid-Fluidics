@@ -31,26 +31,6 @@ class RecordingIssues:
         self.issues.append((kind, message))
 
 
-@pytest.fixture
-def built():
-    """build_devices that closes what it built when the test ends.
-
-    Not housekeeping: start_flow_sensors starts the simulated sensor's publish
-    thread, and under the suite's fake clock that thread busy-spins until
-    close() joins it -- a leaked DeviceSet slows every test after it.
-    """
-    device_sets = []
-
-    def _build(config, **kwargs):
-        devices = build_devices(config, **kwargs)
-        device_sets.append(devices)
-        return devices
-
-    yield _build
-    for devices in device_sets:
-        devices.close()
-
-
 class TestBuildDevicesSimulation:
     def test_flow_cell_builds_the_flow_cell_stack(self, flow_cell_config, built):
         devices = built(flow_cell_config, simulation=True)

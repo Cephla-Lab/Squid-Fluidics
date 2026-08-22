@@ -32,9 +32,16 @@ def _fast_clock(monkeypatch):
     'from time import sleep/time' (since those hold a direct reference).
     """
     fake_time = [_time.time()]
+    real_sleep = _time.sleep
 
     def fake_sleep(seconds):
         fake_time[0] += seconds
+        # Yield the GIL the way a real sleep would. Without this, a simulated
+        # sensor's publish loop (sleep 0.06s per reading) becomes a pure CPU
+        # spin that starves every other thread -- measured as ~6.7s of a
+        # sample-experiment end-to-end test that otherwise takes 0.08s. The
+        # captured reference matters: time.sleep itself is patched below.
+        real_sleep(0)
 
     def fake_time_fn():
         return fake_time[0]
