@@ -16,19 +16,18 @@ connection), so no event loop needs to run; the cross-thread queued delivery
 is Qt's contract, not ours to test.
 """
 
-import os
 from datetime import datetime
 
 import pytest
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# Qt's offscreen platform is forced in tests/conftest.py, which pytest imports
+# before this module.
+from PyQt5.QtWidgets import QApplication
 
-from PyQt5.QtWidgets import QApplication  # noqa: E402
+import gui
+from fluidics.control.flow_sensor import FlowSensorSimulation
 
-import gui  # noqa: E402
-from fluidics.control.flow_sensor import FlowSensorSimulation  # noqa: E402
-
-from .test_gui_helpers import RecordingWriter, make_flow_fault  # noqa: E402
+from .test_gui_helpers import RecordingWriter, make_flow_fault
 
 
 @pytest.fixture(scope="module")

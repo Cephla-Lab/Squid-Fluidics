@@ -5,6 +5,16 @@ on:
     branches: [main]
   pull_request:
 
+# These jobs execute pull-request code (pip install, pytest, pio run), so the
+# token they can reach must not be able to write anything.
+permissions:
+  contents: read
+
+# A superseded push has nothing left to prove; stop paying for its run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   software-tests:
     runs-on: ubuntu-latest
@@ -12,7 +22,11 @@ jobs:
       run:
         working-directory: software
     steps:
+      # Nothing here needs git after checkout; don't leave the token in
+      # .git/config for the PR code these jobs run.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -31,26 +45,30 @@ jobs:
       - name: Install package and test dependencies
         run: pip install -e .[test]
 
+      # No QT_QPA_PLATFORM here: tests/conftest.py forces Qt's offscreen
+      # platform itself, so CI proves the same setup a headless dev box uses.
       - name: Run tests
         run: python -m pytest -q
-        env:
-          QT_QPA_PLATFORM: offscreen
 
   firmware-build:
     runs-on: ubuntu-latest
     steps:
+      # Nothing here needs git after checkout; don't leave the token in
+      # .git/config for the PR code these jobs run.
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          persist-credentials: false
 
       # The Teensy toolchain and framework are a large one-time download.
+      # restore-keys lets an edited platformio.ini start from the old cache
+      # instead of a cold re-download. PlatformIO itself runs fine on the
+      # runner's preinstalled Python.
       - name: Cache PlatformIO
         uses: actions/cache@v4
         with:
           path: ~/.platformio
           key: platformio-${{ runner.os }}-${{ hashFiles('firmware/platformio.ini') }}
+          restore-keys: platformio-${{ runner.os }}-
 
       - name: Install PlatformIO
         run: pip install platformio

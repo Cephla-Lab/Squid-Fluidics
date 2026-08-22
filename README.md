@@ -26,7 +26,11 @@ pio run -t upload      # Upload to Teensy 4.1
 
 ### Software
 
-Requires Python 3 with: PyQt5, pandas, matplotlib, pyserial, cobs, numpy, pydantic, pyyaml.
+Requires Python 3.10+. Install the package and its dependencies (declared in `software/pyproject.toml`):
+
+```bash
+pip install -e "software[test]"
+```
 
 **1. Find serial numbers for connected devices:**
 
@@ -75,7 +79,7 @@ Use `--simulation` to run without connected hardware. Legacy CSV sequence files 
 
 ### Tests
 
-Requires pytest: `pip install pytest`
+pytest comes with the `[test]` extra above. CI runs the full suite plus a firmware compile on every PR.
 
 ```bash
 cd software
