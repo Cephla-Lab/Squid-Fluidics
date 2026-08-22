@@ -1,8 +1,15 @@
+import os
 import threading
 import time as _time
 from pathlib import Path
 
 import pytest
+
+# Widget tests construct a real QApplication; Qt picks its platform when that
+# happens, and on a headless box (CI, an SSH session) the default xcb aborts.
+# Owned here, once, so local headless runs and CI behave identically and every
+# future widget test is covered without remembering its own setdefault.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 

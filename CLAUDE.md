@@ -32,7 +32,7 @@ python list_controllers.py                             # Discover serial devices
 python run_sequences.py --path sample_sequences/merfish-experiment.yaml --config sample_config/flow_cell_config.yaml --simulation  # Simulation mode (no hardware)
 ```
 
-**Python dependencies:** PyQt5, pandas, matplotlib, pyserial, cobs, numpy, pydantic, pyyaml
+**Python dependencies:** declared in `software/pyproject.toml`; install with `pip install -e "software[test]"`
 
 ### Tests
 

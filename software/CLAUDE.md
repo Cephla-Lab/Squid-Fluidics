@@ -42,7 +42,7 @@ Uses pytest. Hardware tests in `tests/hardware/` are excluded from the default t
 
 Fixing only the import would leave both scripts unrunnable in a different way, so none of the above has been repaired here -- it's tracked as separate work.
 
-**Dependencies:** PyQt5, pandas, matplotlib, pyserial, cobs, numpy, pydantic, pyyaml
+**Dependencies:** declared in `pyproject.toml`; install with `pip install -e ".[test]"` from this directory
 
 ## Architecture
 

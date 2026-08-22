@@ -1,2 +1,32 @@
+[build-system]
+# >=64: first setuptools with PEP 660 editable installs (pip install -e).
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "squid-fluidics"
+version = "2.0.0"
+description = "Control software for the Fluidics v2 liquid-handling system (Squid)"
+requires-python = ">=3.10"
+dependencies = [
+    "PyQt5>=5.15",
+    "cobs",
+    "matplotlib",
+    "numpy",
+    "pandas",
+    "pydantic>=2,<3",
+    "pyserial",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+# Only the fluidics package is importable; gui.py and run_sequences.py stay
+# top-level entry scripts run from this directory (console-script entry
+# points are a separate, later change -- see the refactor roadmap).
+[tool.setuptools.packages.find]
+include = ["fluidics*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests/unit", "tests/integration"]
