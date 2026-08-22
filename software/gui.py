@@ -567,12 +567,13 @@ class SequencesWidget(QWidget):
 
 
 class ManualControlWidget(QWidget):
-    def __init__(self, config, syringe, selector_valves, disc_pump):
+    def __init__(self, config, devices):
         super().__init__()
         self.config = config
-        self.syringePump = syringe
-        self.selectorValveSystem = selector_valves
-        self.disc_pump = disc_pump
+        self.devices = devices
+        self.syringePump = devices.syringe_pump
+        self.selectorValveSystem = devices.selector_valves
+        self.disc_pump = devices.disc_pump
 
         # Initialize timers
         self.progress_timer = QTimer(self)
@@ -1315,7 +1316,7 @@ class FluidicsControlGUI(QMainWindow):
 
         # "Settings and Manual Control" tab
         runExperimentsTab = SequencesWidget(self.config, self.devices)
-        manualControlTab = ManualControlWidget(self.config, self.syringePump, self.selectorValveSystem, self.discPump)
+        manualControlTab = ManualControlWidget(self.config, self.devices)
         # TODO: integrate temperature controller ui
 
         self.tabWidget.addTab(runExperimentsTab, "Run Experiments")
