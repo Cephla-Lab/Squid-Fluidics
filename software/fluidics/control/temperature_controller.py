@@ -3,6 +3,7 @@ import time
 
 import serial
 
+from .controller import Subscribers
 from .discovery import find_serial_port
 
 
@@ -21,7 +22,7 @@ class TCMController:
 
         port = find_serial_port(sn, "Temperature controller")
         self.serial = serial.Serial(port, baudrate=baud_rate, timeout=timeout)
-        self.serial_lock = threading.Lock()
+        self._serial_lock = threading.Lock()
 
         self.channels = channels
         self.tolerance_celsius = tolerance_celsius
@@ -31,9 +32,9 @@ class TCMController:
         self.actual_temperatures = [0.0] * channels
         self.output_enabled = [self._read_output_enabled(c) for c in range(1, channels + 1)]
 
-        self.temperature_updating_callback = None
-        self.terminate_temperature_updating_thread = False
-        self.actual_temp_updating_thread = threading.Thread(
+        self._subscribers = Subscribers("Temperature controller")
+        self._terminate_polling = False
+        self._polling_thread = threading.Thread(
             target=self._update_loop, daemon=True
         )
 
@@ -59,7 +60,7 @@ class TCMController:
     # --- wire protocol ---
 
     def send_command(self, command, module):
-        with self.serial_lock:
+        with self._serial_lock:
             self.serial.write(f"{module}:{command}\r".encode())
             response = self.serial.readline().decode().strip()
             if response[:4] == "CMD:" and response[-1] != "1" and response[-1] != "8":
@@ -106,25 +107,51 @@ class TCMController:
             temp = self.actual_temperatures[channel - 1]
         return temp
 
-    # --- background polling ---
+    # --- background polling and publishing ---
+
+    def subscribe(self, callback):
+        """Register callback(temps: list[float], one per channel).
+
+        The driver owns its polling thread and publishes to any number of
+        subscribers -- the flow-sensor contract. Before this, a single
+        mutable callback slot was assigned by the GUI, which also started
+        the driver's private thread itself; a headless script wanting
+        readings had to imitate the GUI.
+        """
+        self._subscribers.subscribe(callback)
+
+    def unsubscribe(self, callback):
+        self._subscribers.unsubscribe(callback)
+
+    def start(self):
+        """Begin polling and publishing actual temperatures, once a second.
+
+        Consumer-driven, not part of bring-up: the run path reads
+        temperatures synchronously (sequence_utils.set_temperature), so a
+        headless run never pays the polling serial traffic. The GUI starts
+        it for its plots. Safe to call more than once; not restartable
+        after close().
+        """
+        if not self._polling_thread.is_alive():
+            self._polling_thread.start()
 
     def _update_loop(self):
-        while not self.terminate_temperature_updating_thread:
+        while not self._terminate_polling:
             time.sleep(1)
             for c in range(1, self.channels + 1):
                 self.actual_temperatures[c - 1] = self.get_actual_temperature(c)
-            if self.temperature_updating_callback is not None:
-                try:
-                    self.temperature_updating_callback(list(self.actual_temperatures))
-                except TypeError:
-                    print("Temperature read callback failed")
+            self._publish()
+
+    def _publish(self):
+        self._subscribers.notify(list(self.actual_temperatures))
 
     # --- lifecycle ---
 
     def close(self):
-        self.terminate_temperature_updating_thread = True
-        if self.actual_temp_updating_thread.is_alive():
-            self.actual_temp_updating_thread.join()
+        self._terminate_polling = True
+        if self._polling_thread.is_alive():
+            self._polling_thread.join()
+        self._subscribers.clear()
         if self.serial.is_open:
             self.serial.close()
 
@@ -154,9 +181,9 @@ class TCMControllerSimulation:
         self.actual_temperatures = [10.0] * channels
         self.output_enabled = [False] * channels
 
-        self.temperature_updating_callback = None
-        self.terminate_temperature_updating_thread = False
-        self.actual_temp_updating_thread = threading.Thread(
+        self._subscribers = Subscribers("Temperature controller")
+        self._terminate_polling = False
+        self._polling_thread = threading.Thread(
             target=self._update_loop, daemon=True
         )
 
@@ -197,19 +224,29 @@ class TCMControllerSimulation:
         self._check_channel(channel)
         return self.actual_temperatures[channel - 1]
 
+    def subscribe(self, callback):
+        self._subscribers.subscribe(callback)
+
+    def unsubscribe(self, callback):
+        self._subscribers.unsubscribe(callback)
+
+    def start(self):
+        if not self._polling_thread.is_alive():
+            self._polling_thread.start()
+
     def _update_loop(self):
-        while not self.terminate_temperature_updating_thread:
+        while not self._terminate_polling:
             time.sleep(1)
-            if self.temperature_updating_callback is not None:
-                try:
-                    self.temperature_updating_callback(list(self.actual_temperatures))
-                except TypeError:
-                    print("Temperature read callback failed")
+            self._publish()
+
+    def _publish(self):
+        self._subscribers.notify(list(self.actual_temperatures))
 
     def close(self):
-        self.terminate_temperature_updating_thread = True
-        if self.actual_temp_updating_thread.is_alive():
-            self.actual_temp_updating_thread.join()
+        self._terminate_polling = True
+        if self._polling_thread.is_alive():
+            self._polling_thread.join()
+        self._subscribers.clear()
 
     def abort(self):
         self.is_aborted = True

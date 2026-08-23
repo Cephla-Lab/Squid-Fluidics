@@ -1157,8 +1157,11 @@ class TemperatureControlWidget(SensorTabWidget):
             layout.addWidget(cw)
 
         self.readings_signal.connect(self._fanout)
-        self.controller.temperature_updating_callback = self._on_callback
-        self.controller.actual_temp_updating_thread.start()
+        # Just another subscriber: the driver owns its polling thread, and
+        # the GUI starts it because the plots are what consume the readings
+        # -- a headless run reads temperatures synchronously and never does.
+        self.controller.subscribe(self._on_callback)
+        self.controller.start()
 
     def _on_callback(self, temps):
         # Runs in the controller's polling thread; marshal to the GUI thread.
