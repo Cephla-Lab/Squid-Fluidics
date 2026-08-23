@@ -124,3 +124,63 @@ class TestGetFlowRate:
             rate = p.volume * 60 / mapping[code]
             recovered_code = p.flow_rate_to_speed_code(rate)
             assert recovered_code == code, f"Round-trip failed for code {code}: rate={rate}, recovered={recovered_code}"
+
+
+class TestEffectiveSpeedCode:
+    """One clamp shared by the real pump and the simulation, because the
+    recorded chains are measured against it in tests: a private copy in
+    either class could drift and the tests would follow the copy."""
+
+    def test_none_means_as_fast_as_allowed(self):
+        assert _make_sim_with_real_speed_code().effective_speed_code(None) == 10
+
+    def test_a_faster_code_is_clamped_to_the_limit(self):
+        # Lower code = faster stroke; the limit is a floor on the code.
+        assert _make_sim_with_real_speed_code().effective_speed_code(3) == 10
+
+    def test_a_slower_code_passes_through(self):
+        assert _make_sim_with_real_speed_code().effective_speed_code(27) == 27
+
+
+class TestSimulationAccounting:
+    """The held-volume fold behind get_current_volume/get_chained_volume.
+
+    The integration volume tests assert executed chains and lean on this
+    accounting for the overflow-dump decisions, so its ordering semantics
+    are pinned once here rather than re-asserted at every call site.
+    """
+
+    def _pump(self):
+        return SyringePumpSimulation(sn=None, syringe_ul=1000,
+                                     speed_code_limit=10, waste_port=3)
+
+    def test_starts_half_full_like_the_old_constant_reported(self):
+        assert self._pump().get_current_volume() == 500
+
+    def test_execute_applies_the_chain_in_order(self):
+        """A mid-chain waste dump empties what is held at that point, not at
+        the end -- the ordering clear_and_add_reagent depends on."""
+        p = self._pump()
+        p.extract(2, 300, 10)
+        p.dispense_to_waste()
+        p.extract(2, 700, 10)
+        p.execute()
+        assert p.get_current_volume() == 700
+
+    def test_chained_volume_is_the_queue_not_the_plunger(self):
+        p = self._pump()
+        p.extract(2, 300, 10)
+        assert p.get_chained_volume() == 300
+        p.dispense(3, 100, 10)
+        assert p.get_chained_volume() == 200
+        p.dispense_to_waste()
+        assert p.get_chained_volume() == 0
+        assert p.get_current_volume() == 500   # nothing executed yet
+
+    def test_reset_chain_drops_the_queue(self):
+        p = self._pump()
+        p.extract(2, 300, 10)
+        p.reset_chain()
+        p.execute()
+        assert p.get_current_volume() == 500
+        assert p.get_chained_volume() == 0
