@@ -311,3 +311,25 @@ class TestFlowSensorConfig:
         config = load_config(str(fixtures_dir / "flow_cell_config.yaml"))
         assert config.flow_sensors is not None
         assert config.flow_sensors[0].index == 1
+
+
+class TestUnknownKeysAreRejected:
+    """The config models forbid extras now, like the sequence models always
+    have. Before this, a misspelled or unsupported key was silently dropped:
+    a rig config carried `microstep: true` under syringe_pump for months --
+    a field nothing reads -- and looked configured the whole time."""
+
+    def test_a_top_level_unknown_key_names_itself(self):
+        with pytest.raises(ValidationError, match="chamber_volume"):
+            FluidicsConfig(**_make_config_dict(chamber_volume=1300))
+
+    def test_a_nested_unknown_key_names_itself(self):
+        with pytest.raises(ValidationError, match="microstep"):
+            FluidicsConfig(**_make_config_dict(**{"syringe_pump.microstep": True}))
+
+    def test_a_typoed_safety_knob_fails_instead_of_defaulting(self):
+        config = _make_config_dict(
+            temperature_controller={"serial_number": "T",
+                                    "tolerance_celcius": 0.5})  # sic
+        with pytest.raises(ValidationError, match="tolerance_celcius"):
+            FluidicsConfig(**config)

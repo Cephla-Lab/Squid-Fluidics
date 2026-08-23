@@ -7,16 +7,29 @@ import os
 from typing import Dict, List, Literal, Optional
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # --- Pydantic Models ---
 
-class MicrocontrollerConfig(BaseModel):
+class _StrictModel(BaseModel):
+    """Unknown keys fail loudly instead of being silently dropped.
+
+    The sequence models have forbidden extras since they were written; the
+    config models silently ignored them, so a misspelled or unsupported key
+    read as configured while changing nothing (a live example: a rig config
+    carrying `microstep: true` under syringe_pump, a field nothing reads).
+    Safety-adjacent knobs like tolerance_celsius and the flow-sensor monitor
+    fields are one typo away from their defaults without this.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+
+class MicrocontrollerConfig(_StrictModel):
     serial_number: str
 
 
-class SyringePumpConfig(BaseModel):
+class SyringePumpConfig(_StrictModel):
     serial_number: str
     volume_ul: int = Field(gt=0)
     ports_allowed: List[int]
@@ -26,7 +39,7 @@ class SyringePumpConfig(BaseModel):
     speed_code_limit: int = Field(ge=0, le=40)
 
 
-class SelectorValvesConfig(BaseModel):
+class SelectorValvesConfig(_StrictModel):
     valve_ids: List[int]
     number_of_ports: Dict[int, int]
     tubing_fluid_amount_to_valve_ul: Dict[int, int]
@@ -52,27 +65,27 @@ class SelectorValvesConfig(BaseModel):
         return self
 
 
-class ReagentSelectionConfig(BaseModel):
+class ReagentSelectionConfig(_StrictModel):
     selector_valves: SelectorValvesConfig
     common_tubing_fluid_amount_ul: int
 
 
-class SampleSelectionInletConfig(BaseModel):
+class SampleSelectionInletConfig(_StrictModel):
     common_tubing_fluid_amount_ul: int
 
 
-class SamplesConfig(BaseModel):
+class SamplesConfig(_StrictModel):
     chamber_volume_ul: int
 
 
-class TemperatureControllerConfig(BaseModel):
+class TemperatureControllerConfig(_StrictModel):
     serial_number: str
     channels: Literal[1, 2] = 2
     tolerance_celsius: float = Field(default=1.0, gt=0)
     stabilization_timeout_seconds: float = Field(default=300, gt=0)
 
 
-class FlowSensorConfig(BaseModel):
+class FlowSensorConfig(_StrictModel):
     """One SLF3X flow sensor on the Teensy's I2C bus.
 
     index is the I2C bus the sensor sits on (1 = Wire1, 2 = Wire2). Bus 0
@@ -98,7 +111,7 @@ class FlowSensorConfig(BaseModel):
     max_flow_rate_ul_min: float = Field(default=2000, gt=0)
 
 
-class FluidicsConfig(BaseModel):
+class FluidicsConfig(_StrictModel):
     config_version: str
     microcontroller: MicrocontrollerConfig
     syringe_pump: SyringePumpConfig
