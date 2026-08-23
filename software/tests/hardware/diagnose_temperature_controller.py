@@ -14,7 +14,8 @@ import sys
 import time
 
 import serial
-from serial.tools import list_ports
+
+from fluidics.control.discovery import DeviceNotFoundError, find_serial_port
 
 
 # Parameters worth polling for "enabled but no drive" diagnosis.
@@ -37,13 +38,6 @@ QUERY_PARAMS = [
     "TCOCPSTATUS",    # over-current protection status
     "TCEXTSTATUS",    # external status
 ]
-
-
-def find_port(sn):
-    for d in list_ports.comports():
-        if d.serial_number == sn:
-            return d.device
-    return None
 
 
 def send(ser, frame):
@@ -98,12 +92,10 @@ def main():
     if args.port:
         port = args.port
     else:
-        port = find_port(args.sn)
-        if port is None:
-            print(f"No serial device with serial_number={args.sn!r}")
-            print("Available ports:")
-            for d in list_ports.comports():
-                print(f"  {d.device}  sn={d.serial_number!r}  desc={d.description!r}")
+        try:
+            port = find_serial_port(args.sn, "Temperature controller")
+        except DeviceNotFoundError as e:
+            print(e)
             sys.exit(1)
 
     print(f"Opening {port} @ {args.baud} baud, channel TC{args.channel}\n")

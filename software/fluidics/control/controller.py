@@ -2,7 +2,6 @@ from cobs import cobs
 import serial
 from ._def import *
 from .discovery import find_serial_port
-import serial.tools.list_ports
 from datetime import datetime
 import os
 from pathlib import Path

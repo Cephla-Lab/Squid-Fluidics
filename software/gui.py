@@ -15,6 +15,8 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QTabWidget, QWidget, QVB
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, pyqtSlot, Q_ARG, QMetaObject, QEvent, QCoreApplication
 from PyQt5.QtGui import QColor, QBrush
 
+from serial import SerialException
+
 from fluidics.control.config import load_config
 from fluidics.control.discovery import DeviceNotFoundError
 from fluidics.control.tecancavro.tecanapi import TecanAPITimeout
@@ -1322,11 +1324,13 @@ class FluidicsControlGUI(QMainWindow):
         try:
             self.devices = build_devices(self.config, self.simulation,
                                          on_issue=self._report_bringup_issue)
-        except DeviceNotFoundError as e:
+        except (DeviceNotFoundError, SerialException) as e:
             # Nothing works without the controller or the pump, so there is
-            # no window worth showing -- just the message, which names the
-            # device, the serial number searched for, and what is plugged in.
-            QMessageBox.critical(self, "Device Not Found", str(e))
+            # no window worth showing -- just the message. DeviceNotFoundError
+            # is "not plugged in / wrong serial"; SerialException is the
+            # sibling "plugged in but the port won't open" (permissions, a
+            # stale process holding it) -- same operator problem, same dialog.
+            QMessageBox.critical(self, "Device Unavailable", str(e))
             raise SystemExit(1)
         self.controller = self.devices.controller
         self.syringePump = self.devices.syringe_pump

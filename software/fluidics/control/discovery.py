@@ -28,7 +28,7 @@ def find_serial_port(serial_number, device_name):
     None, so matching a None from a half-filled config against them would
     silently pick an arbitrary device.
     """
-    ports = list(list_ports.comports())
+    ports = list_ports.comports()
     if serial_number is not None:
         for p in ports:
             if p.serial_number == serial_number:

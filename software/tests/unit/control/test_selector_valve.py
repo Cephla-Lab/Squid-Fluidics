@@ -29,12 +29,13 @@ class TestSelectorValveSystemInit:
         # 3 valves with 10 ports each: (10-1) + (10-1) + 10 = 28
         assert flow_cell_system.available_port_number == 28
 
-    def test_the_count_is_the_shared_config_arithmetic(self, fixtures_dir):
+    def test_the_count_is_the_shared_config_arithmetic(
+            self, flow_cell_system, fixtures_dir):
         """available_port_count is the same formula without hardware attached
         -- the pre-run sequence check uses it, so the two must be one."""
         from fluidics.control.config import available_port_count
         config = load_config(str(fixtures_dir / "flow_cell_config.yaml"))
-        assert available_port_count(config) == 28
+        assert flow_cell_system.available_port_number == available_port_count(config)
 
     def test_open_chamber_port_count(self, open_chamber_system):
         # 1 valve with 10 ports: 10

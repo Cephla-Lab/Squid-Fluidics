@@ -57,8 +57,7 @@ class SelectorValveSystem():
         if not 1 <= port_index <= self.available_port_number:
             # This used to be a silent return, which left whatever port was
             # last open selected -- the draw then pulled the wrong reagent
-            # with nothing saying so. (Re-parent under fluidics/errors.py
-            # when the cancellation redesign lands it.)
+            # with nothing saying so.
             raise ValueError(
                 f"Fluidic port {port_index} is out of range: this "
                 f"configuration has ports 1..{self.available_port_number}")

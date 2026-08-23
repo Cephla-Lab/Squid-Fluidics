@@ -237,19 +237,22 @@ def check_ports_against_config(sequences: list[dict], config) -> None:
 
     A falsy fill_tubing_with (None, or the GUI dialog's 0) means "no fill"
     and is skipped, matching how the operations interpret it.
+
+    The port-valued fields are listed here by hand -- there is no model
+    metadata to derive them from. A new sequence type that carries a port
+    under another name must be added below, or it only fails at run time
+    through open_port's backstop.
     """
     limit = available_port_count(config)
     problems = []
     for index, seq in enumerate(sequences):
         label = seq.get("name") or seq["type"]
-        checks = []
-        if seq.get("fluidic_port") is not None:
-            checks.append(("fluidic_port", seq["fluidic_port"]))
-        if seq.get("fill_tubing_with"):   # None, and the GUI's 0: "no fill"
-            checks.append(("fill_tubing_with", seq["fill_tubing_with"]))
-        for field, port in checks:
-            if not 1 <= int(port) <= limit:
-                problems.append(f"sequence {index} ({label}): {field}={port}")
+        port = seq.get("fluidic_port")
+        if port is not None and not 1 <= port <= limit:
+            problems.append(f"sequence {index} ({label}): fluidic_port={port}")
+        fill = seq.get("fill_tubing_with")
+        if fill and not 1 <= fill <= limit:
+            problems.append(f"sequence {index} ({label}): fill_tubing_with={fill}")
     if problems:
         raise ValueError(
             f"Ports out of range -- this configuration has ports "
