@@ -19,7 +19,6 @@ from serial import SerialException
 
 from fluidics.control.config import load_config
 from fluidics.control.discovery import DeviceNotFoundError
-from fluidics.control.tecancavro.tecanapi import TecanAPITimeout
 from fluidics.devices import (
     ISSUE_FLOW_SENSORS, ISSUE_TEMPERATURE_CONTROLLER,
     build_devices, build_operations,
@@ -751,9 +750,12 @@ class ManualControlWidget(QWidget):
             # Clean up
             QMetaObject.invokeMethod(self, "operationComplete", Qt.QueuedConnection)
 
-        except TecanAPITimeout:
-            QMetaObject.invokeMethod(self, "operationComplete", Qt.QueuedConnection)
-
+        # A TecanAPITimeout used to be masked here as "operation complete" --
+        # the progress bar jumped to 100% while the plunger might still be
+        # moving. Those timeouts were the GUI's own plunger poll colliding
+        # with the operation thread on the unlocked serial link; with the
+        # pump's transaction lock, a timeout that still happens is a real
+        # fault and falls through to the error path like any other.
         except Exception as e:
             QMetaObject.invokeMethod(self, "handleError", 
                                    Qt.QueuedConnection,
@@ -781,7 +783,6 @@ class ManualControlWidget(QWidget):
 
     @pyqtSlot(str)
     def handleError(self, error_message):
-        #if error_message[:48] != "Tecan serial communication exceeded max attempts":
         QMessageBox.critical(self, "Error", f"Syringe pump error: {error_message}")
         self.syringePump.wait_for_stop()
         self.setControlsEnabled(True)

@@ -58,6 +58,7 @@ def _real_pump(ready=True):
     """
     pump = SyringePump.__new__(SyringePump)
     pump.syringe = FakeSyringe(ready=ready)
+    pump._serial_lock = threading.RLock()
     pump._init_interrupt()
     return pump
 
