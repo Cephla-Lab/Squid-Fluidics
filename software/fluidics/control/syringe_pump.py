@@ -186,13 +186,26 @@ class SyringePump(SpeedCodes, Interruptible):
         self.range = 3000  # Property of the syringe pump
         self.chained_volume = 0
 
+        # Every touch of self.syringe -- a wire round trip or the driver's
+        # chain-building state -- happens under this lock. The GUI's plunger
+        # poll runs on the Qt thread while a worker thread drives moves;
+        # unlocked, the poll could consume the reply belonging to the
+        # worker's _checkReady, surfacing as a spurious TecanAPITimeout that
+        # the manual tab used to mask as "operation complete". Held per
+        # driver call, never across a move, so position polls and abort()
+        # stay live while the plunger runs. A plain (non-reentrant) Lock on
+        # purpose: locked regions never nest, and a future violation should
+        # deadlock loudly in testing, not silently interleave.
+        self._serial_lock = threading.Lock()
+
         self.get_plunger_position()
         self._init_interrupt()
 
         print("Syringe pump initialized.")
 
     def get_plunger_position(self):
-        position = self.syringe.getPlungerPos()
+        with self._serial_lock:
+            position = self.syringe.getPlungerPos()
         self.plunger_pos = position / self.range
         return self.plunger_pos
 
@@ -203,60 +216,74 @@ class SyringePump(SpeedCodes, Interruptible):
         return self.chained_volume  # ul
 
     def set_speed(self, speed_code):
-        self.syringe.setSpeed(speed_code)
+        with self._serial_lock:
+            self.syringe.setSpeed(speed_code)
 
     def set_wait(self, time_s):
-        self.syringe.delayExec(time_s * 1000)
+        with self._serial_lock:
+            self.syringe.delayExec(time_s * 1000)
 
     def reset_chain(self):
-        self.syringe.resetChain()
+        with self._serial_lock:
+            self.syringe.resetChain()
         self.chained_volume = 0
 
-    def execute(self, block_pump=False):
+    def execute(self):
+        # wait_for_stop is the only waiting path.
         if not self._arm():
             return
         self.is_busy = True
-        t = self.syringe.executeChain(minimal_reset=True)
-        if block_pump:
-            self.syringe.waitReady()
-            self.is_busy = False
-        else:
-            self.wait_for_stop(t)
+        with self._serial_lock:
+            t = self.syringe.executeChain(minimal_reset=True)
+        self.wait_for_stop(t)
         self.get_plunger_position()
         self.chained_volume = 0
 
     def get_time_to_finish(self):
-        return self.syringe.exec_time
+        with self._serial_lock:
+            return self.syringe.exec_time
 
     def dispense(self, port, volume, speed_code):
         if self.is_aborted:
             return
-        self.set_speed(self.effective_speed_code(speed_code))
-        self.syringe.dispense(port, volume)
+        with self._serial_lock:
+            self.syringe.setSpeed(self.effective_speed_code(speed_code))
+            self.syringe.dispense(port, volume)
+            t = self.syringe.exec_time
         self.chained_volume = self.chained_volume - volume
-        return self.get_time_to_finish()
+        return t
 
     def extract(self, port, volume, speed_code):
         if self.is_aborted:
             return
-        self.set_speed(self.effective_speed_code(speed_code))
-        self.syringe.extract(port, volume)
+        with self._serial_lock:
+            self.syringe.setSpeed(self.effective_speed_code(speed_code))
+            self.syringe.extract(port, volume)
+            t = self.syringe.exec_time
         self.chained_volume = self.chained_volume + volume
-        return self.get_time_to_finish()
+        return t
 
     def dispense_to_waste(self, speed_code=None):
         if self.is_aborted:
             return
-        self.set_speed(self.effective_speed_code(speed_code))
-        self.syringe.dispenseToWaste(retain_port=False)
+        with self._serial_lock:
+            self.syringe.setSpeed(self.effective_speed_code(speed_code))
+            self.syringe.dispenseToWaste(retain_port=False)
+            t = self.syringe.exec_time
         self.chained_volume = 0
-        return self.get_time_to_finish()
+        return t
 
     def _terminate(self):
-        self.syringe.terminateCmd()
+        # Called from other threads (the GUI's abort, the reader thread's
+        # flow-fault stop). The lock only makes it queue behind an in-flight
+        # round trip -- or, rarely, the driver's own error-recovery sequence
+        # -- never behind a move.
+        with self._serial_lock:
+            self.syringe.terminateCmd()
 
     def _move_finished(self):
-        return self.syringe._checkReady()
+        with self._serial_lock:
+            return self.syringe._checkReady()
 
     def close(self, to_waste=False):
         if to_waste:
@@ -343,7 +370,7 @@ class SyringePumpSimulation(SpeedCodes, Interruptible):
     def reset_chain(self):
         self._chain = []
 
-    def execute(self, block_pump=False):
+    def execute(self):
         if not self._arm():
             return
         self.is_busy = True
