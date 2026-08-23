@@ -240,7 +240,8 @@ class SyringePump(SpeedCodes, Interruptible):
         self.chained_volume = 0
 
     def get_time_to_finish(self):
-        return self.syringe.exec_time
+        with self._serial_lock:
+            return self.syringe.exec_time
 
     def dispense(self, port, volume, speed_code):
         if self.is_aborted:
@@ -248,8 +249,9 @@ class SyringePump(SpeedCodes, Interruptible):
         with self._serial_lock:
             self.syringe.setSpeed(self.effective_speed_code(speed_code))
             self.syringe.dispense(port, volume)
+            t = self.syringe.exec_time
         self.chained_volume = self.chained_volume - volume
-        return self.get_time_to_finish()
+        return t
 
     def extract(self, port, volume, speed_code):
         if self.is_aborted:
@@ -257,8 +259,9 @@ class SyringePump(SpeedCodes, Interruptible):
         with self._serial_lock:
             self.syringe.setSpeed(self.effective_speed_code(speed_code))
             self.syringe.extract(port, volume)
+            t = self.syringe.exec_time
         self.chained_volume = self.chained_volume + volume
-        return self.get_time_to_finish()
+        return t
 
     def dispense_to_waste(self, speed_code=None):
         if self.is_aborted:
@@ -266,8 +269,9 @@ class SyringePump(SpeedCodes, Interruptible):
         with self._serial_lock:
             self.syringe.setSpeed(self.effective_speed_code(speed_code))
             self.syringe.dispenseToWaste(retain_port=False)
+            t = self.syringe.exec_time
         self.chained_volume = 0
-        return self.get_time_to_finish()
+        return t
 
     def _terminate(self):
         # Called from other threads (the GUI's abort, the reader thread's

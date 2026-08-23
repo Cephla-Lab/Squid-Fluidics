@@ -36,11 +36,17 @@ class AssertingSyringe:
     def __init__(self, lock):
         self.lock = lock
         self.calls = []
-        self.exec_time = 5
 
     def _entry(self, name):
         assert self.lock.held, f"{name} reached the driver outside the serial lock"
         self.calls.append(name)
+
+    @property
+    def exec_time(self):
+        # Driver state, not just wire traffic: reads are part of the
+        # every-touch-under-the-lock invariant too.
+        self._entry("exec_time")
+        return 5
 
     def getPlungerPos(self):
         self._entry("getPlungerPos")
@@ -97,6 +103,8 @@ class TestEveryRoundTripIsLocked:
         pytest.param(lambda p: p.dispense_to_waste(), "dispenseToWaste",
                      id="dispense_to_waste"),
         pytest.param(lambda p: p.execute(), "executeChain", id="execute"),
+        pytest.param(lambda p: p.get_time_to_finish(), "exec_time",
+                     id="time_to_finish"),
         pytest.param(lambda p: p._move_finished(), "_checkReady",
                      id="move_finished"),
         pytest.param(lambda p: p.abort(), "terminateCmd", id="abort"),
