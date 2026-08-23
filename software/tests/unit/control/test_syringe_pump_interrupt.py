@@ -16,6 +16,8 @@ import pytest
 
 from fluidics.control.syringe_pump import SyringePump, SyringePumpSimulation
 
+from .pump_helpers import bare_pump
+
 
 # Captured at import, before conftest's autouse fixture patches them.
 _pristine_wait = threading.Event.wait
@@ -49,18 +51,14 @@ class FakeSyringe:
 
 
 def _real_pump(ready=True):
-    """A real SyringePump with the hardware left out of its __init__.
+    """A real SyringePump around a driver fake -- see pump_helpers.
 
     The interrupt logic lives in Interruptible, shared with the simulation, so
     the only thing left to check on this side is that the two hooks are wired
     to the driver. Without this the shipped path had no test at all -- which is
     how the sleep-through-abort bug survived.
     """
-    pump = SyringePump.__new__(SyringePump)
-    pump.syringe = FakeSyringe(ready=ready)
-    pump._serial_lock = threading.RLock()
-    pump._init_interrupt()
-    return pump
+    return bare_pump(FakeSyringe(ready=ready))
 
 
 class TestTheRealPumpsHooks:

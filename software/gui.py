@@ -750,14 +750,19 @@ class ManualControlWidget(QWidget):
             # Clean up
             QMetaObject.invokeMethod(self, "operationComplete", Qt.QueuedConnection)
 
-        # A TecanAPITimeout used to be masked here as "operation complete" --
-        # the progress bar jumped to 100% while the plunger might still be
-        # moving. Those timeouts were the GUI's own plunger poll colliding
-        # with the operation thread on the unlocked serial link; with the
-        # pump's transaction lock, a timeout that still happens is a real
-        # fault and falls through to the error path like any other.
+        # No TecanAPITimeout masking here: the pump serializes link access
+        # now, so a timeout is a real fault and takes the error path.
         except Exception as e:
-            QMetaObject.invokeMethod(self, "handleError", 
+            # Halt-and-settle on this worker thread, not in the Qt slot: on a
+            # dead link wait_for_stop would re-raise inside the slot (fatal
+            # under PyQt5), and on a live one it would block the event loop
+            # for the rest of the move.
+            try:
+                self.syringePump.wait_for_stop()
+            except Exception:
+                pass
+            self.syringePump.is_busy = False
+            QMetaObject.invokeMethod(self, "handleError",
                                    Qt.QueuedConnection,
                                    Q_ARG(str, str(e)))
 
@@ -783,8 +788,8 @@ class ManualControlWidget(QWidget):
 
     @pyqtSlot(str)
     def handleError(self, error_message):
+        # The worker thread has already halted and settled the pump.
         QMessageBox.critical(self, "Error", f"Syringe pump error: {error_message}")
-        self.syringePump.wait_for_stop()
         self.setControlsEnabled(True)
         self.progress_timer.stop()
         self.syringeProgressBar.setValue(0)
