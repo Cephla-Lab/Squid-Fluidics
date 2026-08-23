@@ -1,4 +1,5 @@
 from ._def import CMD_SET
+from .config import available_port_count
 
 
 class SelectorValve():
@@ -39,12 +40,9 @@ class SelectorValveSystem():
         sv_config = rs.selector_valves
         self.common_tubing_fluid_amount_ul = rs.common_tubing_fluid_amount_ul
         self.valves = [None] * len(sv_config.valve_ids)
-        self.available_port_number = 0
         for i, valve_id in enumerate(sv_config.valve_ids):
-            ports = sv_config.number_of_ports[valve_id]
             self.valves[i] = SelectorValve(self.fc, self.config, valve_id, 1)
-            self.available_port_number += (ports - 1)
-        self.available_port_number += 1
+        self.available_port_number = available_port_count(config)
         self.current_port = 1
 
     def port_to_reagent(self, port_index):
@@ -56,8 +54,13 @@ class SelectorValveSystem():
         return name_mapping.get('port_' + str(port_index))
 
     def open_port(self, port_index):
-        if port_index > self.available_port_number:
-            return
+        if not 1 <= port_index <= self.available_port_number:
+            # This used to be a silent return, which left whatever port was
+            # last open selected -- the draw then pulled the wrong reagent
+            # with nothing saying so.
+            raise ValueError(
+                f"Fluidic port {port_index} is out of range: this "
+                f"configuration has ports 1..{self.available_port_number}")
 
         ports_processed = 0
         for valve in self.valves[:-1]:  # Process all valves except the last one

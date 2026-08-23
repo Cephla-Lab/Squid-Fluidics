@@ -8,6 +8,7 @@ from fluidics.sequences import (
     SEQUENCE_TYPES,
     SEQUENCE_TYPE_LABELS,
     SequenceListAdapter,
+    check_ports_against_config,
     load_sequences,
     save_sequences_yaml,
     get_included_sequences,
@@ -199,3 +200,59 @@ class TestRegistryConsistency:
 
     def test_flow_cell_includes_set_temperature(self):
         assert "set_temperature" in APPLICATION_SEQUENCES["Flow Cell"]
+
+
+class TestCheckPortsAgainstConfig:
+    """The upper bound lives in the rig config, not the sequence file, so the
+    pydantic models cannot enforce it -- this check runs at both entry points
+    before anything moves."""
+
+    @pytest.fixture
+    def config(self, fixtures_dir):
+        from fluidics.control.config import load_config
+        return load_config(str(fixtures_dir / "flow_cell_config.yaml"))  # 28 ports
+
+    def _seq(self, **overrides):
+        seq = {"type": "flow_reagent", "fluidic_port": 1, "flow_rate": 500,
+               "volume": 100}
+        seq.update(overrides)
+        return seq
+
+    def test_in_range_ports_pass(self, config):
+        check_ports_against_config(
+            [self._seq(fluidic_port=1), self._seq(fluidic_port=28)], config)
+
+    def test_an_out_of_range_port_names_the_sequence(self, config):
+        with pytest.raises(ValueError, match=r"1\.\.28") as excinfo:
+            check_ports_against_config(
+                [self._seq(), self._seq(fluidic_port=29, name="bad draw")],
+                config)
+        assert "sequence 1 (bad draw)" in str(excinfo.value)
+
+    def test_port_zero_is_out_of_range(self, config):
+        with pytest.raises(ValueError, match="fluidic_port=0"):
+            check_ports_against_config([self._seq(fluidic_port=0)], config)
+
+    def test_fill_tubing_with_is_checked_when_set(self, config):
+        with pytest.raises(ValueError, match="fill_tubing_with=99"):
+            check_ports_against_config(
+                [self._seq(fill_tubing_with=99)], config)
+
+    def test_falsy_fill_tubing_with_means_no_fill(self, config):
+        # None from YAML, 0 from the GUI dialog's spinbox: both mean "skip".
+        check_ports_against_config(
+            [self._seq(fill_tubing_with=None), self._seq(fill_tubing_with=0)],
+            config)
+
+    def test_set_temperature_has_no_ports_to_check(self, config):
+        check_ports_against_config(
+            [{"type": "set_temperature", "temperature": 37}], config)
+
+    def test_every_offender_is_listed_not_just_the_first(self, config):
+        with pytest.raises(ValueError) as excinfo:
+            check_ports_against_config(
+                [self._seq(fluidic_port=30), self._seq(fill_tubing_with=31)],
+                config)
+        message = str(excinfo.value)
+        assert "fluidic_port=30" in message
+        assert "fill_tubing_with=31" in message

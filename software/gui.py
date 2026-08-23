@@ -15,7 +15,10 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QTabWidget, QWidget, QVB
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, pyqtSlot, Q_ARG, QMetaObject, QEvent, QCoreApplication
 from PyQt5.QtGui import QColor, QBrush
 
+from serial import SerialException
+
 from fluidics.control.config import load_config
+from fluidics.control.discovery import DeviceNotFoundError
 from fluidics.control.tecancavro.tecanapi import TecanAPITimeout
 from fluidics.devices import (
     ISSUE_FLOW_SENSORS, ISSUE_TEMPERATURE_CONTROLLER,
@@ -24,7 +27,8 @@ from fluidics.devices import (
 from fluidics.experiment_worker import ExperimentWorker
 from fluidics.sequences import (
     load_sequences, save_sequences_yaml, get_included_sequences,
-    get_fields_for_type, SEQUENCE_TYPES, SEQUENCE_TYPE_LABELS, APPLICATION_SEQUENCES,
+    get_fields_for_type, check_ports_against_config,
+    SEQUENCE_TYPES, SEQUENCE_TYPE_LABELS, APPLICATION_SEQUENCES,
     SequenceListAdapter,
 )
 
@@ -431,6 +435,9 @@ class SequencesWidget(QWidget):
             return
         try:
             selected = self.getSequences(selected_only=True)
+            # A port this rig does not have must fail here, at the button,
+            # not hours in when the valve is asked to open it.
+            check_ports_against_config(selected, self.config)
         except Exception as e:
             QMessageBox.critical(self, "Invalid Sequence", f"Failed to validate sequences: {str(e)}")
             return
@@ -1314,8 +1321,17 @@ class FluidicsControlGUI(QMainWindow):
         # Qt never delivers a close event to a tab-embedded child widget.
         self.sensorTabs = []
 
-        self.devices = build_devices(self.config, self.simulation,
-                                     on_issue=self._report_bringup_issue)
+        try:
+            self.devices = build_devices(self.config, self.simulation,
+                                         on_issue=self._report_bringup_issue)
+        except (DeviceNotFoundError, SerialException) as e:
+            # Nothing works without the controller or the pump, so there is
+            # no window worth showing -- just the message. DeviceNotFoundError
+            # is "not plugged in / wrong serial"; SerialException is the
+            # sibling "plugged in but the port won't open" (permissions, a
+            # stale process holding it) -- same operator problem, same dialog.
+            QMessageBox.critical(self, "Device Unavailable", str(e))
+            raise SystemExit(1)
         self.controller = self.devices.controller
         self.syringePump = self.devices.syringe_pump
         self.selectorValveSystem = self.devices.selector_valves

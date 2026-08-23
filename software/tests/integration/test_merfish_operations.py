@@ -1,6 +1,7 @@
 # tests/integration/test_merfish_operations.py
 import pytest
 
+from fluidics.experiment_worker import OperationError
 from fluidics.merfish_operations import MERFISHOperations
 
 
@@ -79,6 +80,17 @@ class TestFlowCellVolumes:
                               "flow_rate": 5000, "volume": 2000,
                               "use_ports": [1, 2]})
         assert len(sp.executed) == 4  # dump, port 1, port 2, final draw
+
+    def test_an_out_of_range_port_fails_before_anything_moves(self, rig):
+        """The old silent no-op in open_port meant this drew 500 uL through
+        whatever port was last open. The pre-run check catches the typo at
+        time zero; this pins the backstop for sequences that reach the
+        operations anyway."""
+        ops, sp = rig
+        with pytest.raises(OperationError, match="out of range"):
+            ops.process_sequence({"type": "flow_reagent", "fluidic_port": 99,
+                                  "flow_rate": 5000, "volume": 500})
+        assert sp.executed == []
 
 
 class TestProcessSequence:

@@ -1,7 +1,9 @@
 import argparse
 import sys
 import threading
-from fluidics.sequences import load_sequences, get_included_sequences
+from fluidics.sequences import (
+    check_ports_against_config, get_included_sequences, load_sequences,
+)
 from fluidics.control.config import load_config
 from fluidics.devices import build_devices, build_operations
 from fluidics.experiment_worker import ExperimentWorker
@@ -53,6 +55,8 @@ def main():
         included = get_included_sequences(sequences)
         # Load config
         config = load_config(args.config)
+        # Fail on a mistyped port before any hardware is touched.
+        check_ports_against_config(included, config)
 
         devices = build_devices(config, args.simulation)
         experiment_ops = build_operations(config, devices)

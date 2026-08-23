@@ -1,6 +1,7 @@
 import fluidics.control.tecancavro as tecancavro
 import threading
-from serial.tools import list_ports
+
+from .discovery import find_serial_port
 
 
 class Interruptible:
@@ -165,13 +166,13 @@ class SpeedCodes:
 
 class SyringePump(SpeedCodes, Interruptible):
     def __init__(self, sn, syringe_ul, speed_code_limit, waste_port, num_ports=4, slope=14, debug=False):
-        if sn is not None:
-            for d in list_ports.comports():
-                if d.serial_number == sn:
-                    self.port = d.device
-                    self.com_link = tecancavro.TecanAPISerial(tecan_addr=0, ser_port=self.port, ser_baud=9600)
-                    print("Syringe pump found.")
-                    break
+        # An unmatched serial number used to fall through the search loop and
+        # die one line later with a bare AttributeError on self.com_link --
+        # the most common field failure (unplugged pump, stale config)
+        # reported as a driver bug.
+        self.port = find_serial_port(sn, "Syringe pump")
+        self.com_link = tecancavro.TecanAPISerial(tecan_addr=0, ser_port=self.port, ser_baud=9600)
+        print("Syringe pump found.")
         self.syringe = tecancavro.models.XCaliburD(com_link=self.com_link,
                             num_ports=num_ports,
                             syringe_ul=syringe_ul,
