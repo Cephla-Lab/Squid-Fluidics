@@ -38,5 +38,5 @@ def find_serial_port(serial_number, device_name):
     raise DeviceNotFoundError(
         f"{device_name} with serial number {serial_number!r} not found. "
         f"Serial devices present: {present}. Check the serial number in "
-        f"config.yaml and the USB connection."
+        f"the config file and the USB connection."
     )
