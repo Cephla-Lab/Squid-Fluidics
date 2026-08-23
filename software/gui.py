@@ -16,6 +16,7 @@ from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, pyqtSlot, Q_ARG, QMeta
 from PyQt5.QtGui import QColor, QBrush
 
 from fluidics.control.config import load_config
+from fluidics.control.discovery import DeviceNotFoundError
 from fluidics.control.tecancavro.tecanapi import TecanAPITimeout
 from fluidics.devices import (
     ISSUE_FLOW_SENSORS, ISSUE_TEMPERATURE_CONTROLLER,
@@ -1318,8 +1319,15 @@ class FluidicsControlGUI(QMainWindow):
         # Qt never delivers a close event to a tab-embedded child widget.
         self.sensorTabs = []
 
-        self.devices = build_devices(self.config, self.simulation,
-                                     on_issue=self._report_bringup_issue)
+        try:
+            self.devices = build_devices(self.config, self.simulation,
+                                         on_issue=self._report_bringup_issue)
+        except DeviceNotFoundError as e:
+            # Nothing works without the controller or the pump, so there is
+            # no window worth showing -- just the message, which names the
+            # device, the serial number searched for, and what is plugged in.
+            QMessageBox.critical(self, "Device Not Found", str(e))
+            raise SystemExit(1)
         self.controller = self.devices.controller
         self.syringePump = self.devices.syringe_pump
         self.selectorValveSystem = self.devices.selector_valves

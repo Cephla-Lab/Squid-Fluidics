@@ -2,7 +2,8 @@ import threading
 import time
 
 import serial
-from serial.tools import list_ports
+
+from .discovery import find_serial_port
 
 
 class TCMController:
@@ -18,11 +19,8 @@ class TCMController:
         if channels not in (1, 2):
             raise ValueError(f"channels must be 1 or 2, got {channels}")
 
-        port = [p.device for p in list_ports.comports() if sn == p.serial_number]
-        if not port:
-            raise ValueError(f"No device found with serial number: {sn}")
-
-        self.serial = serial.Serial(port[0], baudrate=baud_rate, timeout=timeout)
+        port = find_serial_port(sn, "Temperature controller")
+        self.serial = serial.Serial(port, baudrate=baud_rate, timeout=timeout)
         self.serial_lock = threading.Lock()
 
         self.channels = channels
@@ -43,7 +41,7 @@ class TCMController:
 
         print(
             f"Temperature controller initialized: serial_number={sn}, "
-            f"channels={channels}, port={port[0]}"
+            f"channels={channels}, port={port}"
         )
 
     # --- channel addressing helpers ---

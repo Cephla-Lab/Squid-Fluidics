@@ -1,6 +1,7 @@
 from cobs import cobs
 import serial
 from ._def import *
+from .discovery import find_serial_port
 import serial.tools.list_ports
 from datetime import datetime
 import os
@@ -168,10 +169,8 @@ class Microcontroller():
         Find a Serial device that matches the serial number and connect to it.
         '''
         self.read_buffer = []
-        controller_ports = [ p.device for p in serial.tools.list_ports.comports() if self.serial_number == p.serial_number]
-        if not controller_ports:
-            raise IOError("No Controller Found")
-        self.serial = serial.Serial(controller_ports[0],2000000)
+        port = find_serial_port(self.serial_number, "Fluid controller (Teensy)")
+        self.serial = serial.Serial(port, 2000000)
         print_message('Teensy connected')
         return
     
