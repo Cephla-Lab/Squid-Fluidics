@@ -24,7 +24,8 @@ from fluidics.devices import (
 from fluidics.experiment_worker import ExperimentWorker
 from fluidics.sequences import (
     load_sequences, save_sequences_yaml, get_included_sequences,
-    get_fields_for_type, SEQUENCE_TYPES, SEQUENCE_TYPE_LABELS, APPLICATION_SEQUENCES,
+    get_fields_for_type, check_ports_against_config,
+    SEQUENCE_TYPES, SEQUENCE_TYPE_LABELS, APPLICATION_SEQUENCES,
     SequenceListAdapter,
 )
 
@@ -431,6 +432,9 @@ class SequencesWidget(QWidget):
             return
         try:
             selected = self.getSequences(selected_only=True)
+            # A port this rig does not have must fail here, at the button,
+            # not hours in when the valve is asked to open it.
+            check_ports_against_config(selected, self.config)
         except Exception as e:
             QMessageBox.critical(self, "Invalid Sequence", f"Failed to validate sequences: {str(e)}")
             return

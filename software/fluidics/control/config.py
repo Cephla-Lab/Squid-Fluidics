@@ -208,6 +208,18 @@ def convert_legacy_config(old: dict) -> dict:
     return new
 
 
+def available_port_count(config: FluidicsConfig) -> int:
+    """How many fluidic ports the configured cascade offers.
+
+    The last port of every valve except the final one routes to the next
+    valve, so it is plumbing, not a reagent port. Written once here -- pure
+    config arithmetic -- so SelectorValveSystem (with hardware attached) and
+    the pre-run sequence check (without) cannot disagree about the range.
+    """
+    sv = config.reagent_selection.selector_valves
+    return sum(sv.number_of_ports[v] - 1 for v in sv.valve_ids) + 1
+
+
 # --- Config Loading ---
 
 def load_config(config_path: str) -> FluidicsConfig:
