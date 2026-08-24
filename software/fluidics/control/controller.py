@@ -1,3 +1,5 @@
+import logging
+
 from cobs import cobs
 import serial
 from ._def import *
@@ -16,6 +18,8 @@ SERIAL_NUMBER_DEBUGGING = '11972480'
 # while keeping idle wakeups down.
 READER_IDLE_SLEEP_S = 0.005
 
+_logger = logging.getLogger(__name__)
+
 
 def to_int16(raw):
     '''Reinterpret an unsigned 16-bit value as signed int16.
@@ -32,12 +36,7 @@ def raw_to_psi(raw_pressure):
     '''Convert a raw SSCX pressure count to psi.'''
     return (raw_pressure - MCU_CONSTANTS._output_min) * (MCU_CONSTANTS._p_max - MCU_CONSTANTS._p_min) / (MCU_CONSTANTS._output_max - MCU_CONSTANTS._output_min) + MCU_CONSTANTS._p_min
 
-def print_message(msg):
-    '''
-    Print message with timestamp prepended
-    '''
-    print(datetime.now().strftime('%m/%d %H:%M:%S') + ' : '  + msg )
-    return
+
 def split_byte(byte_in):
     '''
     Split single byte int two nibbles
@@ -113,7 +112,7 @@ class Subscribers:
             try:
                 callback(*args)
             except Exception as e:
-                print_message(f"{self._label} subscriber failed: {e}")
+                _logger.warning("%s subscriber failed: %s", self._label, e)
 
 
 class PacketSubscribers:
@@ -170,7 +169,7 @@ class Microcontroller():
         self.read_buffer = []
         port = find_serial_port(self.serial_number, "Fluid controller (Teensy)")
         self.serial = serial.Serial(port, 2000000)
-        print_message('Teensy connected')
+        _logger.info('Teensy connected')
         return
     
     def send_mcu_command(self, cmd):
@@ -479,7 +478,7 @@ class FluidController(Microcontroller, PacketSubscribers):
                 # read_received_packet_nowait clears its own buffer on a failed
                 # decode, so the next frame resyncs deterministically.
                 if not self._terminate_reader:
-                    print_message(f"Reader thread error: {e}")
+                    _logger.error("Reader thread error: %s", e)
                 sleep(READER_IDLE_SLEEP_S)
 
     def start_reading(self):
@@ -523,7 +522,7 @@ class FluidController(Microcontroller, PacketSubscribers):
                 self.counter_measurement_file_flush = 0
                 self.measurement_file.flush()
         if self.debug:
-            print(line)
+            _logger.debug(line.rstrip())
 
     def _peek_status(self):
         '''Non-blocking: return (parsed packet copy, publish sequence number),
@@ -976,7 +975,7 @@ class FluidControllerSimulation(PacketSubscribers):
         return
 
     def begin(self):
-        print("Simulated fluid controller.")
+        _logger.info("Simulated fluid controller.")
 
     def start_reading(self):
         pass

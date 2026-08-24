@@ -1,6 +1,9 @@
+import logging
 from time import sleep
 from .experiment_worker import AbortRequested, OperationError
 from . import sequence_utils
+
+_logger = logging.getLogger(__name__)
 
 class OpenChamberOperations():
     def __init__(self, config, syringe_pump, selector_valves, disc_pump, temperature_controller=None):
@@ -22,7 +25,7 @@ class OpenChamberOperations():
         self.chamber_volume_ul = self.config.samples.chamber_volume_ul
 
     def process_sequence(self, sequence):
-        print(sequence)
+        _logger.debug("Running: %s", sequence)
         seq_type = sequence['type']
 
         if seq_type == "add_reagent":

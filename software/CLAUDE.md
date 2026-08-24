@@ -115,7 +115,7 @@ Speed codes (0–40) map to stroke times via `SPEED_SEC_MAPPING`. Use `flow_rate
 
 Per sensor, `monitor` is `off` (plot only), `warn` (log and carry on), or `stop` (halt the draw and raise `FlowFault`). Config sets the starting mode; the Flow Sensors tab switches it at runtime. Each draw reads the mode once when it arms.
 
-Notices go to `MERFISHOperations(on_warning=...)`, which becomes the `DrawGuard`'s `log`. It defaults to `print` for the CLI; the GUI passes a channel that marshals to the GUI thread and shows a non-modal line under the progress bar. A `warn` fault raises nothing, so that notice is the only trace it leaves.
+Notices go to `MERFISHOperations(on_warning=...)`, which becomes the `DrawGuard`'s `log`. It defaults to the fluidics logger's WARNING (console + run log); the GUI passes a channel that marshals to the GUI thread and shows a non-modal line under the progress bar. A `warn` fault also lands in the flow CSV's Fault column when recording.
 
 **Only Flow Cell is guarded.** `OpenChamberOperations` is never handed the sensors, so a `warn`/`stop` mode configured on an Open Chamber machine is inert; the GUI says so at startup, forces the mode to `off`, and disables the per-sensor control.
 

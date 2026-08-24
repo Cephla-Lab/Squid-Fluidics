@@ -1,5 +1,8 @@
-import time
+import logging
 import threading
+
+_logger = logging.getLogger(__name__)
+
 
 class ExperimentWorker:
     def __init__(self, experiment_ops, sequences, config, callbacks=None):
@@ -25,6 +28,11 @@ class ExperimentWorker:
         self._abort_event.clear()
 
         self.time_to_finish, self.n_sequences = self.get_time_to_finish()
+        # The worker narrates its own run: one source feeds the console, the
+        # run log, and (via callbacks) whatever UI is attached, so the record
+        # exists even when nothing is watching.
+        _logger.info("Run of %d sequence(s), estimated %.0f s.",
+                     self.n_sequences, self.time_to_finish)
         self._call_callback('on_estimate', self.time_to_finish, self.n_sequences)
 
     def _call_callback(self, name, *args):
@@ -63,9 +71,12 @@ class ExperimentWorker:
         current_sequence = 0
         try:
             for index, seq in enumerate(self.sequences):
+                label = seq.get('name') or seq['type']
                 for r in range(seq.get('repeat', 1)):
                     try:
                         current_sequence += 1
+                        tag = f"Sequence {current_sequence}/{self.n_sequences} ({label})"
+                        _logger.info("%s: started", tag)
                         self._call_callback('update_progress', index, current_sequence, "Started")
                         self.experiment_ops.process_sequence(seq)
                         if self._abort_event.is_set():
@@ -73,21 +84,32 @@ class ExperimentWorker:
 
                         incubation_time = seq.get('incubation_time', 0)
                         if incubation_time > 0:
+                            _logger.info("%s: incubating %.1f min", tag, incubation_time)
                             self._call_callback('update_progress', index, current_sequence, "Incubating")
                             self.wait_for_incubation(incubation_time)
+                        _logger.info("%s: completed", tag)
                         self._call_callback('update_progress', index, current_sequence, "Completed")
 
                     except AbortRequested:
+                        _logger.warning("Run aborted by user.")
                         self._call_callback('on_error', "Operation aborted by user")
                         return
                     except Exception as e:
-                        self._call_callback('on_error',
-                            f"Error processing sequence {index} (repeat {r + 1}): {str(e)}")
+                        # Same tag as the narrative lines above, so the error
+                        # names the sequence the way the operator just saw it.
+                        message = f"{tag}: failed on repeat {r + 1}: {e}"
+                        _logger.error(message, exc_info=True)
+                        self._call_callback('on_error', message)
                         return
 
         except Exception as e:
+            # Faults outside the per-sequence try -- a malformed sequence
+            # dict, say -- are programming errors, where the traceback matters
+            # most.
+            _logger.error("Run failed: %s", e, exc_info=True)
             self._call_callback('on_error', str(e))
         finally:
+            _logger.info("Run finished.")
             self._call_callback('on_finished')
 
 class AbortRequested(Exception):

@@ -1,7 +1,10 @@
+import logging
 from time import sleep
 from .experiment_worker import AbortRequested, OperationError
 from .flow_monitor import DrawGuard, FlowFault
 from . import sequence_utils
+
+_logger = logging.getLogger(__name__)
 
 
 class MERFISHOperations():
@@ -12,11 +15,11 @@ class MERFISHOperations():
         self.sv = selector_valves
         self.tc = temperature_controller
         self.flow_sensors = flow_sensors or []
-        # Where a draw-protection notice goes. Defaults to stdout, which is all
-        # the CLI needs; the GUI passes something the operator can actually see,
-        # since a `warn`-mode fault deliberately raises nothing and would
-        # otherwise leave no trace on a machine with no console.
-        self.on_warning = on_warning or print
+        # Where a draw-protection notice goes. Defaults to the fluidics
+        # logger's WARNING -- console and the run log -- which is all the CLI
+        # needs; the GUI passes a channel the operator can see live, since a
+        # `warn`-mode fault deliberately raises nothing.
+        self.on_warning = on_warning or _logger.warning
         self.extract_port = self.config.syringe_pump.extract_port
         self.speed_code_limit = self.config.syringe_pump.speed_code_limit
 
@@ -45,7 +48,7 @@ class MERFISHOperations():
             guard.raise_if_faulted()
 
     def process_sequence(self, sequence):
-        print(sequence)
+        _logger.debug("Running: %s", sequence)
         seq_type = sequence['type']
 
         if seq_type == "flow_reagent":

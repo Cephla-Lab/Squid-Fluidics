@@ -1,5 +1,8 @@
+import logging
 from ._def import CMD_SET
 from .config import available_port_count
+
+_logger = logging.getLogger(__name__)
 
 
 class SelectorValve():
@@ -14,10 +17,10 @@ class SelectorValve():
         self.number_of_ports = sv.number_of_ports[valve_id]
         self.fc.send_command(CMD_SET.INITIALIZE_ROTARY, valve_id, self.number_of_ports)
         self.open(self.position)
-        print(f"Selector valve id = {valve_id} initialized.")
+        _logger.info("Selector valve id = %s initialized.", valve_id)
 
     def open(self, port):
-        print("open", self.id, port)
+        _logger.debug("Valve %s: open port %s", self.id, port)
         self.fc.send_command(CMD_SET.SET_ROTARY_VALVE, self.id, port)
         self.fc.wait_for_completion()
         current_position = self.get_current_position()
