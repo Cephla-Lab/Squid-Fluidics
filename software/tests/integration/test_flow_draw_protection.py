@@ -12,6 +12,8 @@ thread delivers packets.
 
 import time
 
+import logging
+
 import pytest
 
 from fluidics.experiment_worker import OperationError
@@ -239,7 +241,6 @@ class TestWarningsAreReportable:
             self, flow_cell_hardware):
         """The CLI relies on this: warn notices reach the console and the
         run log with no channel injected."""
-        from fluidics import merfish_operations
         config, sp, sv = flow_cell_hardware
         assert (MERFISHOperations(config, sp, sv).on_warning
-                == merfish_operations._logger.warning)
+                == logging.getLogger("fluidics.merfish_operations").warning)

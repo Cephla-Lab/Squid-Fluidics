@@ -92,9 +92,10 @@ def start_log_file(directory=None):
     handler.setLevel(logging.DEBUG)
     handler.setFormatter(logging.Formatter(_FILE_FORMAT, datefmt=_FILE_DATEFMT))
     handler.addFilter(_thread_id_filter)
-    logging.getLogger(LOGGER_NAME).addHandler(handler)
+    logger = logging.getLogger(LOGGER_NAME)
+    logger.addHandler(handler)
     _file_handler = handler
-    logging.getLogger(LOGGER_NAME).info("Run log: %s", path)
+    logger.info("Run log: %s", path)
     return path
 
 
@@ -115,6 +116,13 @@ def setup_uncaught_exception_logging():
     log saying why. Covers the three escape paths (sys.excepthook,
     threading.excepthook, sys.unraisablehook), same as the Squid software.
     Idempotent -- a second call must not chain the hooks twice.
+
+    Note for the GUI: PyQt5 aborts the process on a slot exception only
+    while sys.excepthook is the interpreter default. With any hook
+    installed -- this one, or Ubuntu's apport hook that is already there --
+    the event loop survives the exception and carries on. That is the
+    Squid software's behavior too; do not "fix" a GUI that keeps running
+    after a slot blew up.
     """
     global _hooks_installed
     if _hooks_installed:

@@ -63,7 +63,7 @@ def test_each_start_rolls_the_previous_run_aside(tmp_path):
     assert "first run" in (tmp_path / "fluidics.log.1").read_text()
 
 
-def test_console_configuration_is_idempotent(tmp_path):
+def test_console_configuration_is_idempotent():
     run_log.configure_console()
     handler = run_log._console_handler
     run_log.configure_console()

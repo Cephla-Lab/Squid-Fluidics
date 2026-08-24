@@ -1,3 +1,5 @@
+import logging
+
 from cobs import cobs
 import serial
 from ._def import *
@@ -8,7 +10,6 @@ from pathlib import Path
 import numpy as np
 import threading
 from time import time, sleep
-import logging
 
 SERIAL_NUMBER_DEBUGGING = '11972480'
 
@@ -16,6 +17,8 @@ SERIAL_NUMBER_DEBUGGING = '11972480'
 # transmits every 60 ms, so anything well under that adds no meaningful latency
 # while keeping idle wakeups down.
 READER_IDLE_SLEEP_S = 0.005
+
+_logger = logging.getLogger(__name__)
 
 
 def to_int16(raw):
@@ -33,7 +36,7 @@ def raw_to_psi(raw_pressure):
     '''Convert a raw SSCX pressure count to psi.'''
     return (raw_pressure - MCU_CONSTANTS._output_min) * (MCU_CONSTANTS._p_max - MCU_CONSTANTS._p_min) / (MCU_CONSTANTS._output_max - MCU_CONSTANTS._output_min) + MCU_CONSTANTS._p_min
 
-_logger = logging.getLogger(__name__)
+
 def split_byte(byte_in):
     '''
     Split single byte int two nibbles

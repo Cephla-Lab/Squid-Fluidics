@@ -85,9 +85,9 @@ class TestFailurePath:
         assert len(ops.processed) == 2
         errors = [e[1] for e in events if e[0] == "error"]
         assert len(errors) == 1
-        # Numbered the way the progress narrative numbers them: the second
-        # sequence is "sequence 2/3", and the label is named.
-        assert "sequence 2/3" in errors[0]
+        # Tagged the way the progress narrative tags them: the second
+        # sequence is "Sequence 2/3", and the label is named.
+        assert "Sequence 2/3" in errors[0]
         assert "flow_reagent" in errors[0]
         assert "pump went away" in errors[0]
         # A failed run still announces it is over -- the GUI re-enables its
@@ -132,7 +132,7 @@ class TestEstimate:
 class TestRunNarrative:
     """The worker logs its own run -- one source feeding the console, the run
     log, and any UI -- so the record exists even when nothing is watching.
-    The CLI relies on this entirely: it passes no callbacks."""
+    The CLI renders nothing itself: its console output is these lines."""
 
     def test_a_run_narrates_start_completion_and_finish(self, caplog):
         with caplog.at_level("INFO", logger="fluidics.experiment_worker"):

@@ -43,6 +43,7 @@ def main():
     devices = None
     worker = None
     thread = None
+    run_errors = []
     close_errors = []
 
     try:
@@ -60,7 +61,6 @@ def main():
         # The worker narrates its own run through the fluidics logger, so
         # the CLI needs no rendering callbacks -- but a failed run must not
         # exit 0, and the worker reports failure only through on_error.
-        run_errors = []
         worker = ExperimentWorker(experiment_ops, included, config,
                                   callbacks={"on_error": run_errors.append})
         thread = threading.Thread(target=worker.run)
@@ -85,7 +85,7 @@ def main():
             thread.join()
         sys.exit(130)
     except Exception as e:
-        _logger.error("%s", e, exc_info=True)
+        _logger.exception("%s", e)
         if thread is not None:
             thread.join()
         sys.exit(1)
@@ -96,9 +96,10 @@ def main():
             close_errors = devices.close()
         stop_log_file()
 
-    # Reached only when the run itself succeeded (the error paths above exit
-    # through sys.exit, skipping this). A run whose teardown failed must not
-    # report clean: the syringe may not be parked and a port may still be held.
+    # Reached whenever main's own try completed. The worker never raises out
+    # of run() -- it reports through on_error -- so a failed run lands here
+    # too and must not exit 0; nor may a failed teardown report clean (the
+    # syringe may not be parked, a port may still be held).
     if run_errors:
         sys.exit(1)
     if close_errors:
