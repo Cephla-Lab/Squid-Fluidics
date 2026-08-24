@@ -8,7 +8,10 @@ from fluidics.sequences import (
 from fluidics.control.config import load_config
 from fluidics.devices import build_devices, build_operations
 from fluidics.experiment_worker import ExperimentWorker
-from fluidics.run_log import configure_console, start_log_file, stop_log_file
+from fluidics.run_log import (
+    configure_console, setup_uncaught_exception_logging, start_log_file,
+    stop_log_file,
+)
 
 _logger = logging.getLogger("fluidics.cli")
 
@@ -36,6 +39,7 @@ def parse_args():
 def main():
     args = parse_args()
     configure_console()
+    setup_uncaught_exception_logging()
     start_log_file()
 
     devices = None

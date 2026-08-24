@@ -14,6 +14,7 @@ dependencies = [
     "matplotlib",
     "numpy",
     "pandas",
+    "platformdirs",
     "pydantic>=2,<3",
     "pyserial",
     "pyyaml",

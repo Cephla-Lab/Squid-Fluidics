@@ -7,6 +7,8 @@ break any later caplog-based test (caplog listens on the root logger).
 """
 
 import logging
+import sys
+import threading
 
 import pytest
 
@@ -18,12 +20,17 @@ def pristine_logger():
     logger = logging.getLogger(run_log.LOGGER_NAME)
     saved = (logger.handlers[:], logger.propagate, logger.level)
     saved_console, saved_file = run_log._console_handler, run_log._file_handler
+    saved_hooks = (sys.excepthook, threading.excepthook, sys.unraisablehook,
+                   run_log._hooks_installed)
     run_log._console_handler = None
     run_log._file_handler = None
+    run_log._hooks_installed = False
     yield
     run_log.stop_log_file()
     logger.handlers[:], logger.propagate, logger.level = saved
     run_log._console_handler, run_log._file_handler = saved_console, saved_file
+    (sys.excepthook, threading.excepthook, sys.unraisablehook,
+     run_log._hooks_installed) = saved_hooks
 
 
 def test_records_land_in_the_run_file(tmp_path):
@@ -43,13 +50,17 @@ def test_the_file_carries_debug_detail_the_console_suppresses(tmp_path):
     assert run_log._console_handler.level == logging.INFO
 
 
-def test_each_start_opens_a_fresh_file_and_closes_the_old_one(tmp_path):
-    first = run_log.start_log_file(tmp_path)
-    second = run_log.start_log_file(tmp_path / "second")
-    logging.getLogger("fluidics.x").info("after switch")
+def test_each_start_rolls_the_previous_run_aside(tmp_path):
+    """The Squid convention: one live filename, prior runs pruned to .1..25."""
+    path = run_log.start_log_file(tmp_path)
+    logging.getLogger("fluidics.x").info("first run")
     run_log.stop_log_file()
-    assert "after switch" not in first.read_text()
-    assert "after switch" in second.read_text()
+    path = run_log.start_log_file(tmp_path)
+    logging.getLogger("fluidics.x").info("second run")
+    run_log.stop_log_file()
+    assert "second run" in path.read_text()
+    assert "first run" not in path.read_text()
+    assert "first run" in (tmp_path / "fluidics.log.1").read_text()
 
 
 def test_console_configuration_is_idempotent(tmp_path):
@@ -71,3 +82,34 @@ def test_the_run_file_names_itself_in_its_first_line(tmp_path):
     path = run_log.start_log_file(tmp_path)
     run_log.stop_log_file()
     assert str(path) in path.read_text()
+
+
+def test_the_default_directory_is_the_platform_log_home():
+    """Never cwd-relative: a desktop-launcher GUI and a terminal run must
+    log to the same place."""
+    assert run_log.get_default_log_directory().is_absolute()
+
+
+class TestUncaughtExceptionLogging:
+    def test_a_main_thread_crash_reaches_the_log(self, tmp_path):
+        path = run_log.start_log_file(tmp_path)
+        # Our hook chains to whatever was installed before it -- which under
+        # pytest-qt is a capture hook that would fail this test. Park a no-op
+        # there first; the autouse fixture restores the real hooks after.
+        sys.excepthook = lambda *args: None
+        run_log.setup_uncaught_exception_logging()
+        try:
+            raise ValueError("slot blew up")
+        except ValueError:
+            sys.excepthook(*sys.exc_info())
+        run_log.stop_log_file()
+        content = path.read_text()
+        assert "Uncaught exception" in content
+        assert "slot blew up" in content
+
+    def test_installation_is_idempotent(self):
+        run_log.setup_uncaught_exception_logging()
+        hook = sys.excepthook
+        run_log.setup_uncaught_exception_logging()
+        # A second call must not chain the hooks twice.
+        assert sys.excepthook is hook
