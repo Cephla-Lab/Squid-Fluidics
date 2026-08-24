@@ -71,10 +71,10 @@ class ExperimentWorker:
         current_sequence = 0
         try:
             for index, seq in enumerate(self.sequences):
+                label = seq.get('name') or seq['type']
                 for r in range(seq.get('repeat', 1)):
                     try:
                         current_sequence += 1
-                        label = seq.get('name') or seq['type']
                         _logger.info("Sequence %d/%d (%s): started",
                                      current_sequence, self.n_sequences, label)
                         self._call_callback('update_progress', index, current_sequence, "Started")
@@ -98,10 +98,15 @@ class ExperimentWorker:
                         self._call_callback('on_error', "Operation aborted by user")
                         return
                     except Exception as e:
-                        _logger.error("Error processing sequence %d (repeat %d): %s",
-                                      index, r + 1, e)
-                        self._call_callback('on_error',
-                            f"Error processing sequence {index} (repeat {r + 1}): {str(e)}")
+                        # Numbered the way the narrative above numbers them --
+                        # this used to say the 0-based list index, so a
+                        # first-sequence failure read "sequence 0" right after
+                        # "Sequence 1/N: started".
+                        message = (f"Error in sequence {current_sequence}/"
+                                   f"{self.n_sequences} ({label}), "
+                                   f"repeat {r + 1}: {e}")
+                        _logger.error("%s", message, exc_info=True)
+                        self._call_callback('on_error', message)
                         return
 
         except Exception as e:

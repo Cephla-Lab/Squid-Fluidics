@@ -9,8 +9,7 @@ from fluidics.control.config import load_config
 from fluidics.devices import build_devices, build_operations
 from fluidics.experiment_worker import ExperimentWorker
 from fluidics.run_log import (
-    configure_console, setup_uncaught_exception_logging, start_log_file,
-    stop_log_file,
+    setup_uncaught_exception_logging, start_log_file, stop_log_file,
 )
 
 _logger = logging.getLogger("fluidics.cli")
@@ -38,7 +37,6 @@ def parse_args():
 
 def main():
     args = parse_args()
-    configure_console()
     setup_uncaught_exception_logging()
     start_log_file()
 
@@ -59,10 +57,12 @@ def main():
         devices = build_devices(config, args.simulation)
         experiment_ops = build_operations(config, devices)
 
-        # No callbacks: the worker narrates its own run through the fluidics
-        # logger, which is already on the console and in the run log --
-        # callbacks are for a UI that renders, and the CLI has none.
-        worker = ExperimentWorker(experiment_ops, included, config)
+        # The worker narrates its own run through the fluidics logger, so
+        # the CLI needs no rendering callbacks -- but a failed run must not
+        # exit 0, and the worker reports failure only through on_error.
+        run_errors = []
+        worker = ExperimentWorker(experiment_ops, included, config,
+                                  callbacks={"on_error": run_errors.append})
         thread = threading.Thread(target=worker.run)
         thread.start()
 
@@ -85,7 +85,7 @@ def main():
             thread.join()
         sys.exit(130)
     except Exception as e:
-        _logger.error("%s", e)
+        _logger.error("%s", e, exc_info=True)
         if thread is not None:
             thread.join()
         sys.exit(1)
@@ -99,6 +99,8 @@ def main():
     # Reached only when the run itself succeeded (the error paths above exit
     # through sys.exit, skipping this). A run whose teardown failed must not
     # report clean: the syringe may not be parked and a port may still be held.
+    if run_errors:
+        sys.exit(1)
     if close_errors:
         sys.exit(2)
 

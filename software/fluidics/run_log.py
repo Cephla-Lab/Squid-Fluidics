@@ -31,8 +31,10 @@ import platformdirs
 
 LOGGER_NAME = "fluidics"
 
-_FILE_FORMAT = ("%(asctime)s.%(msecs)03d %(levelname)-7s %(thread_id)d "
-                "%(name)s: %(message)s (%(filename)s:%(lineno)d)")
+# Squid's _baseline_log_format, verbatim: a grep habit or parsing script
+# built on one instrument's logs works on the other's.
+_FILE_FORMAT = ("%(asctime)s.%(msecs)03d - %(thread_id)d - %(name)s - "
+                "%(levelname)s - %(message)s (%(filename)s:%(lineno)d)")
 _FILE_DATEFMT = "%Y-%m-%d %H:%M:%S"
 
 _console_handler = None

@@ -13,7 +13,7 @@ def set_temperature(tc, target):
     are within tolerance, abort is requested, or timeout fires.
 
     On timeout, raises OperationError so the experiment worker stops.
-    If `tc` is None, prints a warning and returns.
+    If `tc` is None, logs a warning and returns.
     """
     if tc is None:
         _logger.warning("No temperature controller found. Skipping temperature control sequence.")

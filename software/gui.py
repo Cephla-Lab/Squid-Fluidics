@@ -25,9 +25,7 @@ from fluidics.devices import (
     build_devices, build_operations,
 )
 from fluidics.experiment_worker import ExperimentWorker
-from fluidics.run_log import (
-    configure_console, setup_uncaught_exception_logging, start_log_file,
-)
+from fluidics.run_log import setup_uncaught_exception_logging, start_log_file
 from fluidics.sequences import (
     load_sequences, save_sequences_yaml, get_included_sequences,
     get_fields_for_type, check_ports_against_config,
@@ -1444,7 +1442,6 @@ class FluidicsControlGUI(QMainWindow):
 
 
 if __name__ == '__main__':
-    configure_console()
     setup_uncaught_exception_logging()
     # One file per GUI session: bring-up, manual moves, and every run land in
     # it. Closed by logging's own shutdown at exit.

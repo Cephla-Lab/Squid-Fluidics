@@ -34,12 +34,6 @@ def raw_to_psi(raw_pressure):
     return (raw_pressure - MCU_CONSTANTS._output_min) * (MCU_CONSTANTS._p_max - MCU_CONSTANTS._p_min) / (MCU_CONSTANTS._output_max - MCU_CONSTANTS._output_min) + MCU_CONSTANTS._p_min
 
 _logger = logging.getLogger(__name__)
-
-
-def print_message(msg):
-    '''Log msg at INFO. Name and signature kept from the print era; the
-    timestamp now comes from the handler.'''
-    _logger.info(msg)
 def split_byte(byte_in):
     '''
     Split single byte int two nibbles
@@ -115,7 +109,7 @@ class Subscribers:
             try:
                 callback(*args)
             except Exception as e:
-                print_message(f"{self._label} subscriber failed: {e}")
+                _logger.warning("%s subscriber failed: %s", self._label, e)
 
 
 class PacketSubscribers:
@@ -172,7 +166,7 @@ class Microcontroller():
         self.read_buffer = []
         port = find_serial_port(self.serial_number, "Fluid controller (Teensy)")
         self.serial = serial.Serial(port, 2000000)
-        print_message('Teensy connected')
+        _logger.info('Teensy connected')
         return
     
     def send_mcu_command(self, cmd):
@@ -481,7 +475,7 @@ class FluidController(Microcontroller, PacketSubscribers):
                 # read_received_packet_nowait clears its own buffer on a failed
                 # decode, so the next frame resyncs deterministically.
                 if not self._terminate_reader:
-                    print_message(f"Reader thread error: {e}")
+                    _logger.error("Reader thread error: %s", e)
                 sleep(READER_IDLE_SLEEP_S)
 
     def start_reading(self):

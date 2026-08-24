@@ -25,7 +25,7 @@ class OpenChamberOperations():
         self.chamber_volume_ul = self.config.samples.chamber_volume_ul
 
     def process_sequence(self, sequence):
-        _logger.info("Running: %s", sequence)
+        _logger.debug("Running: %s", sequence)
         seq_type = sequence['type']
 
         if seq_type == "add_reagent":

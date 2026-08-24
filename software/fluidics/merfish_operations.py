@@ -48,7 +48,7 @@ class MERFISHOperations():
             guard.raise_if_faulted()
 
     def process_sequence(self, sequence):
-        _logger.info("Running: %s", sequence)
+        _logger.debug("Running: %s", sequence)
         seq_type = sequence['type']
 
         if seq_type == "flow_reagent":

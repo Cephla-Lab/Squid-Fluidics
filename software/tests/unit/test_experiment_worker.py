@@ -85,9 +85,10 @@ class TestFailurePath:
         assert len(ops.processed) == 2
         errors = [e[1] for e in events if e[0] == "error"]
         assert len(errors) == 1
-        # 0-based today ("sequence 1" is the second sequence); if the redesign
-        # renumbers the operator-facing message, update this deliberately.
-        assert "sequence 1" in errors[0]
+        # Numbered the way the progress narrative numbers them: the second
+        # sequence is "sequence 2/3", and the label is named.
+        assert "sequence 2/3" in errors[0]
+        assert "flow_reagent" in errors[0]
         assert "pump went away" in errors[0]
         # A failed run still announces it is over -- the GUI re-enables its
         # buttons in on_finished.
