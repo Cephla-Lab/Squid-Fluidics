@@ -5,12 +5,6 @@ from fluidics.experiment_worker import OperationError
 from fluidics.merfish_operations import MERFISHOperations
 
 
-@pytest.fixture
-def rig(flow_cell_hardware):
-    config, sp, sv = flow_cell_hardware
-    return MERFISHOperations(config, sp, sv), sp
-
-
 class TestFlowCellVolumes:
     """The chains the pump actually executes, against the fixture config:
     5000 uL syringe starting half full, speed_code_limit 10, extract port 2,
@@ -23,18 +17,18 @@ class TestFlowCellVolumes:
     flow_rate_to_speed_code, whose mapping is tested elsewhere.
     """
 
-    def test_flow_reagent_draws_the_volume_through_the_extract_port(self, rig):
-        ops, sp = rig
+    def test_flow_reagent_draws_the_volume_through_the_extract_port(self, flow_cell_rig):
+        ops, sp = flow_cell_rig
         ops.process_sequence({"type": "flow_reagent", "fluidic_port": 1,
                               "flow_rate": 5000, "volume": 500})
         code = sp.flow_rate_to_speed_code(5000)
         assert sp.executed == [[("extract", 2, 500, code)]]
 
-    def test_flow_reagent_fill_tubing_draws_the_buffer_after_emptying(self, rig):
+    def test_flow_reagent_fill_tubing_draws_the_buffer_after_emptying(self, flow_cell_rig):
         """Port 25 sits on the third valve: 800 common + 340 = 1140 uL of
         tubing. The syringe holds 4500 after the reagent draw, so the fill
         draw must be preceded by a dump (4500 + 1140 > 95% of 5000)."""
-        ops, sp = rig
+        ops, sp = flow_cell_rig
         ops.process_sequence({"type": "flow_reagent", "fluidic_port": 2,
                               "flow_rate": 5000, "volume": 2000,
                               "fill_tubing_with": 25})
@@ -45,8 +39,8 @@ class TestFlowCellVolumes:
             [("extract", 2, 1140, code)],
         ]
 
-    def test_a_draw_that_would_overflow_empties_the_syringe_first(self, rig):
-        ops, sp = rig
+    def test_a_draw_that_would_overflow_empties_the_syringe_first(self, flow_cell_rig):
+        ops, sp = flow_cell_rig
         # 2500 held + 2400 > 4750 (95% of 5000): the dump must come first.
         ops.process_sequence({"type": "flow_reagent", "fluidic_port": 1,
                               "flow_rate": 5000, "volume": 2400})
@@ -56,8 +50,8 @@ class TestFlowCellVolumes:
             [("extract", 2, 2400, code)],
         ]
 
-    def test_priming_pulls_each_ports_tubing_volume(self, rig):
-        ops, sp = rig
+    def test_priming_pulls_each_ports_tubing_volume(self, flow_cell_rig):
+        ops, sp = flow_cell_rig
         ops.process_sequence({"type": "priming", "fluidic_port": 10,
                               "flow_rate": 5000, "volume": 2000})
         code = sp.flow_rate_to_speed_code(5000)
@@ -74,19 +68,19 @@ class TestFlowCellVolumes:
         extracted = sum(op[2] for op in sp.executed_ops if op[0] == "extract")
         assert extracted == 17600 + 2000
 
-    def test_priming_use_ports_restricts_the_loop(self, rig):
-        ops, sp = rig
+    def test_priming_use_ports_restricts_the_loop(self, flow_cell_rig):
+        ops, sp = flow_cell_rig
         ops.process_sequence({"type": "priming", "fluidic_port": 10,
                               "flow_rate": 5000, "volume": 2000,
                               "use_ports": [1, 2]})
         assert len(sp.executed) == 4  # dump, port 1, port 2, final draw
 
-    def test_an_out_of_range_port_fails_before_anything_moves(self, rig):
+    def test_an_out_of_range_port_fails_before_anything_moves(self, flow_cell_rig):
         """The old silent no-op in open_port meant this drew 500 uL through
         whatever port was last open. The pre-run check catches the typo at
         time zero; this pins the backstop for sequences that reach the
         operations anyway."""
-        ops, sp = rig
+        ops, sp = flow_cell_rig
         with pytest.raises(OperationError, match="out of range"):
             ops.process_sequence({"type": "flow_reagent", "fluidic_port": 99,
                                   "flow_rate": 5000, "volume": 500})
@@ -95,8 +89,8 @@ class TestFlowCellVolumes:
 
 class TestProcessSequence:
     @pytest.fixture
-    def ops(self, rig):
-        return rig[0]
+    def ops(self, flow_cell_rig):
+        return flow_cell_rig[0]
 
     def test_flow_reagent(self, ops):
         seq = {"type": "flow_reagent", "fluidic_port": 1, "flow_rate": 5000, "volume": 500}

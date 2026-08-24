@@ -8,6 +8,7 @@ from fluidics.control.selector_valve import SelectorValveSystem
 from fluidics.control.syringe_pump import SyringePumpSimulation
 from fluidics.control.temperature_controller import TCMControllerSimulation
 from fluidics.devices import build_devices
+from fluidics.merfish_operations import MERFISHOperations
 
 
 @pytest.fixture
@@ -68,6 +69,33 @@ def open_chamber_hardware(open_chamber_config):
     dp = DiscPump(fc)
     tc = TCMControllerSimulation(channels=2)
     return open_chamber_config, sp, sv, dp, tc
+
+
+@pytest.fixture
+def flow_cell_rig(flow_cell_hardware):
+    """(MERFISHOperations, syringe_pump) over the flow cell fixture config."""
+    config, sp, sv = flow_cell_hardware
+    return MERFISHOperations(config, sp, sv), sp
+
+
+@pytest.fixture
+def during_move():
+    """Hook a side effect into the pump's wait_for_stop -- inside the move.
+
+    Not around execute(): execute() clears the interrupt on entry, so an abort
+    or a sensor reading delivered before it would have its stop() wiped by the
+    very call it was meant to interrupt.
+    """
+    def _hook(sp, side_effect):
+        original_wait = sp.wait_for_stop
+
+        def wait_for_stop(t=0):
+            side_effect()
+            return original_wait(t)
+
+        sp.wait_for_stop = wait_for_stop
+
+    return _hook
 
 
 @pytest.fixture

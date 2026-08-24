@@ -360,10 +360,8 @@ class TestFlowRecordingRows:
 
 
 class TestAbortOrder:
-    """abortSequences must stop the worker before the devices. The other way
-    round, the device latches make each operation return early while the
-    worker's own event is still clear, so it advances through the remaining
-    sequences reporting every one as completed. Called unbound against a stub."""
+    """Worker before devices -- abortSequences says why. Called unbound
+    against a stub."""
 
     def test_the_worker_is_aborted_before_the_devices(self):
         order = []
