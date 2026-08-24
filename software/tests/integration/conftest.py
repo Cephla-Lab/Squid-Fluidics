@@ -9,6 +9,7 @@ from fluidics.control.syringe_pump import SyringePumpSimulation
 from fluidics.control.temperature_controller import TCMControllerSimulation
 from fluidics.devices import build_devices
 from fluidics.merfish_operations import MERFISHOperations
+from fluidics.open_chamber_operations import OpenChamberOperations
 
 
 @pytest.fixture
@@ -76,6 +77,13 @@ def flow_cell_rig(flow_cell_hardware):
     """(MERFISHOperations, syringe_pump) over the flow cell fixture config."""
     config, sp, sv = flow_cell_hardware
     return MERFISHOperations(config, sp, sv), sp
+
+
+@pytest.fixture
+def open_chamber_rig(open_chamber_hardware):
+    """(OpenChamberOperations, syringe_pump) over the open chamber fixture config."""
+    config, sp, sv, dp, tc = open_chamber_hardware
+    return OpenChamberOperations(config, sp, sv, dp, tc), sp
 
 
 @pytest.fixture
