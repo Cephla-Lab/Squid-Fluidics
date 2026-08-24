@@ -151,3 +151,48 @@ class TestProcessSequence:
         seq = {"type": "nonexistent"}
         with pytest.raises(ValueError, match="Unknown sequence type"):
             oc_ops.process_sequence(seq)
+
+
+class TestDrainPumpAndCleanUpGuards:
+    """Two of the abort design's live bugs, pinned as fixed."""
+
+    def test_a_failing_wash_dispense_still_stops_the_drain_pump(self, rig):
+        """The drain pump runs across the whole dispense; before this, an
+        exception from execute() left it aspirating with nobody to stop it."""
+        ops, sp = rig
+        stops = []
+        ops.dp.stop = lambda: stops.append(True)
+        calls = {"n": 0}
+        original = sp.execute
+
+        def fail_on_the_dispense(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 3:      # dump, draw, then the dispense under drain
+                raise RuntimeError("pump went away")
+            return original(*args, **kwargs)
+
+        sp.execute = fail_on_the_dispense
+        with pytest.raises(Exception, match="pump went away"):
+            ops.process_sequence({"type": "wash_constant_flow", "fluidic_port": 6,
+                                  "flow_rate": 1000, "volume": 1000})
+        assert stops == [True]
+
+    def test_an_aborted_clean_up_skips_the_final_aspiration(self, rig):
+        """Every sibling disc-pump call had an abort guard; the 20 s clean-up
+        aspiration did not, so a cancel ran it in full."""
+        ops, sp = rig
+        aspirations = []
+        ops.dp.aspirate = lambda seconds: aspirations.append(seconds)
+        original = sp.execute
+
+        def abort_after_the_final_chain(*args, **kwargs):
+            original(*args, **kwargs)
+            # Only the last chain dispenses to the chamber; an earlier abort
+            # would return through one of the guards that already existed.
+            if any(op[0] == "dispense" for op in sp.executed[-1]):
+                sp.abort()
+
+        sp.execute = abort_after_the_final_chain
+        ops.process_sequence({"type": "clean_up", "fluidic_port": 10,
+                              "flow_rate": 1000, "volume": 1000})
+        assert aspirations == []

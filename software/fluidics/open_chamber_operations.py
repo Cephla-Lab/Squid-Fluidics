@@ -214,12 +214,15 @@ class OpenChamberOperations():
                 self.sv.open_port(fill_tubing_with_port)
             self.sp.extract(self.extract_port, self.tubing_sv_to_sp, self.speed_code_limit)
             self.sp.dispense(self.dispense_port, volume, speed_code)
-            # Push reagent to open chamber
+            # Push reagent to open chamber. The drain pump runs across the
+            # whole dispense; a failing execute must not leave it running.
             if self.sp.is_aborted:
                 return
             self.dp.start(0.3)
-            self.sp.execute()
-            self.dp.stop()
+            try:
+                self.sp.execute()
+            finally:
+                self.dp.stop()
             if fill_tubing_with_port:
                 # Wash with additional amount of buffer in tubing sp_to_oc and fill with next reagent
                 self.sp.extract(self.extract_port, self.tubing_sp_to_oc, self.speed_code_limit)
@@ -227,8 +230,10 @@ class OpenChamberOperations():
                 if self.sp.is_aborted:
                     return
                 self.dp.start(0.3)
-                self.sp.execute()
-                self.dp.stop()
+                try:
+                    self.sp.execute()
+                finally:
+                    self.dp.stop()
             sleep(1)
         except Exception as e:
             raise OperationError(f"Error in wash_with_constant_flow from port: {port}: {str(e)}")
@@ -271,6 +276,8 @@ class OpenChamberOperations():
             if self.sp.is_aborted:
                 return
             self.sp.execute()
+            if self.sp.is_aborted:
+                return
             if clean_up:
                 self.dp.aspirate(20)
         except Exception as e:
