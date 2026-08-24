@@ -1157,9 +1157,8 @@ class TemperatureControlWidget(SensorTabWidget):
             layout.addWidget(cw)
 
         self.readings_signal.connect(self._fanout)
-        # Just another subscriber: the driver owns its polling thread, and
-        # the GUI starts it because the plots are what consume the readings
-        # -- a headless run reads temperatures synchronously and never does.
+        # Just another subscriber; the GUI starts the publisher because its
+        # plots are what consume it (see TCMController.start).
         self.controller.subscribe(self._on_callback)
         self.controller.start()
 

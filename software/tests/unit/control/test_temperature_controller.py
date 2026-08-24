@@ -97,14 +97,12 @@ class TestTCMControllerSimulation:
         assert tc.is_aborted is False
 
 
-# --- The readings channel (added with the driver-owned publishing rework) ---
+# --- The readings channel ---
 #
-# Before this, the driver exposed a single mutable callback slot that the GUI
-# assigned, and the GUI started the driver's private polling thread itself --
-# a headless script wanting readings had to imitate the GUI. These pin the
-# flow-sensor contract on both classes. _publish() is driven directly so
-# nothing here starts the polling thread; the one lifecycle test that does
-# closes it again.
+# The flow-sensor contract, pinned on both classes (why it exists: the
+# start() docstring in the driver). _publish() is driven directly so nothing
+# here starts the polling thread; the one lifecycle test that does closes it
+# again.
 
 from fluidics.control.controller import Subscribers
 from fluidics.control.temperature_controller import TCMController

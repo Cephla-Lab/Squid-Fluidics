@@ -34,6 +34,7 @@ class TCMController:
 
         self._subscribers = Subscribers("Temperature controller")
         self._terminate_polling = False
+        self._polling_started = False
         self._polling_thread = threading.Thread(
             target=self._update_loop, daemon=True
         )
@@ -110,14 +111,8 @@ class TCMController:
     # --- background polling and publishing ---
 
     def subscribe(self, callback):
-        """Register callback(temps: list[float], one per channel).
-
-        The driver owns its polling thread and publishes to any number of
-        subscribers -- the flow-sensor contract. Before this, a single
-        mutable callback slot was assigned by the GUI, which also started
-        the driver's private thread itself; a headless script wanting
-        readings had to imitate the GUI.
-        """
+        """Register callback(temps: list[float], one per channel) -- the
+        flow-sensor contract; see start() for who runs the publisher."""
         self._subscribers.subscribe(callback)
 
     def unsubscribe(self, callback):
@@ -129,20 +124,31 @@ class TCMController:
         Consumer-driven, not part of bring-up: the run path reads
         temperatures synchronously (sequence_utils.set_temperature), so a
         headless run never pays the polling serial traffic. The GUI starts
-        it for its plots. Safe to call more than once; not restartable
-        after close().
+        it for its plots -- the driver still owns the thread; before this
+        the GUI assigned a single callback slot and started the driver's
+        private thread itself. Safe to call more than once; not restartable
+        after close(). The guard is a flag, not is_alive(): under the test
+        suite's patched Event.wait, Thread.start() can return before the
+        bootstrap marks the thread alive, and a second start() would
+        double-start the same Thread object.
         """
-        if not self._polling_thread.is_alive():
-            self._polling_thread.start()
+        if self._polling_started:
+            return
+        self._polling_started = True
+        self._polling_thread.start()
 
     def _update_loop(self):
         while not self._terminate_polling:
             time.sleep(1)
             for c in range(1, self.channels + 1):
+                # During a set_temperature stabilization the run path polls
+                # the same reads synchronously; both interleave safely on
+                # _serial_lock, at the cost of doubled wire traffic.
                 self.actual_temperatures[c - 1] = self.get_actual_temperature(c)
             self._publish()
 
     def _publish(self):
+        # Also the seam tests drive, so nothing there needs the thread.
         self._subscribers.notify(list(self.actual_temperatures))
 
     # --- lifecycle ---
@@ -183,6 +189,7 @@ class TCMControllerSimulation:
 
         self._subscribers = Subscribers("Temperature controller")
         self._terminate_polling = False
+        self._polling_started = False
         self._polling_thread = threading.Thread(
             target=self._update_loop, daemon=True
         )
@@ -231,8 +238,10 @@ class TCMControllerSimulation:
         self._subscribers.unsubscribe(callback)
 
     def start(self):
-        if not self._polling_thread.is_alive():
-            self._polling_thread.start()
+        if self._polling_started:
+            return
+        self._polling_started = True
+        self._polling_thread.start()
 
     def _update_loop(self):
         while not self._terminate_polling:
@@ -240,6 +249,7 @@ class TCMControllerSimulation:
             self._publish()
 
     def _publish(self):
+        # Also the seam tests drive, so nothing there needs the thread.
         self._subscribers.notify(list(self.actual_temperatures))
 
     def close(self):

@@ -20,20 +20,11 @@ from datetime import datetime
 
 import pytest
 
-# Qt's offscreen platform is forced in tests/conftest.py, which pytest imports
-# before this module.
-from PyQt5.QtWidgets import QApplication
-
+# Qt's offscreen platform and the shared qapp fixture live in tests/conftest.
 import gui
 from fluidics.control.flow_sensor import FlowSensorSimulation
 
 from .test_gui_helpers import RecordingWriter, make_flow_fault
-
-
-@pytest.fixture(scope="module")
-def qapp():
-    # One per process; later widget tests must reuse it.
-    yield QApplication.instance() or QApplication([])
 
 
 def test_a_fault_published_on_the_sensor_lands_in_the_recording(qapp):
