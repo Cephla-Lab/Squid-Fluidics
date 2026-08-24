@@ -95,3 +95,77 @@ class TestTCMControllerSimulation:
         assert tc.is_aborted is True
         tc.reset_abort()
         assert tc.is_aborted is False
+
+
+# --- The readings channel ---
+#
+# The flow-sensor contract, pinned on both classes (why it exists: the
+# start() docstring in the driver). _publish() is driven directly so nothing
+# here starts the polling thread; the one lifecycle test that does closes it
+# again.
+
+from fluidics.control.controller import Subscribers
+from fluidics.control.temperature_controller import TCMController
+
+
+class TestReadingsChannel:
+    def test_subscriber_receives_each_publish(self):
+        tc = TCMControllerSimulation(channels=2)
+        seen = []
+        tc.subscribe(seen.append)
+        tc.actual_temperatures = [21.0, 37.0]
+        tc._publish()
+        assert seen == [[21.0, 37.0]]
+
+    def test_the_payload_is_a_copy_not_the_live_list(self):
+        tc = TCMControllerSimulation(channels=2)
+        seen = []
+        tc.subscribe(seen.append)
+        tc._publish()
+        tc.actual_temperatures[0] = 99.0
+        assert seen[0][0] != 99.0
+
+    def test_unsubscribed_callback_is_not_called(self):
+        tc = TCMControllerSimulation(channels=2)
+        seen = []
+        callback = seen.append   # held once: unsubscribe matches by identity
+        tc.subscribe(callback)
+        tc.unsubscribe(callback)
+        tc._publish()
+        assert seen == []
+
+    def test_a_failing_subscriber_does_not_break_others(self):
+        tc = TCMControllerSimulation(channels=2)
+        seen = []
+        tc.subscribe(lambda temps: (_ for _ in ()).throw(RuntimeError("bad")))
+        tc.subscribe(seen.append)
+        tc._publish()
+        assert len(seen) == 1
+
+    def test_close_drops_subscribers(self):
+        tc = TCMControllerSimulation(channels=2)
+        seen = []
+        tc.subscribe(seen.append)
+        tc.close()
+        tc._publish()
+        assert seen == []
+
+    def test_the_real_class_publishes_the_same_way(self):
+        """The channel lives identically on both classes; the real one is
+        built here without hardware, the interrupt-test way."""
+        tcm = TCMController.__new__(TCMController)
+        tcm._subscribers = Subscribers("Temperature controller")
+        tcm.actual_temperatures = [42.0]
+        seen = []
+        tcm.subscribe(seen.append)
+        tcm._publish()
+        assert seen == [[42.0]]
+
+
+class TestStart:
+    def test_start_is_idempotent_and_close_joins(self):
+        tc = TCMControllerSimulation(channels=1)
+        tc.start()
+        tc.start()   # a second call must not raise on the running thread
+        tc.close()
+        assert not tc._polling_thread.is_alive()

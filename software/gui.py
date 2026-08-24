@@ -1157,8 +1157,10 @@ class TemperatureControlWidget(SensorTabWidget):
             layout.addWidget(cw)
 
         self.readings_signal.connect(self._fanout)
-        self.controller.temperature_updating_callback = self._on_callback
-        self.controller.actual_temp_updating_thread.start()
+        # Just another subscriber; the GUI starts the publisher because its
+        # plots are what consume it (see TCMController.start).
+        self.controller.subscribe(self._on_callback)
+        self.controller.start()
 
     def _on_callback(self, temps):
         # Runs in the controller's polling thread; marshal to the GUI thread.
