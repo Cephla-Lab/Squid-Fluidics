@@ -14,7 +14,7 @@ failures that are survivable by design (no temperature controller, no flow
 sensors); anything else raises.
 """
 
-import sys
+import logging
 
 from .control._def import CMD_SET
 from .control.controller import FluidController, FluidControllerSimulation
@@ -34,11 +34,13 @@ ISSUE_TEMPERATURE_CONTROLLER = "temperature_controller"
 ISSUE_FLOW_SENSORS = "flow_sensors"
 
 
+_logger = logging.getLogger(__name__)
+
+
 def _print_issue(kind, message):
-    # stderr, not stdout: an unattended CLI run's stdout may be piped or
-    # discarded, and a degraded bring-up is exactly the notice that must
-    # survive that.
-    print(message, file=sys.stderr)
+    # WARNING: reaches the console (stderr) and the run log -- a degraded
+    # bring-up is exactly the notice that must survive an unattended run.
+    _logger.warning(message)
 
 
 def _run_shielded(steps):
@@ -56,7 +58,7 @@ def _run_shielded(steps):
             step()
         except Exception as e:
             errors.append(e)
-            print(f"Error while closing devices: {e}", file=sys.stderr)
+            _logger.error("Error while closing devices: %s", e)
     return errors
 
 

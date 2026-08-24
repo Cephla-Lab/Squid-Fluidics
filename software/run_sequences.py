@@ -1,4 +1,5 @@
 import argparse
+import logging
 import sys
 import threading
 from fluidics.sequences import (
@@ -7,6 +8,9 @@ from fluidics.sequences import (
 from fluidics.control.config import load_config
 from fluidics.devices import build_devices, build_operations
 from fluidics.experiment_worker import ExperimentWorker
+from fluidics.run_log import configure_console, start_log_file, stop_log_file
+
+_logger = logging.getLogger("fluidics.cli")
 
 
 def parse_args():
@@ -29,20 +33,10 @@ def parse_args():
     )
     return parser.parse_args()
 
-def update_progress(index, sequence_num, status):
-    print(f"Sequence {index} ({sequence_num}): {status}")
-
-def on_error(error_msg):
-    print(f"Error: {error_msg}")
-
-def on_finished():
-    print("Experiment completed")
-
-def on_estimate(time_to_finish, n_sequences):
-    print(f"Estimated time: {time_to_finish}s, Sequences: {n_sequences}")
-
 def main():
     args = parse_args()
+    configure_console()
+    start_log_file()
 
     devices = None
     worker = None
@@ -61,14 +55,10 @@ def main():
         devices = build_devices(config, args.simulation)
         experiment_ops = build_operations(config, devices)
 
-        callbacks = {
-            'update_progress': update_progress,
-            'on_error': on_error,
-            'on_finished': on_finished,
-            'on_estimate': on_estimate
-        }
-
-        worker = ExperimentWorker(experiment_ops, included, config, callbacks)
+        # No callbacks: the worker narrates its own run through the fluidics
+        # logger, which is already on the console and in the run log --
+        # callbacks are for a UI that renders, and the CLI has none.
+        worker = ExperimentWorker(experiment_ops, included, config)
         thread = threading.Thread(target=worker.run)
         thread.start()
 
@@ -82,8 +72,7 @@ def main():
         # the worker out of any wait (incubation, wait_for_stop), the join
         # lets it unwind through its own error path, and only then does the
         # finally block touch the hardware, single-threaded.
-        print("Interrupted; stopping the run before closing devices...",
-              file=sys.stderr)
+        _logger.warning("Interrupted; stopping the run before closing devices...")
         if worker is not None:
             worker.abort()
         if devices is not None:
@@ -92,7 +81,7 @@ def main():
             thread.join()
         sys.exit(130)
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
+        _logger.error("%s", e)
         if thread is not None:
             thread.join()
         sys.exit(1)
@@ -101,6 +90,7 @@ def main():
         # controller stops the reader thread that owns the MCU port.
         if devices is not None:
             close_errors = devices.close()
+        stop_log_file()
 
     # Reached only when the run itself succeeded (the error paths above exit
     # through sys.exit, skipping this). A run whose teardown failed must not

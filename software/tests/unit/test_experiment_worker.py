@@ -126,3 +126,27 @@ class TestEstimate:
         seconds, n = events[0]
         assert n == 3
         assert seconds > 0
+
+
+class TestRunNarrative:
+    """The worker logs its own run -- one source feeding the console, the run
+    log, and any UI -- so the record exists even when nothing is watching.
+    The CLI relies on this entirely: it passes no callbacks."""
+
+    def test_a_run_narrates_start_completion_and_finish(self, caplog):
+        with caplog.at_level("INFO", logger="fluidics.experiment_worker"):
+            run_worker([dict(FLOW, name="wash")])
+        text = caplog.text
+        assert "Run of 1 sequence(s)" in text
+        assert "Sequence 1/1 (wash): started" in text
+        assert "Sequence 1/1 (wash): completed" in text
+        assert "Run finished." in text
+
+    def test_a_failure_is_logged_as_an_error(self, caplog):
+        ops = RecordingOps(raise_on={0: ValueError("pump went away")})
+        with caplog.at_level("INFO", logger="fluidics.experiment_worker"):
+            run_worker([dict(FLOW)], ops=ops)
+        errors = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert len(errors) == 1
+        assert "pump went away" in errors[0].getMessage()
+        assert "Run finished." in caplog.text

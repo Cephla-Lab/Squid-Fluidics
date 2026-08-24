@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import threading
 from time import time, sleep
+import logging
 
 SERIAL_NUMBER_DEBUGGING = '11972480'
 
@@ -32,12 +33,13 @@ def raw_to_psi(raw_pressure):
     '''Convert a raw SSCX pressure count to psi.'''
     return (raw_pressure - MCU_CONSTANTS._output_min) * (MCU_CONSTANTS._p_max - MCU_CONSTANTS._p_min) / (MCU_CONSTANTS._output_max - MCU_CONSTANTS._output_min) + MCU_CONSTANTS._p_min
 
+_logger = logging.getLogger(__name__)
+
+
 def print_message(msg):
-    '''
-    Print message with timestamp prepended
-    '''
-    print(datetime.now().strftime('%m/%d %H:%M:%S') + ' : '  + msg )
-    return
+    '''Log msg at INFO. Name and signature kept from the print era; the
+    timestamp now comes from the handler.'''
+    _logger.info(msg)
 def split_byte(byte_in):
     '''
     Split single byte int two nibbles
@@ -523,7 +525,7 @@ class FluidController(Microcontroller, PacketSubscribers):
                 self.counter_measurement_file_flush = 0
                 self.measurement_file.flush()
         if self.debug:
-            print(line)
+            _logger.debug(line.rstrip())
 
     def _peek_status(self):
         '''Non-blocking: return (parsed packet copy, publish sequence number),
@@ -976,7 +978,7 @@ class FluidControllerSimulation(PacketSubscribers):
         return
 
     def begin(self):
-        print("Simulated fluid controller.")
+        _logger.info("Simulated fluid controller.")
 
     def start_reading(self):
         pass

@@ -4,12 +4,15 @@ The firmware streams the reading in every status packet, so this class does
 not poll: it subscribes to the controller's packet callback and republishes
 scaled values to its own subscribers.
 """
+import logging
 
 import threading
 import time
 
 from ._def import CMD_SET, COMMAND_STATUS, MCU_CONSTANTS
 from .controller import Subscribers
+
+_logger = logging.getLogger(__name__)
 
 # Counts per (uL/min) for the installed part. The firmware sends the sensor's
 # raw int16 untouched, so this is the only place the wire value becomes a flow.
@@ -103,7 +106,7 @@ class FlowSensor:
         except Exception:
             self.close()
             raise
-        print(f"Flow sensor '{self.name}' initialized on I2C index {self.index}.")
+        _logger.info("Flow sensor %r initialized on I2C index %s.", self.name, self.index)
 
     def start(self):
         """Begin publishing. Nothing to do: the controller's reader thread
@@ -187,7 +190,7 @@ class FlowSensorSimulation:
         self.terminate_reading_thread = False
         self.reading_thread = threading.Thread(target=self._reading_loop, daemon=True)
 
-        print(f"Simulated flow sensor '{name}' on I2C index {index}.")
+        _logger.info("Simulated flow sensor %r on I2C index %s.", name, index)
 
     def begin(self):
         pass

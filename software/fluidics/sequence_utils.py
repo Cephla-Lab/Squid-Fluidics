@@ -1,8 +1,11 @@
 """Shared sequence helpers used by both flow cell and open chamber operations."""
+import logging
 
 from time import sleep, time
 
 from .experiment_worker import OperationError
+
+_logger = logging.getLogger(__name__)
 
 
 def set_temperature(tc, target):
@@ -13,7 +16,7 @@ def set_temperature(tc, target):
     If `tc` is None, prints a warning and returns.
     """
     if tc is None:
-        print("No temperature controller found. Skipping temperature control sequence.")
+        _logger.warning("No temperature controller found. Skipping temperature control sequence.")
         return
 
     for channel in range(1, tc.channels + 1):

@@ -235,7 +235,11 @@ class TestWarningsAreReportable:
             ops.process_sequence(SEQ)
         assert any("Stopping draw" in line for line in lines)
 
-    def test_it_defaults_to_stdout_when_nothing_is_injected(self, flow_cell_hardware):
-        """The CLI relies on this."""
+    def test_it_defaults_to_the_fluidics_logger_when_nothing_is_injected(
+            self, flow_cell_hardware):
+        """The CLI relies on this: warn notices reach the console and the
+        run log with no channel injected."""
+        from fluidics import merfish_operations
         config, sp, sv = flow_cell_hardware
-        assert MERFISHOperations(config, sp, sv).on_warning is print
+        assert (MERFISHOperations(config, sp, sv).on_warning
+                == merfish_operations._logger.warning)

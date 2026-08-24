@@ -23,10 +23,10 @@ class _StuckController:
 
 
 class TestSetTemperature:
-    def test_none_controller_returns_silently(self, capsys):
-        set_temperature(None, 37.0)  # should not raise
-        out = capsys.readouterr().out
-        assert "No temperature controller" in out
+    def test_none_controller_warns_and_returns(self, caplog):
+        with caplog.at_level("WARNING", logger="fluidics.sequence_utils"):
+            set_temperature(None, 37.0)  # should not raise
+        assert "No temperature controller" in caplog.text
 
     def test_one_channel_converges_immediately(self):
         tc = TCMControllerSimulation(sn=None, channels=1)

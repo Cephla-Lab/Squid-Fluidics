@@ -1,7 +1,10 @@
+import logging
 import fluidics.control.tecancavro as tecancavro
 import threading
 
 from .discovery import find_serial_port
+
+_logger = logging.getLogger(__name__)
 
 
 class Interruptible:
@@ -172,7 +175,7 @@ class SyringePump(SpeedCodes, Interruptible):
         # reported as a driver bug.
         self.port = find_serial_port(sn, "Syringe pump")
         self.com_link = tecancavro.TecanAPISerial(tecan_addr=0, ser_port=self.port, ser_baud=9600)
-        print("Syringe pump found.")
+        _logger.info("Syringe pump found on %s.", self.port)
         self.syringe = tecancavro.models.XCaliburD(com_link=self.com_link,
                             num_ports=num_ports,
                             syringe_ul=syringe_ul,
@@ -201,7 +204,7 @@ class SyringePump(SpeedCodes, Interruptible):
         self.get_plunger_position()
         self._init_interrupt()
 
-        print("Syringe pump initialized.")
+        _logger.info("Syringe pump initialized.")
 
     def get_plunger_position(self):
         with self._serial_lock:
@@ -329,7 +332,7 @@ class SyringePumpSimulation(SpeedCodes, Interruptible):
         self.executed = []
         self._init_interrupt()
         self.get_plunger_position()
-        print("Simulated syringe pump.")
+        _logger.info("Simulated syringe pump.")
 
     @property
     def executed_ops(self):

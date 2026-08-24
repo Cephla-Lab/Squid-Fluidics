@@ -1,3 +1,4 @@
+import logging
 import threading
 import time
 
@@ -5,6 +6,8 @@ import serial
 
 from .controller import Subscribers
 from .discovery import find_serial_port
+
+_logger = logging.getLogger(__name__)
 
 
 class TCMController:
@@ -41,10 +44,8 @@ class TCMController:
 
         self.is_aborted = False
 
-        print(
-            f"Temperature controller initialized: serial_number={sn}, "
-            f"channels={channels}, port={port}"
-        )
+        _logger.info("Temperature controller initialized: serial_number=%s, "
+                     "channels=%s, port=%s", sn, channels, port)
 
     # --- channel addressing helpers ---
 
@@ -89,7 +90,7 @@ class TCMController:
 
     def save_target_temperature(self, channel):
         response = self.send_command("TCADJTEMP!", self._module(channel))
-        print("Save target temperature: ", response)
+        _logger.info("Save target temperature: %s", response)
 
     def get_output_enabled(self, channel):
         enabled = self._read_output_enabled(channel)
@@ -196,7 +197,7 @@ class TCMControllerSimulation:
 
         self.is_aborted = False
 
-        print(f"Temperature controller (simulation) initialized: channels={channels}")
+        _logger.info("Temperature controller (simulation) initialized: channels=%s", channels)
 
     def _check_channel(self, channel):
         if not (1 <= channel <= self.channels):

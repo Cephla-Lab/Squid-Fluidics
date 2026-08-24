@@ -20,3 +20,7 @@ software/sample_sequences/temperature-test.yaml
 
 # Design docs and plans live in the AI-docs repo, not here.
 docs/superpowers/
+
+# Per-run log files (fluidics/run_log.py); the record stays on the machine
+# that produced it.
+software/logs/

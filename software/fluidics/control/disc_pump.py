@@ -1,5 +1,8 @@
+import logging
 from ._def import CMD_SET, MCU_CONSTANTS
 import threading
+
+_logger = logging.getLogger(__name__)
 
 class DiscPump():
     def __init__(self, fluid_controller):
@@ -8,7 +11,7 @@ class DiscPump():
         self._abort_event = threading.Event()
         self._abort_event.clear()
         self.fc.send_command(CMD_SET.INITIALIZE_DISC_PUMP, MCU_CONSTANTS.TTP_MAX_PW)
-        print('Disc pump initialized.')
+        _logger.info("Disc pump initialized.")
 
     def abort(self):
         if self._is_started:

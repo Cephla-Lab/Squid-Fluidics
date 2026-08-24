@@ -1,10 +1,11 @@
+import argparse
+import csv
+import logging
 import os
 import re
 import sys
-import csv
-import time
 import threading
-import argparse
+import time
 from datetime import datetime
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QTreeWidget, QTreeWidgetItem,
@@ -24,6 +25,7 @@ from fluidics.devices import (
     build_devices, build_operations,
 )
 from fluidics.experiment_worker import ExperimentWorker
+from fluidics.run_log import configure_console, start_log_file
 from fluidics.sequences import (
     load_sequences, save_sequences_yaml, get_included_sequences,
     get_fields_for_type, check_ports_against_config,
@@ -37,6 +39,8 @@ from matplotlib.figure import Figure
 from matplotlib.ticker import FuncFormatter
 import warnings
 warnings.filterwarnings('ignore')
+
+_logger = logging.getLogger("fluidics.gui")
 
 def load_config_file(config_path=None):
     if config_path is None:
@@ -521,7 +525,7 @@ class SequencesWidget(QWidget):
 
     def reportWarning(self, message):
         """Called from the MCU reader thread, so it must not touch widgets."""
-        print(message)
+        _logger.warning(message)
         self._post_event('show_warning', message)
 
     def _handle_error(self, error_message):
@@ -705,7 +709,7 @@ class ManualControlWidget(QWidget):
 
     def operateSyringe(self, action):
         if self.syringePump.is_busy:
-            print("Syringe pump is busy.")
+            _logger.info("Syringe pump is busy.")
             return
 
         syringe_port = int(self.syringePortCombo.currentText())
@@ -1121,7 +1125,7 @@ class TemperatureChannelWidget(TimeSeriesPlotWidget):
             t = float(self.temp_input.text())
             self.controller.set_target_temperature(self.channel, t)
         except ValueError:
-            print(f"Invalid temperature for channel {self.channel}")
+            _logger.warning("Invalid temperature for channel %s", self.channel)
 
     def _save_clicked(self):
         self.controller.save_target_temperature(self.channel)
@@ -1137,8 +1141,8 @@ class TemperatureChannelWidget(TimeSeriesPlotWidget):
         try:
             self.controller.set_output_enabled(self.channel, checked)
         except Exception as e:
-            print(f"Failed to {'enable' if checked else 'disable'} output on "
-                  f"channel {self.channel}: {e}")
+            _logger.error("Failed to %s output on channel %s: %s",
+                          "enable" if checked else "disable", self.channel, e)
         self._sync_output_button()
 
 class TemperatureControlWidget(SensorTabWidget):
@@ -1246,7 +1250,8 @@ class FlowSensorWidget(TimeSeriesPlotWidget):
 
     def _on_monitor_changed(self, mode):
         self.sensor.monitor = mode
-        print(f"Flow sensor '{self.sensor.name}': draw protection set to {mode}.")
+        _logger.info("Flow sensor %r: draw protection set to %s.",
+                     self.sensor.name, mode)
 
     def _on_callback(self, flow, timestamp):
         # Runs in the controller's reader thread; marshal to the GUI thread.
@@ -1395,7 +1400,7 @@ class FluidicsControlGUI(QMainWindow):
     }
 
     def _report_bringup_issue(self, kind, message):
-        print(message)
+        _logger.warning(message)
         title, hint = self._BRINGUP_HINTS.get(kind, ("Hardware", ""))
         QMessageBox.warning(self, title, message + hint)
 
@@ -1416,7 +1421,7 @@ class FluidicsControlGUI(QMainWindow):
         msg = (f"Draw protection is configured for {', '.join(configured)} but "
                f"is only available for the Flow Cell application. The sensors "
                f"will read and plot; they will not stop a draw.")
-        print(msg)
+        _logger.warning(msg)
         QMessageBox.warning(self, "Flow Sensor", msg)
 
     def set_manual_control_tab_state(self, is_running):
@@ -1437,6 +1442,10 @@ class FluidicsControlGUI(QMainWindow):
 
 
 if __name__ == '__main__':
+    configure_console()
+    # One file per GUI session: bring-up, manual moves, and every run land in
+    # it. Closed by logging's own shutdown at exit.
+    start_log_file()
     parser = argparse.ArgumentParser()
     parser.add_argument("--simulation", help="Run the GUI with simulated hardware.", action='store_true')
     args = parser.parse_args()
