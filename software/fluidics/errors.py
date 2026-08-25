@@ -44,9 +44,14 @@ class RunControl:
     """The one cancellation signal a run shares, owned at app scope and
     injected into every device that waits.
 
-    cancel() performs no device I/O. It is called from the Qt thread, a SIGINT
-    handler, or the MCU reader thread -- none of which owns a serial port.
-    Each device stops itself, on the thread that owns it, when its wait wakes.
+    cancel() itself performs no device I/O: it is called from the Qt thread,
+    a SIGINT handler, or the MCU reader thread -- none of which owns a serial
+    port -- and a device whose wait wakes on it stops itself on the thread
+    that owns it. Transitional, until the fan-in lands: the device abort()
+    methods that trip this today (the syringe pump's, the disc pump's) still
+    halt their hardware on the caller's thread first, exactly as they did
+    before this object existed. Do not read the sentence above as a promise
+    that abort() is I/O-free; only cancel() is.
 
     First cause wins: the operator's reflex after a flow alarm is to press
     Abort a second later, and last-writer-wins would overwrite the fault with
