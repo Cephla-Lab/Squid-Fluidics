@@ -75,7 +75,8 @@ def main():
         # the pump on the same serial port. Quiesce the run first: abort wakes
         # the worker out of any wait (incubation, wait_for_stop), the join
         # lets it unwind through its own error path, and only then does the
-        # finally block touch the hardware, single-threaded.
+        # finally block touch the hardware, single-threaded. Worker before
+        # devices -- the same order-sensitive pair as gui.abortSequences.
         _logger.warning("Interrupted; stopping the run before closing devices...")
         if worker is not None:
             worker.abort()

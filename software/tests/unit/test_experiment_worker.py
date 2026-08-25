@@ -13,6 +13,8 @@ import pytest
 
 from fluidics.experiment_worker import AbortRequested, ExperimentWorker
 
+from ..worker_helpers import record_run
+
 
 class RecordingOps:
     def __init__(self, raise_on=None):
@@ -31,22 +33,10 @@ CONFIG = SimpleNamespace(
 
 
 def run_worker(sequences, ops=None):
-    """Construct and run synchronously, returning (ops, events).
-
-    events is the flat callback record: ("estimate", n), ("progress", num,
-    status), ("error", message), ("finished",).
-    """
+    """RecordingOps over the stub config; returns (ops, events) -- the
+    event shapes are record_run's."""
     ops = ops or RecordingOps()
-    events = []
-    worker = ExperimentWorker(ops, sequences, CONFIG, callbacks={
-        "on_estimate": lambda t, n: events.append(("estimate", n)),
-        "update_progress":
-            lambda index, num, status: events.append(("progress", num, status)),
-        "on_error": lambda message: events.append(("error", message)),
-        "on_finished": lambda: events.append(("finished",)),
-    })
-    worker.run()
-    return ops, events
+    return ops, record_run(ops, sequences, CONFIG)
 
 
 FLOW = {"type": "flow_reagent", "fluidic_port": 1, "flow_rate": 500,

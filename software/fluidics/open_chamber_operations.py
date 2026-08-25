@@ -217,21 +217,26 @@ class OpenChamberOperations():
             # Push reagent to open chamber
             if self.sp.is_aborted:
                 return
-            self.dp.start(0.3)
-            self.sp.execute()
-            self.dp.stop()
+            self._execute_under_drain()
             if fill_tubing_with_port:
                 # Wash with additional amount of buffer in tubing sp_to_oc and fill with next reagent
                 self.sp.extract(self.extract_port, self.tubing_sp_to_oc, self.speed_code_limit)
                 self.sp.dispense(self.dispense_port, self.tubing_sp_to_oc, speed_code)
                 if self.sp.is_aborted:
                     return
-                self.dp.start(0.3)
-                self.sp.execute()
-                self.dp.stop()
+                self._execute_under_drain()
             sleep(1)
         except Exception as e:
             raise OperationError(f"Error in wash_with_constant_flow from port: {port}: {str(e)}")
+
+    def _execute_under_drain(self):
+        """Run the queued chain with the drain pump aspirating. The drain runs
+        across the whole dispense; a failing execute must not leave it on."""
+        self.dp.start(0.3)
+        try:
+            self.sp.execute()
+        finally:
+            self.dp.stop()
 
     def priming_or_clean_up(self, port, flow_rate, volume, use_ports=None, clean_up=False):
         """
@@ -271,6 +276,8 @@ class OpenChamberOperations():
             if self.sp.is_aborted:
                 return
             self.sp.execute()
+            if self.sp.is_aborted:
+                return
             if clean_up:
                 self.dp.aspirate(20)
         except Exception as e:

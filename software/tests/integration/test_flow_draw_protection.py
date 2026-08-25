@@ -61,21 +61,11 @@ class ScriptedSensor:
 
 
 @pytest.fixture
-def ops_and_sensor(flow_cell_hardware):
+def ops_and_sensor(flow_cell_hardware, during_move):
     """MERFISHOperations whose pump publishes readings while it moves."""
     config, sp, sv = flow_cell_hardware
     sensor = ScriptedSensor(flow=500.0)
-
-    # Publish from inside wait_for_stop, not around execute(): execute() clears
-    # the interrupt on entry, so readings delivered before it would have their
-    # stop() wiped by the very call they were meant to interrupt.
-    original_wait = sp.wait_for_stop
-
-    def wait_for_stop(t=0):
-        sensor.play()
-        return original_wait(t)
-
-    sp.wait_for_stop = wait_for_stop
+    during_move(sp, sensor.play)
     return MERFISHOperations(config, sp, sv, flow_sensors=[sensor]), sensor, sp
 
 
@@ -198,16 +188,10 @@ class TestWarningsAreReportable:
     """
 
     @pytest.fixture
-    def warned(self, flow_cell_hardware):
+    def warned(self, flow_cell_hardware, during_move):
         config, sp, sv = flow_cell_hardware
         sensor = ScriptedSensor(flow=0.0, monitor="warn")
-        original_wait = sp.wait_for_stop
-
-        def wait_for_stop(t=0):
-            sensor.play()
-            return original_wait(t)
-
-        sp.wait_for_stop = wait_for_stop
+        during_move(sp, sensor.play)
         lines = []
         ops = MERFISHOperations(config, sp, sv, flow_sensors=[sensor],
                                 on_warning=lines.append)

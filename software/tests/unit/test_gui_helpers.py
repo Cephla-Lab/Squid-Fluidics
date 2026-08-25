@@ -357,3 +357,19 @@ class TestFlowRecordingRows:
         stub = self.stub(writer=None)
         gui.FlowSensorWidget._on_reading(stub, 500.0, 100.0)
         gui.FlowSensorWidget._on_fault(stub, "stop", make_flow_fault(), 100.06)
+
+
+class TestAbortOrder:
+    """Worker before devices -- abortSequences says why. Called unbound
+    against a stub."""
+
+    def test_the_worker_is_aborted_before_the_devices(self):
+        order = []
+        stub = SimpleNamespace(
+            worker=SimpleNamespace(abort=lambda: order.append("worker")),
+            experiment_ops=object(),
+            devices=SimpleNamespace(abort=lambda: order.append("devices")),
+            abortButton=SimpleNamespace(setEnabled=lambda enabled: None),
+        )
+        gui.SequencesWidget.abortSequences(stub)
+        assert order == ["worker", "devices"]

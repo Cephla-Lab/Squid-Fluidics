@@ -571,8 +571,11 @@ class SequencesWidget(QWidget):
 
     def abortSequences(self):
         if self.worker and self.experiment_ops:
-            self.devices.abort()
+            # Worker first. With the device latches set before the worker's
+            # event, an operation returns early, the worker sees no abort,
+            # and advances to the next sequence reporting each as completed.
             self.worker.abort()
+            self.devices.abort()
             self.abortButton.setEnabled(False)
 
 
