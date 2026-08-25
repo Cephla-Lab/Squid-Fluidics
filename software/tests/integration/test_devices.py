@@ -162,14 +162,19 @@ class TestSurvivableFailures:
 
 class TestBuildWorker:
     def test_the_worker_waits_on_the_set_s_signal_and_makes_it_safe(self, flow_cell_config, built):
-        """The one wiring that works, so neither entry point can forget half
-        of it: an abort that cannot reach the worker, or a TEC left on."""
+        """So neither entry point can forget half of the wiring: an abort that
+        cannot reach the worker, or a TEC left on."""
         devices = built(flow_cell_config, simulation=True)
-        ops = build_operations(flow_cell_config, devices)
-        worker = build_worker(devices, ops, [], callbacks={"on_error": lambda m: None})
+        on_error = lambda message: None
+        worker = build_worker(devices, object(), [], callbacks={"on_error": on_error})
         assert worker.run_control is devices.run_control
         assert worker.callbacks["make_safe"] == devices.make_safe
-        assert worker.callbacks["on_error"] is not None
+        assert worker.callbacks["on_error"] is on_error
+
+    def test_a_caller_s_make_safe_is_refused_not_silently_replaced(self, flow_cell_config, built):
+        devices = built(flow_cell_config, simulation=True)
+        with pytest.raises(ValueError, match="make_safe"):
+            build_worker(devices, object(), [], callbacks={"make_safe": lambda: []})
 
 
 class TestBuildOperations:
@@ -200,6 +205,9 @@ class RecordingPump:
 
     def __init__(self, events=None):
         self.events = events if events is not None else []
+
+    def stop(self):
+        self.events.append(("pump", "stop"))
 
     def close(self, to_waste=False):
         self.events.append(("pump", "close", to_waste))
@@ -251,6 +259,12 @@ class TestMakeSafe:
     """After a cancelled run has unwound: TEC output off on every channel (an
     abort ends the experiment), drain pump off. Called by the worker on its
     own thread; the syringe pump halted itself on the way out."""
+
+    def test_halts_the_syringe_pump(self, flow_cell_config):
+        """Already halted after a cancel; not after a failure mid-move."""
+        pump = RecordingPump()
+        device_set(flow_cell_config, pump=pump).make_safe()
+        assert pump.events == [("pump", "stop")]
 
     def test_switches_every_tec_channel_off(self, flow_cell_config):
         tc = TCMControllerSimulation(channels=2)
@@ -367,11 +381,6 @@ class TestRunControlInjection:
             serial_number="TC1", channels=1)
         devices = built(flow_cell_config, simulation=True)
         assert devices.temperature_controller.run_control is devices.run_control
-
-    def test_abort_cancels_it(self, flow_cell_config, built):
-        devices = built(flow_cell_config, simulation=True)
-        devices.abort()
-        assert isinstance(devices.run_control.cause, AbortRequested)
 
     def test_close_after_an_abort_resets_it_and_reports_no_errors(self, flow_cell_config, built):
         """The real pump's close parks to waste with a move of its own; with

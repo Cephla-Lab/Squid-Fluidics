@@ -14,7 +14,10 @@ class DiscPump():
         _logger.info("Disc pump initialized.")
 
     def _set_power(self, power):
-        self.fc.send_command_blocking(CMD_SET.SET_PUMP_PWR_OPEN_LOOP, power)
+        # A power command completes within one MCU status interval (~60 ms);
+        # the 30 s default would only ever cost time on a dead MCU -- and
+        # make_safe waits on this before the operator hears why the run ended.
+        self.fc.send_command_blocking(CMD_SET.SET_PUMP_PWR_OPEN_LOOP, power, timeout=2)
 
     def aspirate(self, time_s):
         """Full power for time_s seconds, then off. Raises the run's cause if

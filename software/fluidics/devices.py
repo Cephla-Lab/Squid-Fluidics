@@ -92,27 +92,23 @@ class DeviceSet:
 
         The GUI's Abort button and the CLI's Ctrl+C call this from threads
         that own no serial port. Every device that waits shares run_control
-        and stops itself when its wait wakes; the worker shares it too, so
-        there is no separate worker abort to order against this one.
+        and stops itself when its wait wakes; the worker waits on it too.
         """
         self.run_control.cancel()
 
     def reset(self):
         """Clear the cancellation once the run that raised it has ended, before
-        anything else uses the devices (the GUI's manual tab). Nothing cancels
-        outside a run, so a run never starts already cancelled. close() also
-        clears it, ahead of its own park-to-waste move."""
+        anything else uses the devices (the GUI's manual tab)."""
         self.run_control.reset()
 
     def make_safe(self):
-        """Leave nothing running once a run has ended early: TEC output off on
-        every channel, drain pump off. Called for an abort and for a failure
-        alike (decided 2026-08-25) -- an ended run drives nothing, and the
-        failure case is the unattended one. Only a run that finished leaves
-        the temperature holding. The syringe pump halted itself in
-        wait_for_stop. Shielded per step; returns the exceptions raised,
-        already logged."""
-        steps = []
+        """Leave nothing running once a run has ended early -- abort or failure
+        alike; the failure is the unattended case. Halts the syringe pump
+        (already halted after a cancel, not after a failure mid-move), TEC
+        output off on every channel, drain pump off. Shielded per step;
+        returns the exceptions raised, already logged, for the worker to
+        report."""
+        steps = [self.syringe_pump.stop]
         tc = self.temperature_controller
         if tc is not None:
             steps.extend(partial(tc.set_output_enabled, c, False)
@@ -272,13 +268,11 @@ def build_operations(config, devices, on_warning=None):
 
 
 def build_worker(devices, operations, sequences, callbacks=None):
-    """The worker for one run on `devices`, wired the one way that works: it
-    waits on the set's run_control, so the one abort reaches it, and makes
-    the rig safe through the set after a cancel. Both entry points call this
-    rather than spelling the wiring out -- forgetting either half yields a
-    worker an abort cannot reach, or one that leaves the TEC on.
-    """
+    """Wire one run's worker to `devices`: the shared run_control, and the
+    make_safe callback, which this function owns."""
     callbacks = dict(callbacks or {})
+    if "make_safe" in callbacks:
+        raise ValueError("build_worker supplies make_safe; do not pass one")
     callbacks["make_safe"] = devices.make_safe
     return ExperimentWorker(operations, sequences, devices.config, callbacks,
                             run_control=devices.run_control)

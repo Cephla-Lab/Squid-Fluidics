@@ -16,10 +16,10 @@ import time
 
 import pytest
 
-from fluidics.control.syringe_pump import SyringePump, SyringePumpSimulation
+from fluidics.control.syringe_pump import SyringePumpSimulation
 from fluidics.errors import AbortRequested, RunControl
 
-from .pump_helpers import bare_pump
+from .pump_helpers import bare_pump, halt_on_cancel
 
 
 def _pump(**kwargs):
@@ -198,8 +198,9 @@ class TestSimulationHonoursInterruption:
 
 
 class TestTheSharedRunControl:
-    """abort() speaks through the run's RunControl, the object every waiting
-    device of the run shares; stop() deliberately does not."""
+    """A cancel on the run's RunControl -- the object every waiting device
+    shares -- reaches the pump's own wake event through the waker; stop()
+    deliberately stays off the signal."""
 
     def test_stop_does_not_cancel_the_run(self):
         pump = _pump()
@@ -241,10 +242,8 @@ class TestTheCancelPathOnTheRealPump:
             raise IOError("no reply from pump")
 
         pump.syringe.terminateCmd = broken
-        pump.run_control.cancel()
         with caplog.at_level(logging.ERROR, logger="fluidics"):
-            with pytest.raises(AbortRequested):
-                pump.wait_for_stop(0)
+            halt_on_cancel(pump)
         assert "no reply from pump" in caplog.text
 
 

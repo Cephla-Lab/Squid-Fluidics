@@ -21,3 +21,8 @@ def record_run(ops, sequences, config, run_control=None):
     }, run_control=run_control)
     worker.run()
     return events
+
+
+def errors_in(events):
+    """The on_error messages in a record_run event list."""
+    return [message for kind, *rest in events if kind == "error" for message in rest]

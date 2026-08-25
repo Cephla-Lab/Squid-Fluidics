@@ -24,9 +24,11 @@ class ExperimentWorker:
                 - 'on_error': fn(error_message)
                 - 'on_finished': fn()
                 - 'on_estimate': fn(time_to_finish, n_sequences)
-                - 'make_safe': fn() -- called on the worker thread once a
-                  run has ended early, aborted or failed, before on_error
-                  (devices.build_worker passes DeviceSet.make_safe)
+                - 'make_safe': fn() -> [exceptions it could not act on] --
+                  called on the worker thread once a run has ended early,
+                  aborted or failed, before on_error; its failures are
+                  appended to the report (devices.build_worker passes
+                  DeviceSet.make_safe)
             run_control: the run's cancellation signal, shared with the
                 devices (DeviceSet.run_control) so one abort reaches the
                 operation, the incubation wait, and the check between
@@ -38,6 +40,7 @@ class ExperimentWorker:
         self.config = config
         self.callbacks = callbacks or {}
         self.run_control = run_control if run_control is not None else RunControl()
+        self._ended = False
         # Set once run() has returned through its finally. The thing to wait
         # on after a cancel -- not Thread.join(), see run_sequences.
         self.finished = threading.Event()
@@ -51,9 +54,11 @@ class ExperimentWorker:
         self._call_callback('on_estimate', self.time_to_finish, self.n_sequences)
 
     def _call_callback(self, name, *args):
-        """Safely call a callback if it exists."""
-        if self.callbacks.get(name):
-            self.callbacks[name](*args)
+        """Call the callback if one is registered; return what it returns."""
+        callback = self.callbacks.get(name)
+        if callback:
+            return callback(*args)
+        return None
 
     def get_time_to_finish(self):
         total_time = 0
@@ -78,15 +83,21 @@ class ExperimentWorker:
         self.run_control.sleep(time_minutes * 60)
 
     def _end_early(self, message):
-        """Quiet the rig, then report why it stopped.
+        """Quiet the rig, then report why it stopped -- once.
 
-        make_safe first, so the TEC and the drain are off before the operator
-        reads the message -- and, on a failure nobody is present for, before
-        anyone reads it at all. Every early end comes through here: only a run
-        that reached its last sequence leaves the temperature holding, which
-        is what a run ending in set_temperature is for.
+        Act, then report: the console and run log already carry the message
+        (the handlers log first); what trails make_safe's round trips is the
+        GUI's dialog and the manual tab's return, which is the point. What
+        make_safe could not switch off is appended to the report -- after an
+        abort, "the rig could not be made safe" is the line that matters.
         """
-        self._call_callback('make_safe')
+        if self._ended:
+            return
+        self._ended = True
+        failures = self._call_callback('make_safe') or []
+        if failures:
+            message += (" Making the rig safe failed: "
+                        + "; ".join(str(e) for e in failures))
         self._call_callback('on_error', message)
 
     def run(self):
@@ -127,9 +138,9 @@ class ExperimentWorker:
                         return
 
         except Exception as e:
-            # Faults outside the per-sequence try -- a malformed sequence
-            # dict, say -- are programming errors, where the traceback matters
-            # most.
+            # Faults outside the per-sequence try -- the sequence list itself
+            # failing, say -- are programming errors, where the traceback
+            # matters most.
             _logger.error("Run failed: %s", e, exc_info=True)
             self._end_early(str(e))
         finally:

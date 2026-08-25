@@ -361,8 +361,8 @@ class TestFlowRecordingRows:
 
 class TestAbortSequences:
     """One signal: the button cancels through the DeviceSet, which the worker
-    shares, so there is no separate worker abort to order against it. Called
-    unbound against a stub whose worker has no abort() to call."""
+    waits on. Called unbound against a stub; worker=SimpleNamespace() only
+    satisfies the `if self.worker` guard."""
 
     def test_abort_goes_through_the_device_set_only(self):
         aborted = []

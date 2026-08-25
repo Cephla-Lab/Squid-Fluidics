@@ -11,11 +11,14 @@ from fluidics.errors import AbortRequested, RunControl
 class RecordingController:
     def __init__(self):
         self.sent = []
+        self.timeouts = []
 
     def send_command(self, command, *args):
         self.sent.append((command, *args))
 
-    send_command_blocking = send_command
+    def send_command_blocking(self, command, *args, timeout=30):
+        self.sent.append((command, *args))
+        self.timeouts.append(timeout)
 
 
 @pytest.fixture
@@ -50,6 +53,14 @@ class TestAspirate:
             pump.aspirate(20)
         assert power_commands(pump) == [MCU_CONSTANTS.TTP_MAX_PW, 0]
 
+
+
+def test_power_commands_wait_seconds_not_the_default_thirty(pump):
+    """A power command completes within one MCU status interval; the 30 s
+    default only ever costs time on a dead MCU -- with make_safe waiting."""
+    pump.start(0.3)
+    pump.stop()
+    assert pump.fc.timeouts == [2, 2]
 
 
 def test_a_pump_built_alone_gets_a_private_run_control():

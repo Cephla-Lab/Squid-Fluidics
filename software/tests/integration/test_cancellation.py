@@ -18,7 +18,7 @@ from fluidics.errors import AbortRequested
 from fluidics.flow_monitor import FlowFault
 from fluidics.sequences import APPLICATION_SEQUENCES
 
-from ..worker_helpers import record_run
+from ..worker_helpers import errors_in, record_run
 
 # Every fluidic step type on each operations stack: both stacks share the
 # pump's cancellation path, and every one of their exception wrappers must let
@@ -70,11 +70,6 @@ def stack(request):
     ops, sp = request.getfixturevalue(f"{request.param}_rig")
     config = request.getfixturevalue(f"{request.param}_config")
     return ops, sp, SEQS[request.param], config
-
-
-def errors_in(events):
-    return [message for kind, *rest in events if kind == "error"
-            for message in rest]
 
 
 @pytest.mark.parametrize(

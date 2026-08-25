@@ -12,9 +12,8 @@ parametrize below.
 
 import pytest
 
-from fluidics.errors import AbortRequested
 
-from .pump_helpers import bare_pump
+from .pump_helpers import bare_pump, halt_on_cancel
 
 
 class SpyLock:
@@ -90,14 +89,6 @@ def locked_pump():
                      speed_code_limit=10, range=3000, chained_volume=0)
 
 
-def _halt_on_cancel(pump):
-    """abort() itself touches no hardware; the wait that wakes on the cancel
-    halts the plunger, and that terminateCmd is a round trip like any other."""
-    pump.run_control.cancel()
-    with pytest.raises(AbortRequested):
-        pump.wait_for_stop(0)
-
-
 class TestEveryRoundTripIsLocked:
     """AssertingSyringe raises on any unlocked driver entry, so each of these
     only has to drive the public method and confirm the call arrived."""
@@ -117,7 +108,7 @@ class TestEveryRoundTripIsLocked:
                      id="time_to_finish"),
         pytest.param(lambda p: p._move_finished(), "_checkReady",
                      id="move_finished"),
-        pytest.param(lambda p: _halt_on_cancel(p), "terminateCmd", id="halt_on_cancel"),
+        pytest.param(halt_on_cancel, "terminateCmd", id="halt_on_cancel"),
         pytest.param(lambda p: p.stop(), "terminateCmd", id="stop"),
     ])
     def test_the_call_reaches_the_driver_under_the_lock(self, drive, expected):
@@ -131,7 +122,7 @@ class TestEveryRoundTripIsLocked:
 class TestTheLockNeverSpansAMove:
     def test_execute_releases_the_lock_before_waiting(self):
         """Held across the wait, the lock would freeze the GUI's position
-        poll for the whole move and make abort() queue behind it -- the two
+        poll for the whole move and make a cancel's halt queue behind it -- the two
         things the per-transaction design exists to keep live."""
         pump = locked_pump()
         held_during_wait = []

@@ -11,20 +11,19 @@ _logger = logging.getLogger(__name__)
 class Interruptible:
     """Halting a move that is already running, shared by both pump classes.
 
-    Two ways a running move is interrupted, differing in whether they latch:
+    Two ways a running move is interrupted, differing in whether they latch.
 
-      a cancel on the run's RunControl -- the operator pressed Abort. It
-               touches no hardware on the cancelling thread: the thread
-               inside wait_for_stop wakes (the pump registers its own wake
-               event as a waker), halts the plunger on the thread that owns
-               the port, and raises the cause out of the device call, so the
-               operation unwinds instead of returning as if it had finished.
-               Latches until RunControl.reset().
-      stop()   a fault the caller is about to raise on -- a flow fault, say.
-               Halts the plunger from the caller's thread, does not latch and
-               does not cancel the run: the run is being failed by whoever
-               called it, and a cancel here would report a hardware problem
-               as a user action.
+    A cancel on the run's RunControl -- the operator pressed Abort -- touches
+    no hardware on the cancelling thread: the thread inside wait_for_stop
+    wakes (the pump registers its own wake event as a waker), halts the
+    plunger on the thread that owns the port, and raises the cause out of the
+    device call, so the operation unwinds instead of returning as if it had
+    finished. It latches until RunControl.reset().
+
+    stop() is for a fault the caller is about to raise on -- a flow fault,
+    say. It halts the plunger from the caller's thread, does not latch and
+    does not cancel the run: the run is being failed by whoever called it,
+    and a cancel here would report a hardware problem as a user action.
 
     Shared rather than written twice because the simulation is where these
     semantics get tested -- the real pump needs hardware. Two copies would put
@@ -77,8 +76,8 @@ class Interruptible:
         self.run_control.check()
 
     def wait_for_stop(self, t=0):
-        """Block until the move finishes, or until abort()/stop() interrupts.
-        Raises the run's cancellation cause if abort() was what woke it.
+        """Block until the move finishes, or until a cancel or stop() interrupts.
+        Raises the run's cancellation cause if it was cancelled.
 
         t is the pump's estimate of how long the whole chain will take, which
         for a 2000 uL draw at 500 uL/min is about 240 s. This used to be
@@ -217,7 +216,7 @@ class SyringePump(SpeedCodes, Interruptible):
         # unlocked, the poll could consume the reply belonging to the
         # worker's _checkReady, surfacing as a spurious TecanAPITimeout that
         # the manual tab used to mask as "operation complete". Held per
-        # driver call, never across a move, so position polls and abort()
+        # driver call, never across a move, so position polls and a cancel's halt
         # stay live while the plunger runs. A plain (non-reentrant) Lock on
         # purpose: locked regions never nest, and a future violation should
         # deadlock loudly in testing, not silently interleave.
@@ -350,12 +349,10 @@ class SyringePumpSimulation(SpeedCodes, Interruptible):
     The plunger starts mid-stroke, as the old constant simulation reported,
     so existing tests keep the same headroom before an emptying dump.
 
-    Interrupted moves are deliberately not modeled: an execute() that stop()
-    or abort() wakes early still folds the whole chain, where a real pump
-    reads back a partial plunger position. What an interrupted chain leaves
-    behind is a semantic the cancellation redesign owns (its first step is
-    making this simulation honour abort, with tests) -- a guess here would be
-    baked into every test written against it in the meantime.
+    An execute() that a cancel wakes early raises before folding the chain,
+    and the chain is consumed as the Tecan's is. One that stop() wakes early
+    still folds the whole chain, where a real pump reads back a partial
+    plunger position -- the partial volume is not modeled.
     """
 
     def __init__(self, sn, syringe_ul, speed_code_limit, waste_port, num_ports=4, slope=14,
