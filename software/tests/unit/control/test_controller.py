@@ -3,6 +3,8 @@ import warnings
 
 import numpy as np
 import pytest
+
+from fluidics.errors import AbortRequested, RunControl, SafetyFault
 from cobs import cobs
 
 import fluidics.control.controller as controller_module
@@ -542,6 +544,48 @@ class TestWaitForCompletion:
             _make_packet(uid=10, status=COMMAND_STATUS.CMD_EXECUTION_ERROR)))
         assert fc.wait_for_completion() == COMMAND_STATUS.CMD_EXECUTION_ERROR
 
+    def test_a_cancelled_run_raises_out_of_the_poll_when_given_the_signal(self):
+        """A valve move holds the abort for up to `timeout` otherwise -- and
+        the firmware retries around a 2 s poll, so that is seconds."""
+        fc = _bare_controller()
+        fc._init_status_state()
+        fc.cmd_uid = 11
+        control = RunControl()
+        control.cancel()
+        with pytest.raises(AbortRequested):
+            fc.wait_for_completion(timeout=30, run_control=control)
+
+    def test_the_cause_is_raised_as_itself(self):
+        """Draw protection cancels with a FlowFault; the operator must read
+        the diagnosis, not a timeout."""
+        fc = _bare_controller()
+        fc._init_status_state()
+        fc.cmd_uid = 12
+        control = RunControl()
+        control.cancel(SafetyFault("flow collapsed"))
+        with pytest.raises(SafetyFault, match="flow collapsed"):
+            fc.wait_for_completion(timeout=30, run_control=control)
+
+    def test_without_the_signal_a_cancelled_run_still_waits_it_out(self):
+        """Teardown, bring-up and make_safe send commands on a run that is
+        already cancelled and must confirm they completed."""
+        fc = _bare_controller()
+        fc._init_status_state()
+        fc.cmd_uid = 13
+        control = RunControl()
+        control.cancel()
+        with pytest.raises(TimeoutError):
+            fc.wait_for_completion(timeout=1)
+
+    def test_an_uncancelled_run_returns_the_status_as_usual(self):
+        fc = _bare_controller()
+        fc._init_status_state()
+        fc.cmd_uid = 14
+        fc._publish_status(fc._parse_packet(
+            _make_packet(uid=14, status=COMMAND_STATUS.COMPLETED_WITHOUT_ERRORS)))
+        assert fc.wait_for_completion(run_control=RunControl()) == \
+            COMMAND_STATUS.COMPLETED_WITHOUT_ERRORS
+
     def test_times_out_if_no_packet_ever_arrives(self):
         """Regression guard: get_mcu_status() blocks forever waiting for the
         first packet, so wait_for_completion must not route through it. If it
@@ -691,14 +735,15 @@ class TestBeginStartsReader:
         assert calls == [1]
 
 
-class TestSendCommandBlockingPassesTimeout:
-    """send_command_blocking's timeout kwarg must reach wait_for_completion.
-    Firmware operations like CLEAR_LINES/UNLOAD_FLUID_VOLUME routinely run
-    35-50s; if the kwarg silently gets dropped, callers passing a matching
-    timeout would still time out at the 30s default.
+class TestSendCommandBlockingPassesItsKwargs:
+    """send_command_blocking's timeout and run_control must reach
+    wait_for_completion. Firmware operations like CLEAR_LINES /
+    UNLOAD_FLUID_VOLUME routinely run 35-50s, so a dropped timeout would time
+    out at the 30s default; a dropped run_control would make a caller's
+    interruptible wait silently uninterruptible.
     """
 
-    def test_custom_timeout_reaches_wait_for_completion(self):
+    def test_both_kwargs_reach_wait_for_completion(self):
         fc = _bare_controller()
         fc._init_status_state()
         fc.cmd_uid = 0
@@ -707,13 +752,16 @@ class TestSendCommandBlockingPassesTimeout:
 
         captured = {}
 
-        def fake_wait_for_completion(timeout=30):
+        def fake_wait_for_completion(timeout=30, run_control=None):
             captured['timeout'] = timeout
+            captured['run_control'] = run_control
             return COMMAND_STATUS.COMPLETED_WITHOUT_ERRORS
 
         fc.wait_for_completion = fake_wait_for_completion
+        control = RunControl()
 
-        fc.send_command_blocking(CMD_SET.CLEAR, timeout=45)
+        fc.send_command_blocking(CMD_SET.CLEAR, timeout=45, run_control=control)
+        assert captured['run_control'] is control
 
         assert captured['timeout'] == 45
 

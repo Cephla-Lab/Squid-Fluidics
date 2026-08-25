@@ -322,8 +322,16 @@ class FluidController(Microcontroller, PacketSubscribers):
         super().begin()
         self.start_reading()
     
-    def wait_for_completion(self, timeout=30):
+    def wait_for_completion(self, timeout=30, run_control=None):
         '''Block until the MCU reports a terminal status for the command we just sent.
+
+        run_control makes the wait interruptible: a cancelled run raises its
+        cause out of the poll instead of waiting out the deadline. Callers on
+        the run's own path pass it -- a valve move otherwise holds an abort
+        for up to `timeout`, and RheoLink retries make that seconds, not
+        milliseconds. Teardown, bring-up and DeviceSet.make_safe deliberately
+        do not: they send commands on a run that is already cancelled and
+        must confirm those commands completed.
 
         Matches on both the command UID and the publish sequence number
         (`_status_seq`, bumped by `_publish_status`), not UID alone. UID is not
@@ -355,8 +363,14 @@ class FluidController(Microcontroller, PacketSubscribers):
                     f"MCU did not complete command {self.cmd_sent} "
                     f"(uid {self.cmd_uid}) within {timeout}s"
                 )
-            sleep(0.005)
-    
+            if run_control is None:
+                sleep(0.005)
+            elif run_control.wait(0.005):
+                # The poll interval doubles as the wait on the run's signal,
+                # so a cancel is noticed within one interval rather than at
+                # the deadline.
+                run_control.check()
+
     def add_uid_to_cmd(self, cmd):
         '''Break cmd_uid into two bytes and overwrite the first two bytes of the command array with the uid'''
         cmd[0] = self.cmd_uid >> 8
@@ -949,18 +963,19 @@ class FluidController(Microcontroller, PacketSubscribers):
             self._seq_at_send = self._status_seq
         pass
 
-    def send_command_blocking(self, command, *args, timeout=30):
+    def send_command_blocking(self, command, *args, timeout=30, run_control=None):
         '''Send a command, then write logs while waiting for it to complete.
 
         timeout is keyword-only (falls out naturally after *args) and passed
-        straight through to wait_for_completion. The 30 s default suits fast
+        straight through to wait_for_completion, as is run_control (see
+        there). The 30 s default suits fast
         commands, but several firmware operations (e.g. CLEAR_LINES,
         UNLOAD_FLUID_VOLUME) take a caller-supplied timeout parameter of their
         own that routinely runs 35-50 s; callers issuing those must pass a
         matching timeout here or this will raise before the firmware finishes.
         '''
         self.send_command(command, *args)
-        return self.wait_for_completion(timeout=timeout)
+        return self.wait_for_completion(timeout=timeout, run_control=run_control)
 
 
 class FluidControllerSimulation(PacketSubscribers):
@@ -992,14 +1007,18 @@ class FluidControllerSimulation(PacketSubscribers):
             self.data['selector_valves_pos'][args[0]] = args[1]
         return
 
-    def send_command_blocking(self, command, *args, timeout=30):
+    def send_command_blocking(self, command, *args, timeout=30, run_control=None):
         sleep(2)
         if command == CMD_SET.SET_ROTARY_VALVE:
             self.data['selector_valves_pos'][args[0]] = args[1]
         return
 
-    def wait_for_completion(self, timeout=30):
-        pass
+    def wait_for_completion(self, timeout=30, run_control=None):
+        # Nothing to wait for, but a cancelled run still raises where the real
+        # controller's poll would: the simulation must not let an operation
+        # carry on past a point the hardware would have refused.
+        if run_control is not None:
+            run_control.check()
 
     def get_mcu_status(self):
         return self.data

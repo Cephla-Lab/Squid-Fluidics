@@ -2,14 +2,15 @@
 import pytest
 
 from fluidics.control.config import load_config
+from fluidics.errors import AbortRequested, RunControl
 from fluidics.control.controller import FluidControllerSimulation
 from fluidics.control.selector_valve import SelectorValveSystem
 
 
-def _make_valve_system(config_path):
+def _make_valve_system(config_path, run_control=None):
     config = load_config(str(config_path))
     fc = FluidControllerSimulation(serial_number="test")
-    return SelectorValveSystem(fc, config)
+    return SelectorValveSystem(fc, config, run_control)
 
 
 @pytest.fixture
@@ -116,3 +117,42 @@ class TestOpenPort:
         with pytest.raises(ValueError, match=r"1\.\.10"):
             open_chamber_system.open_port(port)
         assert open_chamber_system.get_current_port() == 5
+
+
+class TestACancelledRunMovesNoValve:
+    """Port addressing walks the cascade valve by valve, so a cancel can land
+    between two moves. Every wait on the way through takes the run's signal,
+    so the raise comes from the next wait rather than at the deadline -- on
+    hardware the firmware retries a rotary move around a 2 s poll, so waiting
+    it out would hold the abort for seconds."""
+
+    def test_the_entry_check_refuses_before_the_first_move(self, fixtures_dir):
+        control = RunControl()
+        system = _make_valve_system(fixtures_dir / "flow_cell_config.yaml", control)
+        moved = []
+        for valve in system.valves:
+            valve.open = lambda port, rc=None, v=valve: moved.append(v.id)
+        control.cancel()
+        with pytest.raises(AbortRequested):
+            system.open_port(1)
+        assert moved == []
+
+    def test_a_cancel_between_valves_stops_the_cascade(self, fixtures_dir):
+        """Port 28 is on the last valve, so the first two are stepped through
+        on the way. A cancel during the first move must not move the rest."""
+        control = RunControl()
+        system = _make_valve_system(fixtures_dir / "flow_cell_config.yaml", control)
+        moved = []
+        for valve in system.valves:
+            original = valve.open
+
+            def open(port, rc=None, v=valve, original=original):
+                moved.append(v.id)
+                if v.id == 0:
+                    control.cancel()      # the operator, mid-cascade
+                return original(port, rc)
+
+            valve.open = open
+        with pytest.raises(AbortRequested):
+            system.open_port(28)
+        assert moved == [0]

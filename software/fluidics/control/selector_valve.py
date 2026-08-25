@@ -21,10 +21,13 @@ class SelectorValve():
         self.open(self.position)
         _logger.info("Selector valve id = %s initialized.", valve_id)
 
-    def open(self, port):
+    def open(self, port, run_control=None):
         _logger.debug("Valve %s: open port %s", self.id, port)
         self.fc.send_command(CMD_SET.SET_ROTARY_VALVE, self.id, port)
-        self.fc.wait_for_completion()
+        # Interruptible on the run's path: a move the firmware retries around
+        # its 2 s poll would otherwise hold an abort for seconds. Homing at
+        # construction passes nothing -- there is no run yet.
+        self.fc.wait_for_completion(run_control=run_control)
         current_position = self.get_current_position()
         if current_position != port:
             raise RuntimeError(f"current position is {current_position}; expected {port}")
@@ -77,16 +80,16 @@ class SelectorValveSystem():
         for valve in self.valves[:-1]:  # Process all valves except the last one
             ports_in_valve = valve.number_of_ports - 1
             if port_index > (ports_processed + ports_in_valve):
-                valve.open(ports_in_valve + 1)  # Open the last port
+                valve.open(ports_in_valve + 1, self.run_control)  # Open the last port
                 ports_processed += ports_in_valve
             else:
-                valve.open(port_index - ports_processed)
+                valve.open(port_index - ports_processed, self.run_control)
                 self.current_port = port_index
                 return
 
         # If we get here, it's in the last valve
-        self.valves[-1].open(port_index - ports_processed)
-        self.fc.wait_for_completion()
+        self.valves[-1].open(port_index - ports_processed, self.run_control)
+        self.fc.wait_for_completion(run_control=self.run_control)
         self.current_port = port_index
         return
 
