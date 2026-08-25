@@ -147,6 +147,44 @@ class TestProcessSequence:
             oc_ops.process_sequence(seq)
 
 
+class TestNothingStartsOnACancelledRun:
+    def test_a_cancel_in_the_settle_wait_raises_out_of_the_operation(self, open_chamber_rig):
+        """wash_with_constant_flow ends with a one-second settle wait. On the
+        run's signal, so a cancel landing there unwinds the operation instead
+        of returning normally and letting the worker report it completed."""
+        ops, sp = open_chamber_rig
+        original = sp.execute
+
+        def cancel_after_the_last_chain():
+            original()
+            if any(op[0] == "dispense" for op in sp.executed[-1]):
+                sp.run_control.cancel()
+
+        sp.execute = cancel_after_the_last_chain
+        with pytest.raises(AbortRequested):
+            ops.process_sequence({"type": "wash_constant_flow", "fluidic_port": 6,
+                                  "flow_rate": 1000, "volume": 1000})
+
+    def test_the_drain_is_never_powered_once_the_run_is_cancelled(self, open_chamber_rig):
+        """_execute_under_drain starts the drain before the syringe pump's
+        checked execute; the drain pump's own entry check is what keeps a
+        cancelled run from pulsing it."""
+        ops, sp = open_chamber_rig
+        powered = []
+        ops.dp._set_power = lambda power: powered.append(power)
+        original = sp.execute
+
+        def cancel_after_the_first_chain():
+            original()
+            sp.run_control.cancel()
+
+        sp.execute = cancel_after_the_first_chain
+        with pytest.raises(AbortRequested):
+            ops.process_sequence({"type": "wash_constant_flow", "fluidic_port": 6,
+                                  "flow_rate": 1000, "volume": 1000})
+        assert powered == []
+
+
 class TestDrainPumpAndCleanUpGuards:
     """Two of the abort design's live bugs, pinned as fixed."""
 

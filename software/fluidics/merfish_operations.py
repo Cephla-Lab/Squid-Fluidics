@@ -1,5 +1,4 @@
 import logging
-from time import sleep
 from .errors import Cancelled, OperationError
 from .flow_monitor import DrawGuard
 from . import sequence_utils
@@ -132,8 +131,10 @@ class MERFISHOperations():
                     self.sp.dispense_to_waste()
                     self.sp.execute()
                     # There could be a lot of air in a flow cell system, which may delay the stabilization of the liquid flow.
-                    # So we sleep for 1 second here to wait for the flow to stabilize.
-                    sleep(1)
+                    # So we wait a second here for the flow to stabilize -- on
+                    # the run's signal, so a cancel raises out of it rather
+                    # than being noticed a second later.
+                    self.sp.run_control.sleep(1)
 
             self.sv.open_port(port)
             self.sp.extract(self.extract_port, volume, speed_code)

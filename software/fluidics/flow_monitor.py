@@ -259,16 +259,19 @@ class DrawGuard:
                 # an in-draw trip as late.
                 return
             if claimed:
-                self.log(f"Stopping draw: {fault}")
-                # No I/O on this (reader) thread: the sequence thread, inside
-                # the pump's wait, wakes on this, halts the plunger and raises
-                # the fault out of execute(). First cause wins, so an Abort
+                # First, before anything that could block or raise: `log` is
+                # injected (the GUI marshals it to the Qt thread), and a
+                # failing sink must not leave the plunger moving. No I/O on
+                # this (reader) thread -- the sequence thread, inside the
+                # pump's wait, wakes on this, halts the plunger and raises the
+                # fault out of execute(). First cause wins, so an Abort
                 # pressed a second later cannot overwrite the diagnosis.
                 self.run_control.cancel(fault)
+                self.log(f"Stopping draw: {fault}")
             # Published win or lose: losing the claim only means another sensor
             # faulted first, not that this one saw nothing. Its recording
-            # should carry its own observation. After the pump halt, so the
-            # bookkeeping never delays the stop.
+            # should carry its own observation. After the cancel, so the
+            # bookkeeping never delays the halt.
             sensor.notify_fault(mode, fault, timestamp)
 
         return handle

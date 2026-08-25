@@ -113,6 +113,11 @@ class ExperimentWorker:
                     _logger.info("%s: started", tag)
                     self._call_callback('update_progress', index, current_sequence, "Started")
                     self.experiment_ops.process_sequence(seq)
+                    # Every wait inside an operation raises on a cancel, so
+                    # this covers only the tail: a cancel landing after the
+                    # operation's last wait and before it returns. A sequence
+                    # the operator cancelled must not be reported Completed.
+                    self.run_control.check()
 
                     incubation_time = seq.get('incubation_time', 0)
                     if incubation_time > 0:

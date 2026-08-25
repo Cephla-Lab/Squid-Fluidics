@@ -190,6 +190,23 @@ class TestTheSharedSignal:
         assert "failed on repeat" not in error      # a fault, not a failed step
         assert events.index(("make_safe",)) < events.index(("error", error))
 
+    def test_a_sequence_cancelled_in_its_tail_is_not_reported_completed(self):
+        """Every wait inside an operation raises, so this is the residual
+        window: a cancel landing after the operation's last wait and before it
+        returns. The operator pressed Abort; the run must not say Completed."""
+        control = RunControl()
+
+        class CancelsOnTheWayOut(RecordingOps):
+            def process_sequence(self, seq):
+                super().process_sequence(seq)
+                control.cancel()
+
+        _, events = run_worker([dict(FLOW), dict(FLOW)], ops=CancelsOnTheWayOut(),
+                               run_control=control)
+        assert ("progress", 1, "Completed") not in events
+        assert ("progress", 2, "Started") not in events
+        assert any("aborted" in message for message in errors_in(events))
+
     def test_a_completed_run_leaves_the_rig_alone(self):
         """The temperature must keep holding: a run whose last step is
         set_temperature exists to leave the sample at it."""

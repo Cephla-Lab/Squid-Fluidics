@@ -1,5 +1,4 @@
 import logging
-from time import sleep
 from .errors import Cancelled, OperationError
 from . import sequence_utils
 
@@ -177,7 +176,9 @@ class OpenChamberOperations():
                 self.sp.extract(self.extract_port, self.tubing_sp_to_oc, self.speed_code_limit)
                 self.sp.dispense(self.dispense_port, self.tubing_sp_to_oc, speed_code)
                 self._execute_under_drain()
-            sleep(1)
+            # On the run's signal, so a cancel landing in this settle wait
+            # raises out of the operation instead of returning normally.
+            self.sp.run_control.sleep(1)
         except Cancelled:
             raise
         except Exception as e:

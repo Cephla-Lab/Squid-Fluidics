@@ -197,6 +197,20 @@ class TestStopPolicy:
             draw(g, sensor, [0.0] * 200)
         assert g.run_control.cancels == 1
 
+    def test_a_failing_log_still_cancels_the_run(self):
+        """`log` is injected -- the GUI marshals it to the Qt thread. If it
+        raises, the cancel must already have happened, or the plunger keeps
+        moving with the fault recorded on a guard nobody re-checks."""
+        def explode(message):
+            raise RuntimeError("the warning channel went away")
+
+        sensor = FakeSensor(monitor="stop")
+        g = guard_for(sensor, log=explode)
+        with g:
+            with pytest.raises(RuntimeError):
+                _feed(sensor, [0.0] * 10)
+        assert isinstance(g.run_control.cause, FlowFault)
+
     def test_a_fault_is_never_reported_as_an_abort(self):
         """The operator's reflex after a flow alarm is to press Abort a second
         later; first cause wins, so the diagnosis survives."""

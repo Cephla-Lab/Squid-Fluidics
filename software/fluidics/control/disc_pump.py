@@ -30,7 +30,13 @@ class DiscPump():
             self._set_power(0)
 
     def start(self, power_percentage):
+        """Power the pump until stop(). Raises the run's cause if it is already
+        cancelled, rather than powering it for the moment before the caller's
+        next checked call unwinds."""
+        self.run_control.check()
         self._set_power(power_percentage * MCU_CONSTANTS.TTP_MAX_PW)
 
     def stop(self):
+        # Deliberately unchecked: it runs on the unwind path (the drain's own
+        # finally) and from DeviceSet.make_safe, both after the cancel.
         self._set_power(0)

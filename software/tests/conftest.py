@@ -122,8 +122,8 @@ def _fast_clock(monkeypatch):
     monkeypatch.setattr("time.time", fake_time_fn)
 
     # Patch modules that use 'from time import sleep' or 'from time import time'
-    monkeypatch.setattr("fluidics.merfish_operations.sleep", fake_sleep)
-    monkeypatch.setattr("fluidics.open_chamber_operations.sleep", fake_sleep)
+    # The operations' settle waits go through RunControl.sleep -> Event.wait,
+    # patched below, so neither module holds a sleep of its own any more.
     monkeypatch.setattr("fluidics.open_chamber_operations.time", fake_time_fn, raising=False)
     monkeypatch.setattr("fluidics.control.controller.sleep", fake_sleep)
     monkeypatch.setattr("fluidics.control.controller.time", fake_time_fn)
