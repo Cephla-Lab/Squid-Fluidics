@@ -88,13 +88,6 @@ class TestTCMControllerSimulation:
         tc = TCMControllerSimulation(sn=None, channels=1)
         tc.close()
 
-    def test_is_aborted_is_a_view_of_the_run_control(self):
-        tc = TCMControllerSimulation(sn=None, channels=1)
-        assert tc.is_aborted is False
-        tc.run_control.cancel()
-        assert tc.is_aborted is True
-        tc.run_control.reset()
-        assert tc.is_aborted is False
 
 
 # --- The readings channel ---

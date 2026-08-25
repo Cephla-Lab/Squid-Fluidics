@@ -7,6 +7,7 @@ under the autouse _fast_clock fixture without any interaction with it.
 
 import pytest
 
+from fluidics.errors import AbortRequested, SafetyFault
 from fluidics.flow_monitor import FlowMonitor, FlowFault
 
 
@@ -144,11 +145,12 @@ class TestFaultContents:
         assert "340" in text
         assert "350" in text and "650" in text   # the band, spelled out
 
-    def test_fault_is_an_operation_error(self):
-        """So the worker reports it through the existing on_error path."""
-        from fluidics.errors import OperationError
-        m = make(ramp_up=0.0)
-        assert isinstance(feed(m, [0.0] * 3), OperationError)
+    def test_fault_is_a_safety_fault_not_an_abort(self):
+        """A cancellation the worker reports by cause -- with its diagnosis,
+        never as 'aborted by user'."""
+        fault = feed(make(ramp_up=0.0), [0.0] * 3)
+        assert isinstance(fault, SafetyFault)
+        assert not isinstance(fault, AbortRequested)
 
 
 class TestArming:

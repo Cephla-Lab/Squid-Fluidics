@@ -1,15 +1,12 @@
 # tests/integration/test_cancellation.py
-"""The cancellation contract the abort redesign delivers, written first.
+"""The cancellation contract, delivered.
 
-Today an aborted operation returns silently (`if self.sp.is_aborted: return`,
-at dozens of sites), so the worker cannot tell "finished" from "stopped
-halfway" and learns of the abort only through its own separate event. The
-design (AI-docs: 2026-08-14-abort-cancellation-design) replaces that with one
-signal and an unwinding raise from inside the device call.
-
-The tests still marked xfail(strict=True) document what is missing; the moment
-a change makes one pass it fails as XPASS, forcing the marker off in the same
-change. The rest pin what already holds and must survive the redesign.
+An aborted operation used to return silently (`if self.sp.is_aborted:
+return`, at 38 sites), so the worker could not tell "finished" from "stopped
+halfway" and learned of the abort only through its own separate event. Now
+there is one signal, and the raise comes from inside the device call (design:
+AI-docs 2026-08-14-abort-cancellation-design). These tests were written first,
+as xfail(strict=True), and lost their markers in the PR that made them pass.
 """
 
 import pytest
@@ -45,14 +42,6 @@ FLUIDIC_STEPS = {
 # One representative step per stack, for the tests that need only one.
 SEQS = {app: steps[0] for app, steps in FLUIDIC_STEPS.items()}
 
-# Restricted to how today's gap actually fails -- "DID NOT RAISE" and a failed
-# assertion -- so a fixture error or an unexpected exception from an operation
-# is a real failure, not the expected one.
-NOT_YET = pytest.mark.xfail(
-    strict=True, raises=(AssertionError, pytest.fail.Exception),
-    reason="operations still return silently on a prior abort; the redesign raises")
-
-
 APPLICATION_NAMES = {"flow_cell": "Flow Cell", "open_chamber": "Open Chamber"}
 
 
@@ -86,18 +75,23 @@ def test_an_abort_during_a_move_unwinds_by_raising(app, seq, request, during_mov
         ops.process_sequence(seq)
 
 
-@NOT_YET
 def test_an_abort_before_the_operation_starts_raises(stack):
     """A latched abort must not let the next operation silently no-op its
-    way through -- reset_chain, open the valve, queue a draw that the pump
-    then refuses -- and return success."""
+    way through -- nor move a valve on a run that is over: the operation
+    checks the signal before it touches anything."""
     ops, sp, seq, _ = stack
+    # Spy on the real open_port rather than replacing it: the valve system's
+    # own entry check is what refuses, so a stub would bypass the thing under
+    # test and record a move that production would not make.
+    moved = []
+    original = ops.sv.open_port
+    ops.sv.open_port = lambda port: (original(port), moved.append(port))
     sp.run_control.cancel()
     with pytest.raises(AbortRequested):
         ops.process_sequence(seq)
+    assert moved == []
 
 
-@NOT_YET
 def test_the_worker_learns_of_the_abort_from_the_operation(stack):
     """No second channel: the worker must not need its own event to notice
     that the operation it called was cancelled -- so it neither reports that
@@ -111,10 +105,8 @@ def test_the_worker_learns_of_the_abort_from_the_operation(stack):
 
 
 def test_a_flow_fault_reaches_the_operator_as_a_fault_not_an_abort(flow_cell_config):
-    """Pinned before the taxonomy moves. Today this rests on FlowFault not
-    deriving from AbortRequested, which the worker catches first; after the
-    redesign, on the worker reporting by cause. Either way the operator must
-    see the diagnosis, not 'aborted by user'."""
+    """The worker reports by cause: a fault carries its diagnosis, and the
+    operator never sees 'aborted by user' for something they did not do."""
     class FaultingOps:
         def process_sequence(self, seq):
             raise FlowFault("inlet", expected_ul_min=500.0,

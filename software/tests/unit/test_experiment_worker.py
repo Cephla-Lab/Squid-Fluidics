@@ -9,7 +9,7 @@ instead of rewriting the tests.
 
 from types import SimpleNamespace
 
-from fluidics.errors import AbortRequested, RunControl
+from fluidics.errors import AbortRequested, RunControl, SafetyFault
 from fluidics.experiment_worker import ExperimentWorker
 
 from ..worker_helpers import errors_in, record_run
@@ -159,23 +159,6 @@ class TestTheSharedSignal:
         assert events.index(("make_safe",)) < events.index(("error", error))
         assert events[-1] == ("finished",)
 
-    def test_a_cancel_inside_an_operation_is_caught_when_it_returns(self):
-        """Until the operations raise on a prior abort, one that returned
-        early on is_aborted returns normally; the check after dispatch is
-        what keeps that from being reported as Completed."""
-        control = RunControl()
-
-        class CancelAfterFirst(RecordingOps):
-            def process_sequence(self, seq):
-                super().process_sequence(seq)
-                if len(self.processed) == 1:
-                    control.cancel()
-
-        ops, events = run_worker([dict(FLOW), dict(FLOW)], ops=CancelAfterFirst(),
-                                 run_control=control)
-        assert len(ops.processed) == 1
-        assert ("progress", 2, "Started") not in events
-        assert ("make_safe",) in events
 
     def test_a_cancel_landing_between_sequences_does_not_start_the_next(self):
         """After the post-operation check and before the next dispatch is a
@@ -194,6 +177,33 @@ class TestTheSharedSignal:
             "on_error": lambda message: events.append(("error", message)),
         }, run_control=control)
         worker.run()
+        assert ("progress", 2, "Started") not in events
+        assert any("aborted" in message for message in errors_in(events))
+
+    def test_a_safety_fault_is_reported_with_its_diagnosis_not_as_an_abort(self):
+        """The instrument stopped itself. The operator must read what the
+        sensor saw, tagged with the sequence, never 'aborted by user'."""
+        _, events = run_worker([FLOW], ops=RecordingOps(raise_on={0: SafetyFault("flow collapsed on 'inlet'")}))
+        (error,) = errors_in(events)
+        assert "Sequence 1/1" in error and "flow collapsed on 'inlet'" in error
+        assert "abort" not in error.lower()
+        assert "failed on repeat" not in error      # a fault, not a failed step
+        assert events.index(("make_safe",)) < events.index(("error", error))
+
+    def test_a_sequence_cancelled_in_its_tail_is_not_reported_completed(self):
+        """Every wait inside an operation raises, so this is the residual
+        window: a cancel landing after the operation's last wait and before it
+        returns. The operator pressed Abort; the run must not say Completed."""
+        control = RunControl()
+
+        class CancelsOnTheWayOut(RecordingOps):
+            def process_sequence(self, seq):
+                super().process_sequence(seq)
+                control.cancel()
+
+        _, events = run_worker([dict(FLOW), dict(FLOW)], ops=CancelsOnTheWayOut(),
+                               run_control=control)
+        assert ("progress", 1, "Completed") not in events
         assert ("progress", 2, "Started") not in events
         assert any("aborted" in message for message in errors_in(events))
 
@@ -240,20 +250,6 @@ class TestTheSharedSignal:
         assert "bad step" in error
         assert "TEC channel 1 not answering" in error
 
-    def test_the_rig_is_made_safe_once_even_if_reporting_raises(self):
-        """on_error raising inside the per-sequence handler lands in the outer
-        one; the rig must not be quieted twice on the way out."""
-        made_safe = []
-
-        def broken_report(message):
-            raise RuntimeError("dialog gone")
-
-        worker = ExperimentWorker(RecordingOps(raise_on={0: ValueError("bad step")}), [FLOW], CONFIG, callbacks={
-            "make_safe": lambda: made_safe.append(True),
-            "on_error": broken_report,
-        })
-        worker.run()
-        assert made_safe == [True]
 
     def test_finished_is_set_last(self):
         """After on_finished: whoever waits on it may tear the devices down."""

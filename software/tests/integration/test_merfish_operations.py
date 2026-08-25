@@ -1,7 +1,7 @@
 # tests/integration/test_merfish_operations.py
 import pytest
 
-from fluidics.errors import OperationError
+from fluidics.errors import AbortRequested, OperationError
 from fluidics.merfish_operations import MERFISHOperations
 
 
@@ -131,3 +131,25 @@ class TestSetTemperature:
         ops = MERFISHOperations(config, sp, sv)
         seq = {"type": "set_temperature", "temperature": 37}
         ops.process_sequence(seq)  # should not raise
+
+
+class TestACancelMidPriming:
+    def test_the_port_loop_stops_without_moving_another_valve(self, flow_cell_rig, cancel_after_chain):
+        """Priming walks every configured port. A cancel must end the loop
+        where it lands, and two guards hold that: the settle wait raises on
+        the signal, and the valve system refuses to move on entry. This pins
+        the property, not either mechanism -- it fails only if both go."""
+        ops, sp = flow_cell_rig
+        # Spy rather than replace: the valve system's own check is what
+        # refuses, and a stub would record a move production would not make.
+        opened = []
+        original_open = ops.sv.open_port
+        ops.sv.open_port = lambda port: (original_open(port), opened.append(port))
+        # Chain 1 is the dump to waste; chain 2 is the first port's draw, so
+        # the settle wait is the next checked call. Cancelling at the dump
+        # instead would raise at that draw and pin nothing.
+        cancel_after_chain(sp, lambda chains: len(chains) == 2)
+        with pytest.raises(AbortRequested):
+            ops.process_sequence({"type": "priming", "fluidic_port": 1,
+                                  "flow_rate": 500, "volume": 500})
+        assert len(opened) == 1

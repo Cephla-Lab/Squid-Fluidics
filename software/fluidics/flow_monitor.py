@@ -7,13 +7,14 @@ process-wide -- a rule that read the clock itself could not be tested at all.
 
 Deciding is separated from acting. `sample()` returns a fault rather than
 raising or touching the pump, so the caller chooses what a fault means: `warn`
-logs it, `stop` halts the draw and raises it.
+logs it, `stop` cancels the run with it -- the pump's wait then halts the
+plunger and raises it on the thread running the sequence.
 """
 
 import threading
 import time
 
-from .errors import OperationError
+from .errors import SafetyFault
 
 
 def band(expected_ul_min, tolerance_fraction):
@@ -31,7 +32,7 @@ def band(expected_ul_min, tolerance_fraction):
             magnitude * (1 + tolerance_fraction))
 
 
-class FlowFault(OperationError):
+class FlowFault(SafetyFault):
     """Measured flow left its expected band for long enough to count.
 
     Carries the numbers rather than a pre-baked string so the log line, the
@@ -145,9 +146,14 @@ class DrawGuard:
 
     Wrap the blocking pump call:
 
-        with DrawGuard(sensors, expected, stop_pump=self.sp.stop) as guard:
+        with DrawGuard(sensors, expected, run_control=self.sp.run_control):
             self.sp.execute()
-            guard.raise_if_faulted()
+
+    A `stop` sensor's fault cancels the run with itself as the cause. That is
+    the whole halt-and-unwind path: cancel() does no I/O, the thread inside
+    the pump's wait wakes, halts the plunger where the port lives, and raises
+    the fault out of execute() -- on the sequence thread, where it unwinds
+    the operation. Nothing here touches the pump from the reader thread.
 
     Arming and disarming are the context manager's job because the failure
     path is the one that matters: a draw that raises must still leave the
@@ -161,24 +167,16 @@ class DrawGuard:
     per-sensor record.
     """
 
-    def __init__(self, sensors, expected_ul_min, stop_pump, log=print):
+    def __init__(self, sensors, expected_ul_min, run_control, log=print):
         self.sensors = sensors
         self.expected_ul_min = expected_ul_min
-        self.stop_pump = stop_pump
+        self.run_control = run_control
         self.log = log
 
         self._handlers = []
         self._lock = threading.Lock()
         self._fault = None
         self._active = False
-
-    @property
-    def fault(self):
-        """The first fault a `stop` sensor saw, or None. Set from the reader
-        thread. A `warn` sensor never fills this -- warn logs and nothing more,
-        so a fault recorded here always means the draw is being failed."""
-        with self._lock:
-            return self._fault
 
     def __enter__(self):
         started_at = time.time()
@@ -217,16 +215,6 @@ class DrawGuard:
         self._handlers.clear()
         return False
 
-    def raise_if_faulted(self):
-        """Raise the fault a `stop` sensor recorded, if there was one.
-
-        Separate from the callback so the raise happens on the thread running
-        the sequence. Raising from the reader thread would only kill the reader.
-        """
-        fault = self.fault
-        if fault is not None:
-            raise fault
-
     def _make_handler(self, sensor, mode, rule):
         """One closure per sensor, holding its own rule and mode."""
         stop = (mode == "stop")
@@ -264,20 +252,19 @@ class DrawGuard:
                 # an in-draw trip as late.
                 return
             if claimed:
+                # First, before anything that could block or raise: `log` is
+                # injected (the GUI marshals it to the Qt thread), and a
+                # failing sink must not leave the plunger moving. No I/O on
+                # this (reader) thread -- the sequence thread, inside the
+                # pump's wait, wakes on this, halts the plunger and raises the
+                # fault out of execute(). First cause wins, so an Abort
+                # pressed a second later cannot overwrite the diagnosis.
+                self.run_control.cancel(fault)
                 self.log(f"Stopping draw: {fault}")
-                # terminateCmd() from the reader thread, while the sequence
-                # thread sits in wait_for_stop -- the one halt issued from a
-                # thread other than the run's own. If it raises we must not
-                # take the reader down with it; the fault is already recorded
-                # and will still be raised.
-                try:
-                    self.stop_pump()
-                except Exception as e:
-                    self.log(f"Failed to stop the pump after a flow fault: {e}")
             # Published win or lose: losing the claim only means another sensor
             # faulted first, not that this one saw nothing. Its recording
-            # should carry its own observation. After the pump halt, so the
-            # bookkeeping never delays the stop.
+            # should carry its own observation. After the cancel, so the
+            # bookkeeping never delays the halt.
             sensor.notify_fault(mode, fault, timestamp)
 
         return handle

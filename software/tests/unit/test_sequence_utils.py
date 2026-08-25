@@ -1,7 +1,7 @@
 import pytest
 
 from fluidics.control.temperature_controller import TCMControllerSimulation
-from fluidics.errors import OperationError
+from fluidics.errors import AbortRequested, OperationError, RunControl
 from fluidics.sequence_utils import set_temperature
 
 
@@ -13,7 +13,6 @@ class _StuckController:
         self.stabilization_timeout_seconds = stabilization_timeout_seconds
         self.target_temperatures = [0.0] * channels
         self.actual_temperatures = [0.0] * channels  # never matches a non-zero target
-        self.is_aborted = False
 
     def set_target_temperature(self, channel, t):
         self.target_temperatures[channel - 1] = t
@@ -22,32 +21,41 @@ class _StuckController:
         return self.actual_temperatures[channel - 1]
 
 
+@pytest.fixture
+def control():
+    """The run's signal, fresh per test -- set_temperature takes it now
+    rather than reading it off the controller."""
+    return RunControl()
+
+
 class TestSetTemperature:
-    def test_none_controller_warns_and_returns(self, caplog):
+    def test_none_controller_warns_and_returns(self, caplog, control):
         with caplog.at_level("WARNING", logger="fluidics.sequence_utils"):
-            set_temperature(None, 37.0)  # should not raise
+            set_temperature(None, 37.0, control)  # should not raise
         assert "No temperature controller" in caplog.text
 
-    def test_one_channel_converges_immediately(self):
+    def test_one_channel_converges_immediately(self, control):
         tc = TCMControllerSimulation(sn=None, channels=1)
-        set_temperature(tc, 42.0)
+        set_temperature(tc, 42.0, control)
         assert tc.target_temperatures == [42.0]
         assert tc.actual_temperatures == [42.0]
 
-    def test_two_channel_sets_both_channels(self):
+    def test_two_channel_sets_both_channels(self, control):
         tc = TCMControllerSimulation(sn=None, channels=2)
-        set_temperature(tc, 30.0)
+        set_temperature(tc, 30.0, control)
         assert tc.target_temperatures == [30.0, 30.0]
         assert tc.actual_temperatures == [30.0, 30.0]
 
-    def test_timeout_raises_operation_error(self):
+    def test_timeout_raises_operation_error(self, control):
         tc = _StuckController(channels=1, stabilization_timeout_seconds=5)
         with pytest.raises(OperationError, match="failed to stabilize"):
-            set_temperature(tc, 50.0)
+            set_temperature(tc, 50.0, control)
 
-    def test_abort_returns_silently(self):
+    def test_a_cancelled_run_raises_before_it_writes_a_target(self, control):
+        """Not a silent return, and not after setting a target on a run that
+        is over: the caller could not tell 'reached target' from 'gave up'."""
         tc = _StuckController(channels=1, stabilization_timeout_seconds=5)
-        tc.is_aborted = True
-        set_temperature(tc, 50.0)  # should return without raising
-        # target was still set on the controller before the abort check
-        assert tc.target_temperatures == [50.0]
+        control.cancel()
+        with pytest.raises(AbortRequested):
+            set_temperature(tc, 50.0, control)
+        assert tc.target_temperatures == [0.0]      # nothing written

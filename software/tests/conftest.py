@@ -48,10 +48,9 @@ def real_clock(monkeypatch):
 def during_move():
     """Hook a side effect into a pump's wait_for_stop -- inside the move.
 
-    Not around execute(): execute() clears the pump's wake event on entry, so
-    a stop() delivered before it would be wiped by the very call it was meant
-    to interrupt -- and a cancel delivered before it takes a different path
-    (_arm() raises) from the mid-move one these tests model.
+    Not around execute(): a cancel delivered before execute() is caught by
+    _arm() before any chain is dispatched, a different path from the mid-move
+    one these tests model.
     """
     def _hook(sp, side_effect):
         original_wait = sp.wait_for_stop
@@ -63,6 +62,33 @@ def during_move():
         sp.wait_for_stop = wait_for_stop
 
     return _hook
+
+
+@pytest.fixture
+def cancel_after_chain():
+    """Cancel the run once the pump has executed a chain `when` picks out.
+
+    Where a cancel lands relative to the queued chains decides which checked
+    call raises next, so it is the seam the operations' unwinding is tested
+    at. `when` receives the list of chains executed so far.
+    """
+    def _hook(sp, when):
+        original = sp.execute
+
+        def execute():
+            original()
+            if when(sp.executed):
+                sp.run_control.cancel()
+
+        sp.execute = execute
+
+    return _hook
+
+
+def dispenses(chain):
+    """Whether a chain pushes liquid out -- the last chain of a fluidic
+    operation, as opposed to a draw or a dump to waste."""
+    return any(op[0] == "dispense" for op in chain)
 
 
 @pytest.fixture
@@ -123,12 +149,11 @@ def _fast_clock(monkeypatch):
     monkeypatch.setattr("time.time", fake_time_fn)
 
     # Patch modules that use 'from time import sleep' or 'from time import time'
-    monkeypatch.setattr("fluidics.merfish_operations.sleep", fake_sleep)
-    monkeypatch.setattr("fluidics.open_chamber_operations.sleep", fake_sleep)
-    monkeypatch.setattr("fluidics.open_chamber_operations.time", fake_time_fn, raising=False)
+    # The operations' settle waits and sequence_utils' stabilization wait go
+    # through RunControl.sleep -> Event.wait, patched below; none of those
+    # modules holds a sleep of its own any more.
     monkeypatch.setattr("fluidics.control.controller.sleep", fake_sleep)
     monkeypatch.setattr("fluidics.control.controller.time", fake_time_fn)
-    monkeypatch.setattr("fluidics.sequence_utils.sleep", fake_sleep, raising=False)
     monkeypatch.setattr("fluidics.sequence_utils.time", fake_time_fn, raising=False)
 
     # Patch threading.Event.wait (used by DiscPump.aspirate)

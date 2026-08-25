@@ -13,6 +13,7 @@ import time
 
 import pytest
 
+from fluidics.errors import AbortRequested, RunControl
 from fluidics.flow_monitor import DrawGuard, FlowFault
 
 
@@ -43,17 +44,22 @@ class FakeSensor:
             callback(flow, timestamp)
 
 
-class RecordingPump:
+class RecordingControl(RunControl):
+    """Counts cancel() calls: the guard must cancel once per draw, not once
+    per faulting sample."""
+
     def __init__(self):
-        self.stops = 0
+        super().__init__()
+        self.cancels = 0
 
-    def stop(self):
-        self.stops += 1
+    def cancel(self, cause=None):
+        self.cancels += 1
+        return super().cancel(cause)
 
 
-def guard_for(*sensors, pump=None, expected=500.0, log=None):
+def guard_for(*sensors, control=None, expected=500.0, log=None):
     return DrawGuard(list(sensors), expected_ul_min=expected,
-                     stop_pump=(pump or RecordingPump()).stop,
+                     run_control=control if control is not None else RunControl(),
                      log=(log if log is not None else lambda m: None))
 
 
@@ -77,10 +83,11 @@ def _replay(handler, flows):
 
 
 def draw(guard, sensor, flows):
-    """Run one draw: arm, feed, disarm, then raise if it faulted."""
+    """Run one draw: arm, feed, then raise the cause if the run was cancelled
+    -- standing in for the pump's wait, which is what raises it in production."""
     with guard:
         _feed(sensor, flows)
-        guard.raise_if_faulted()
+        guard.run_control.check()
 
 
 class TestArming:
@@ -111,18 +118,17 @@ class TestArming:
         """The GUI can flip the combo at any moment. A draw that armed under
         `warn` must finish under `warn`, not start halting halfway."""
         sensor = FakeSensor(monitor="warn")
-        pump = RecordingPump()
-        g = guard_for(sensor, pump=pump)
+        g = guard_for(sensor)
         with g:
             sensor.monitor = "stop"
             _feed(sensor, [0.0] * 10)
-            g.raise_if_faulted()
-        assert pump.stops == 0
+            g.run_control.check()
+        assert not g.run_control.cancelled
 
     def test_no_sensors_at_all_is_fine(self):
         g = guard_for()
         with g:
-            g.raise_if_faulted()
+            g.run_control.check()
 
 
 class TestSamplesArrivingAfterTheDraw:
@@ -131,23 +137,13 @@ class TestSamplesArrivingAfterTheDraw:
     By then the draw is over and the pump may be executing the next chain.
     """
 
-    def test_a_late_sample_does_not_stop_the_pump(self):
-        sensor, pump = FakeSensor(monitor="stop"), RecordingPump()
-        g = guard_for(sensor, pump=pump)
-        with g:
-            handler = sensor.subscribers[0]      # the snapshot notify would hold
-        _replay(handler, [0.0] * 10)
-        assert pump.stops == 0
-
-    def test_a_late_sample_does_not_record_a_fault(self):
-        """It would land on a guard whose raise_if_faulted has already run, so
-        the run would carry on with a fault recorded and never reported."""
+    def test_a_late_sample_does_not_cancel_the_run(self):
         sensor = FakeSensor(monitor="stop")
         g = guard_for(sensor)
         with g:
-            handler = sensor.subscribers[0]
+            handler = sensor.subscribers[0]      # the snapshot notify would hold
         _replay(handler, [0.0] * 10)
-        assert g.fault is None
+        assert not g.run_control.cancelled
 
     def test_a_late_sample_does_not_log_a_warning(self):
         lines = []
@@ -160,55 +156,69 @@ class TestSamplesArrivingAfterTheDraw:
 
 
 class TestStopPolicy:
-    def test_healthy_flow_neither_stops_nor_raises(self):
-        sensor, pump = FakeSensor(monitor="stop"), RecordingPump()
-        g = guard_for(sensor, pump=pump)
+    def test_healthy_flow_neither_cancels_nor_raises(self):
+        sensor = FakeSensor(monitor="stop")
+        g = guard_for(sensor)
         draw(g, sensor, [500.0] * 50)
-        assert pump.stops == 0
+        assert not g.run_control.cancelled
 
-    def test_a_dead_draw_stops_the_pump_and_raises(self):
-        sensor, pump = FakeSensor(monitor="stop"), RecordingPump()
-        g = guard_for(sensor, pump=pump)
-        with pytest.raises(FlowFault):
+    def test_a_dead_draw_cancels_the_run_with_the_fault_as_its_cause(self):
+        """The whole halt-and-unwind path is the cancel: the pump's wait wakes
+        on it, halts the plunger where the port lives, and raises this."""
+        sensor = FakeSensor(monitor="stop")
+        g = guard_for(sensor)
+        with pytest.raises(FlowFault) as excinfo:
             draw(g, sensor, [0.0] * 10)
-        assert pump.stops == 1
+        assert g.run_control.cause is excinfo.value
 
-    def test_the_pump_is_stopped_before_the_draw_returns(self):
-        """The raise happens after the pump call returns; the stop cannot wait
-        for that or the liquid keeps moving until the move finishes anyway."""
-        sensor, pump = FakeSensor(monitor="stop"), RecordingPump()
-        with guard_for(sensor, pump=pump) as g:
+    def test_the_run_is_cancelled_the_moment_the_rule_trips(self):
+        """From the reader thread, mid-draw: the sequence thread's wait wakes
+        on it. Waiting for the draw to return would let the liquid keep
+        moving until the move finished anyway."""
+        sensor = FakeSensor(monitor="stop")
+        with guard_for(sensor) as g:
             _feed(sensor, [0.0] * 10)
-            assert pump.stops == 1          # already stopped, still inside
-            with pytest.raises(FlowFault):
-                g.raise_if_faulted()
+            assert isinstance(g.run_control.cause, FlowFault)   # still inside
 
-    def test_the_pump_is_stopped_once_however_long_the_fault_persists(self):
-        sensor, pump = FakeSensor(monitor="stop"), RecordingPump()
-        g = guard_for(sensor, pump=pump)
+    def test_the_run_is_cancelled_once_however_long_the_fault_persists(self):
+        sensor = FakeSensor(monitor="stop")
+        g = guard_for(sensor, control=RecordingControl())
         with pytest.raises(FlowFault):
             draw(g, sensor, [0.0] * 200)
-        assert pump.stops == 1
+        assert g.run_control.cancels == 1
 
-    def test_a_failing_stop_does_not_lose_the_fault(self):
-        """stop() runs on the reader thread. If it raises there, the exception
-        would kill the reader and the operator would be told nothing."""
-        def explode():
-            raise IOError("serial port went away")
+    def test_a_failing_log_still_cancels_the_run(self):
+        """`log` is injected -- the GUI marshals it to the Qt thread. If it
+        raises, the cancel must already have happened, or the plunger keeps
+        moving with the fault recorded on a guard nobody re-checks."""
+        def explode(message):
+            raise RuntimeError("the warning channel went away")
 
         sensor = FakeSensor(monitor="stop")
-        g = DrawGuard([sensor], expected_ul_min=500.0, stop_pump=explode,
-                      log=lambda m: None)
-        with pytest.raises(FlowFault):
-            draw(g, sensor, [0.0] * 10)
+        g = guard_for(sensor, log=explode)
+        with g:
+            with pytest.raises(RuntimeError):
+                _feed(sensor, [0.0] * 10)
+        assert isinstance(g.run_control.cause, FlowFault)
+
+    def test_a_fault_is_never_reported_as_an_abort(self):
+        """The operator's reflex after a flow alarm is to press Abort a second
+        later; first cause wins, so the diagnosis survives."""
+        sensor = FakeSensor(monitor="stop")
+        g = guard_for(sensor)
+        with g:
+            _feed(sensor, [0.0] * 10)
+            g.run_control.cancel()          # the operator's Abort, a beat later
+        assert isinstance(g.run_control.cause, FlowFault)
+        assert not isinstance(g.run_control.cause, AbortRequested)
 
 
 class TestWarnPolicy:
-    def test_warn_does_not_stop_the_pump(self):
-        sensor, pump = FakeSensor(monitor="warn"), RecordingPump()
-        g = guard_for(sensor, pump=pump)
+    def test_warn_does_not_cancel_the_run(self):
+        sensor = FakeSensor(monitor="warn")
+        g = guard_for(sensor)
         draw(g, sensor, [0.0] * 50)
-        assert pump.stops == 0
+        assert not g.run_control.cancelled
 
     def test_warn_does_not_raise(self):
         sensor = FakeSensor(monitor="warn")
@@ -255,15 +265,16 @@ class TestFaultPublication:
         # readings around it do.
         assert timestamp == pytest.approx(time.time() + 3 * 0.06)
 
-    def test_a_stop_trip_is_published_after_the_pump_is_halted(self):
-        stops_before_publish = []
-        pump = RecordingPump()
+    def test_a_stop_trip_is_published_after_the_run_is_cancelled(self):
+        """The cancel is what halts the pump; the bookkeeping never delays it."""
+        cancelled_before_publish = []
+        control = RecordingControl()
         sensor = FakeSensor(monitor="stop")
-        sensor.notify_fault = lambda mode, fault, ts: stops_before_publish.append(pump.stops)
-        g = guard_for(sensor, pump=pump)
+        sensor.notify_fault = lambda mode, fault, ts: cancelled_before_publish.append(control.cancelled)
+        g = guard_for(sensor, control=control)
         with pytest.raises(FlowFault):
             draw(g, sensor, [0.0] * 10)
-        assert stops_before_publish == [1]
+        assert cancelled_before_publish == [True]
 
     def test_published_once_per_draw_not_once_per_sample(self):
         sensor = FakeSensor(monitor="warn")
@@ -308,7 +319,7 @@ class TestFaultPublication:
             with g:
                 _feed(first, [0.0] * 10)
                 _feed(second, [0.0] * 10)
-                g.raise_if_faulted()
+                g.run_control.check()
         assert [m for m, f, t in first.faults] == ["stop"]
         assert [m for m, f, t in second.faults] == ["stop"]
         assert second.faults[0][1].sensor_name == "second"
@@ -320,26 +331,24 @@ class TestTwoSensors:
         500 and outside a 10% one."""
         loose = FakeSensor(name="loose", monitor="stop", tolerance_fraction=0.3)
         tight = FakeSensor(name="tight", monitor="stop", tolerance_fraction=0.1)
-        pump = RecordingPump()
-        g = guard_for(loose, tight, pump=pump)
+        g = guard_for(loose, tight)
         with pytest.raises(FlowFault) as excinfo:
             with g:
                 _feed(loose, [400.0] * 10)
                 _feed(tight, [400.0] * 10)
-                g.raise_if_faulted()
+                g.run_control.check()
         assert excinfo.value.sensor_name == "tight"
 
     def test_one_sensor_can_stop_while_the_other_only_warns(self):
         lines = []
         warner = FakeSensor(name="warner", monitor="warn")
         stopper = FakeSensor(name="stopper", monitor="stop")
-        pump = RecordingPump()
-        g = guard_for(warner, stopper, pump=pump, log=lines.append)
+        g = guard_for(warner, stopper, log=lines.append)
         with pytest.raises(FlowFault) as excinfo:
             with g:
                 _feed(warner, [0.0] * 10)
                 _feed(stopper, [0.0] * 10)
-                g.raise_if_faulted()
+                g.run_control.check()
         assert excinfo.value.sensor_name == "stopper"
         assert any("warner" in line for line in lines)
 
@@ -353,5 +362,5 @@ class TestTwoSensors:
             with g:
                 _feed(first, [0.0] * 10)
                 _feed(second, [0.0] * 10)
-                g.raise_if_faulted()
+                g.run_control.check()
         assert excinfo.value.sensor_name == "first"

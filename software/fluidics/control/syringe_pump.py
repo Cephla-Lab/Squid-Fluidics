@@ -11,47 +11,32 @@ _logger = logging.getLogger(__name__)
 class Interruptible:
     """Halting a move that is already running, shared by both pump classes.
 
-    Two ways a running move is interrupted, differing in whether they latch.
-
-    A cancel on the run's RunControl -- the operator pressed Abort -- touches
-    no hardware on the cancelling thread: the thread inside wait_for_stop
-    wakes (the pump registers its own wake event as a waker), halts the
-    plunger on the thread that owns the port, and raises the cause out of the
-    device call, so the operation unwinds instead of returning as if it had
-    finished. It latches until RunControl.reset().
-
-    stop() is for a fault the caller is about to raise on -- a flow fault,
-    say. It halts the plunger from the caller's thread, does not latch and
-    does not cancel the run: the run is being failed by whoever called it,
-    and a cancel here would report a hardware problem as a user action.
+    A move is interrupted by a cancel on the run's RunControl -- the operator
+    pressed Abort, or draw protection raised a flow fault on it. Nothing
+    touches the hardware on the cancelling thread: the thread inside
+    wait_for_stop wakes, halts the plunger on the thread that owns the port,
+    and raises the cause out of the device call, so the operation unwinds
+    instead of returning as if it had finished. The cause latches until
+    RunControl.reset().
 
     Shared rather than written twice because the simulation is where these
     semantics get tested -- the real pump needs hardware. Two copies would put
-    the tested one and the shipped one out of reach of each other, which is
-    exactly how the sleep-through-abort bug survived 230 passing tests.
+    the tested one and the shipped one out of reach of each other.
 
-    Subclasses supply the two hardware-shaped pieces: _terminate() to halt the
+    Subclasses supply the two hardware-shaped pieces: halt() to stop the
     plunger, and _move_finished() to say whether it has stopped.
     """
 
-    def _init_interrupt(self, run_control=None):
+    def _init_run_control(self, run_control=None):
         self.is_busy = False
-        self._interrupt = threading.Event()
         self.run_control = run_control if run_control is not None else RunControl()
-        # One event wakes the wait for either reason; a cancel reaches it
-        # through the waker.
-        self.run_control.add_waker(self._interrupt.set)
-
-    @property
-    def is_aborted(self):
-        """Whether the run is cancelled -- the signal every device of the run
-        shares, read by the operations' early-return checks."""
-        return self.run_control.cancelled
 
     # --- what a real pump does and a simulated one cannot ---
 
-    def _terminate(self):
-        """Halt the plunger. Nothing to halt in simulation."""
+    def halt(self):
+        """Stop the plunger, whatever it is doing. Nothing to stop in
+        simulation. Called by the thread inside wait_for_stop when the run is
+        cancelled, and by DeviceSet.make_safe once a run has ended early."""
 
     def _move_finished(self):
         """Whether the move has ended. A simulated move ends when its
@@ -60,50 +45,31 @@ class Interruptible:
 
     # --- interruption ---
 
-    def stop(self):
-        self._terminate()
-        self._interrupt.set()
-
-    def _arm(self):
-        """Clear any stale interrupt; raise if the run is already cancelled.
-
-        Clearing before checking, and cancel() setting the cause before the
-        waker sets the event, is what makes a cancel landing anywhere around
-        here still count: either the cause is already set and this raises, or
-        the event is set afterwards and wait_for_stop wakes on it and raises.
-        """
-        self._interrupt.clear()
-        self.run_control.check()
-
     def wait_for_stop(self, t=0):
-        """Block until the move finishes, or until a cancel or stop() interrupts.
-        Raises the run's cancellation cause if it was cancelled.
+        """Block until the move finishes or the run is cancelled. On a cancel,
+        halt the plunger here -- on the thread that owns the move -- then
+        raise the cause.
 
-        t is the pump's estimate of how long the whole chain will take, which
-        for a 2000 uL draw at 500 uL/min is about 240 s. This used to be
-        time.sleep(t) -- an uninterruptible sleep for the entire move, so an
-        interrupt halted the plunger immediately but the caller stayed asleep
-        and the run did not unwind until the estimate elapsed. Waiting on the
-        event returns the moment either arrives; _move_finished() stays the
-        authoritative end-of-move signal, with the estimate only gating when we
-        start asking.
+        t is the pump's estimate of how long the whole chain will take -- about
+        240 s for a 2000 uL draw at 500 uL/min -- so it only gates when we
+        start asking: _move_finished() is the authoritative end-of-move
+        signal, and waiting on the run's signal returns the moment it trips.
         """
-        interrupted = self._interrupt.wait(t)
-        while not interrupted and not self._move_finished():
-            interrupted = self._interrupt.wait(0.5)
+        cancelled = self.run_control.wait(t)
+        while not cancelled and not self._move_finished():
+            cancelled = self.run_control.wait(0.5)
         self.is_busy = False
-        if self.run_control.cancelled:
-            # Halt here, on the thread that owns the move, then unwind. This
-            # also closes the window between _arm() and dispatch: a cancel
-            # landing there wakes this wait at once and halts the move it
-            # could not prevent.
+        if cancelled:
+            # This also closes the window between the check in execute() and
+            # dispatch: a cancel landing there returns from the wait at once
+            # and halts the move it could not prevent.
             try:
-                self._terminate()
+                self.halt()
             except Exception as e:
-                # The abort still has to reach the worker -- its safety
+                # The cancellation still has to reach the worker -- its safety
                 # cleanup depends on it -- so the halt failure is reported
-                # here, loudly, rather than replacing the cancellation.
-                _logger.error("Halting the plunger after the abort failed; the "
+                # here, loudly, rather than replacing the cause.
+                _logger.error("Halting the plunger after the cancel failed; the "
                               "pump may still be moving: %s", e, exc_info=True)
         self.run_control.check()
 
@@ -223,7 +189,7 @@ class SyringePump(SpeedCodes, Interruptible):
         self._serial_lock = threading.Lock()
 
         self.get_plunger_position()
-        self._init_interrupt(run_control)
+        self._init_run_control(run_control)
 
         _logger.info("Syringe pump initialized.")
 
@@ -254,7 +220,7 @@ class SyringePump(SpeedCodes, Interruptible):
 
     def execute(self):
         # wait_for_stop is the only waiting path.
-        self._arm()
+        self.run_control.check()
         self.is_busy = True
         with self._serial_lock:
             t = self.syringe.executeChain(minimal_reset=True)
@@ -282,8 +248,6 @@ class SyringePump(SpeedCodes, Interruptible):
             return self.syringe.exec_time
 
     def dispense(self, port, volume, speed_code):
-        if self.is_aborted:
-            return
         with self._serial_lock:
             self.syringe.setSpeed(self.effective_speed_code(speed_code))
             self.syringe.dispense(port, volume)
@@ -292,8 +256,6 @@ class SyringePump(SpeedCodes, Interruptible):
         return t
 
     def extract(self, port, volume, speed_code):
-        if self.is_aborted:
-            return
         with self._serial_lock:
             self.syringe.setSpeed(self.effective_speed_code(speed_code))
             self.syringe.extract(port, volume)
@@ -302,8 +264,6 @@ class SyringePump(SpeedCodes, Interruptible):
         return t
 
     def dispense_to_waste(self, speed_code=None):
-        if self.is_aborted:
-            return
         with self._serial_lock:
             self.syringe.setSpeed(self.effective_speed_code(speed_code))
             self.syringe.dispenseToWaste(retain_port=False)
@@ -311,11 +271,11 @@ class SyringePump(SpeedCodes, Interruptible):
         self.chained_volume = 0
         return t
 
-    def _terminate(self):
-        # Called from other threads (the GUI's abort, the reader thread's
-        # flow-fault stop). The lock only makes it queue behind an in-flight
-        # round trip -- or, rarely, the driver's own error-recovery sequence
-        # -- never behind a move.
+    def halt(self):
+        # The lock only makes this queue behind an in-flight round trip -- or,
+        # rarely, the driver's own error-recovery sequence -- never behind a
+        # move. Called from the thread inside wait_for_stop, and from
+        # make_safe on the worker thread once a run has ended.
         with self._serial_lock:
             self.syringe.terminateCmd()
 
@@ -350,9 +310,8 @@ class SyringePumpSimulation(SpeedCodes, Interruptible):
     so existing tests keep the same headroom before an emptying dump.
 
     An execute() that a cancel wakes early raises before folding the chain,
-    and the chain is consumed as the Tecan's is. One that stop() wakes early
-    still folds the whole chain, where a real pump reads back a partial
-    plunger position -- the partial volume is not modeled.
+    and the chain is consumed as the Tecan's is; the partial volume a real
+    pump reads back after the halt is not modeled.
     """
 
     def __init__(self, sn, syringe_ul, speed_code_limit, waste_port, num_ports=4, slope=14,
@@ -364,7 +323,7 @@ class SyringePumpSimulation(SpeedCodes, Interruptible):
         self._held_ul = 0.5 * syringe_ul
         self._chain = []
         self.executed = []
-        self._init_interrupt(run_control)
+        self._init_run_control(run_control)
         self.get_plunger_position()
         _logger.info("Simulated syringe pump.")
 
@@ -408,7 +367,7 @@ class SyringePumpSimulation(SpeedCodes, Interruptible):
         self._chain = []
 
     def execute(self):
-        self._arm()
+        self.run_control.check()
         self.is_busy = True
         try:
             self.wait_for_stop(5)
@@ -424,22 +383,16 @@ class SyringePumpSimulation(SpeedCodes, Interruptible):
         return 5
 
     def dispense(self, port, volume, speed_code):
-        if self.is_aborted:
-            return
         self._chain.append(("dispense", port, volume,
                             self.effective_speed_code(speed_code)))
         return 5
 
     def extract(self, port, volume, speed_code):
-        if self.is_aborted:
-            return
         self._chain.append(("extract", port, volume,
                             self.effective_speed_code(speed_code)))
         return 5
 
     def dispense_to_waste(self, speed_code=None):
-        if self.is_aborted:
-            return
         self._chain.append(("dispense_to_waste",
                             self.effective_speed_code(speed_code)))
         return 5

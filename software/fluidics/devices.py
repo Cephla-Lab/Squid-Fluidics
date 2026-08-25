@@ -108,7 +108,7 @@ class DeviceSet:
         output off on every channel, drain pump off. Shielded per step;
         returns the exceptions raised, already logged, for the worker to
         report."""
-        steps = [self.syringe_pump.stop]
+        steps = [self.syringe_pump.halt]
         tc = self.temperature_controller
         if tc is not None:
             steps.extend(partial(tc.set_output_enabled, c, False)
@@ -198,7 +198,6 @@ def build_devices(config, simulation=False, on_issue=_print_issue):
                 channels=tc_cfg.channels,
                 tolerance_celsius=tc_cfg.tolerance_celsius,
                 stabilization_timeout_seconds=tc_cfg.stabilization_timeout_seconds,
-                run_control=run_control,
             )
         except Exception as e:
             # Survivable only on hardware, where the usual cause is a flaky
@@ -223,7 +222,7 @@ def build_devices(config, simulation=False, on_issue=_print_issue):
             flow_sensors = []
             on_issue(ISSUE_FLOW_SENSORS, f"Failed to initialize flow sensors: {e}")
 
-        selector_valves = SelectorValveSystem(controller, config)
+        selector_valves = SelectorValveSystem(controller, config, run_control)
         disc_pump = (DiscPump(controller, run_control)
                      if config.application == "Open Chamber" else None)
     except Exception:
@@ -258,12 +257,14 @@ def build_operations(config, devices, on_warning=None):
                                  devices.selector_valves,
                                  devices.temperature_controller,
                                  devices.flow_sensors,
-                                 on_warning=on_warning)
+                                 on_warning=on_warning,
+                                 run_control=devices.run_control)
     if config.application == "Open Chamber":
         return OpenChamberOperations(config, devices.syringe_pump,
                                      devices.selector_valves,
                                      devices.disc_pump,
-                                     devices.temperature_controller)
+                                     devices.temperature_controller,
+                                     run_control=devices.run_control)
     raise ValueError(f"Unsupported application: {config.application!r}")
 
 

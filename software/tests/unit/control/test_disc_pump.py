@@ -55,6 +55,25 @@ class TestAspirate:
 
 
 
+class TestStartAndStop:
+    def test_start_refuses_on_a_cancelled_run_without_powering_the_pump(self, pump):
+        """The drain is started before the syringe pump's checked execute; on a
+        cancelled run it would otherwise be powered for the moment before that
+        call unwinds."""
+        pump.run_control.cancel()
+        with pytest.raises(AbortRequested):
+            pump.start(0.3)
+        assert power_commands(pump) == []
+
+    def test_stop_still_works_on_a_cancelled_run(self, pump):
+        """It runs on the unwind path -- the drain's own finally -- and from
+        DeviceSet.make_safe, both after the cancel."""
+        pump.start(0.3)
+        pump.run_control.cancel()
+        pump.stop()
+        assert power_commands(pump)[-1] == 0
+
+
 def test_power_commands_wait_seconds_not_the_default_thirty(pump):
     """A power command completes within one MCU status interval; the 30 s
     default only ever costs time on a dead MCU -- with make_safe waiting."""
