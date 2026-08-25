@@ -19,7 +19,7 @@ from fluidics.control.selector_valve import SelectorValveSystem
 from fluidics.control.syringe_pump import SyringePumpSimulation
 from fluidics.control.temperature_controller import TCMControllerSimulation
 from fluidics.devices import DeviceSet, build_devices, build_operations
-from fluidics.errors import AbortRequested
+from fluidics.errors import AbortRequested, RunControl
 from fluidics.merfish_operations import MERFISHOperations
 from fluidics.open_chamber_operations import OpenChamberOperations
 
@@ -212,7 +212,8 @@ def device_set(config, pump=None, controller=None, tc=None, sensors=()):
     return DeviceSet(config, controller if controller is not None else ClosableStub(),
                      pump if pump is not None else RecordingPump(),
                      selector_valves=None, disc_pump=None,
-                     temperature_controller=tc, flow_sensors=list(sensors))
+                     temperature_controller=tc, flow_sensors=list(sensors),
+                     run_control=RunControl())
 
 
 class Abortable:
@@ -235,7 +236,7 @@ class TestDeviceSetAbort:
                             selector_valves=None,
                             disc_pump=Abortable("disc_pump", events),
                             temperature_controller=Abortable("tc", events),
-                            flow_sensors=[])
+                            flow_sensors=[], run_control=RunControl())
         devices.abort()
         assert events == ["pump", "disc_pump", "tc"]
 
@@ -244,7 +245,8 @@ class TestDeviceSetAbort:
         devices = DeviceSet(flow_cell_config, controller=None,
                             syringe_pump=Abortable("pump", events),
                             selector_valves=None, disc_pump=None,
-                            temperature_controller=None, flow_sensors=[])
+                            temperature_controller=None, flow_sensors=[],
+                            run_control=RunControl())
         devices.abort()
         assert events == ["pump"]
 

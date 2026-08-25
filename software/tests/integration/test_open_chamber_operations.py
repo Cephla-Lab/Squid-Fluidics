@@ -1,6 +1,8 @@
 # tests/integration/test_open_chamber_operations.py
 import pytest
 
+from fluidics.errors import AbortRequested
+
 
 @pytest.fixture
 def oc_ops(open_chamber_rig):
@@ -189,3 +191,13 @@ class TestDrainPumpAndCleanUpGuards:
         ops.process_sequence({"type": "clean_up", "fluidic_port": 10,
                               "flow_rate": 1000, "volume": 1000})
         assert aspirations == []
+
+
+def test_an_abort_on_the_pump_reaches_the_drain_pump(open_chamber_rig):
+    """The rig's two waiting devices share one signal, as build_devices wires
+    them. On separate signals an abort landing between a syringe move and the
+    drain's timed aspiration would run the aspiration in full."""
+    ops, sp = open_chamber_rig
+    sp.abort()
+    with pytest.raises(AbortRequested):
+        ops.dp.aspirate(20)

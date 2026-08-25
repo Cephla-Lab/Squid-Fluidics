@@ -1,9 +1,10 @@
 import logging
 import threading
 
-# Re-exported: OperationError and AbortRequested were defined here before
-# fluidics.errors existed, and scripts may still import them from here.
-from .errors import AbortRequested, OperationError  # noqa: F401
+from .errors import AbortRequested
+# Re-exported: defined here before fluidics.errors existed, and scripts
+# outside this package may still import it from here.
+from .errors import OperationError  # noqa: F401
 
 _logger = logging.getLogger(__name__)
 

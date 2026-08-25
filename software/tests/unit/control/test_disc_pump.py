@@ -15,8 +15,7 @@ class RecordingController:
     def send_command(self, command, *args):
         self.sent.append((command, *args))
 
-    def wait_for_completion(self):
-        pass
+    send_command_blocking = send_command
 
 
 @pytest.fixture

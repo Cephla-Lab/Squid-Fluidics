@@ -41,28 +41,22 @@ class SafetyFault(Cancelled):
 
 
 class RunControl:
-    """The one cancellation signal a run shares, owned at app scope and
-    injected into every device that waits.
+    """The one cancellation signal a run shares: built once per run and handed
+    to every device that waits, so an abort from any entry point reaches all
+    of them. A device constructed alone gets a private one.
 
-    cancel() itself performs no device I/O: it is called from the Qt thread,
-    a SIGINT handler, or the MCU reader thread -- none of which owns a serial
+    cancel() itself does no device I/O -- it is called from the Qt thread, a
+    SIGINT handler, or the MCU reader thread, none of which owns a serial
     port -- and a device whose wait wakes on it stops itself on the thread
-    that owns it. Transitional, until the fan-in lands: the device abort()
-    methods that trip this today (the syringe pump's, the disc pump's) still
-    halt their hardware on the caller's thread first, exactly as they did
-    before this object existed. Do not read the sentence above as a promise
-    that abort() is I/O-free; only cancel() is.
+    that owns it. Until the fan-in lands, the device abort() methods that trip
+    this still halt their hardware on the caller's thread first, as before.
 
     First cause wins: the operator's reflex after a flow alarm is to press
     Abort a second later, and last-writer-wins would overwrite the fault with
-    a bare abort before the worker read it. cancel() and reset() share a lock,
-    so a cancel racing a reset cannot leave the event set with no cause (a
-    fault reported as an abort) or a cause with the event clear (a fault that
-    never fires).
-
-    Built on threading.Event rather than a Condition so the test suite's fake
-    clock, which patches Event.wait, covers every wait that goes through here.
-    Pause (a reversible gate on the same object) is designed and arrives later.
+    a bare abort before the worker read it. cancel() and reset() share a lock
+    so a cancel racing a reset cannot leave the cause and the wake-up event
+    disagreeing. Built on threading.Event rather than a Condition so the test
+    suite's fake clock, which patches Event.wait, covers every wait here.
     """
 
     def __init__(self):
@@ -94,7 +88,7 @@ class RunControl:
 
     @property
     def cancelled(self):
-        return self._tripped.is_set()
+        return self._cause is not None
 
     @property
     def cause(self):
@@ -102,8 +96,7 @@ class RunControl:
 
     def check(self):
         """Raise the cause if the run is cancelled; otherwise return."""
-        with self._lock:
-            cause = self._cause
+        cause = self._cause
         if cause is not None:
             raise cause
 
@@ -113,5 +106,5 @@ class RunControl:
 
     def sleep(self, timeout):
         """wait(), then raise if the run was cancelled meanwhile."""
-        if self.wait(timeout):
-            self.check()
+        self.wait(timeout)
+        self.check()

@@ -22,9 +22,9 @@ from fluidics.errors import AbortRequested, RunControl
 from .pump_helpers import bare_pump
 
 
-def _pump():
+def _pump(**kwargs):
     return SyringePumpSimulation(sn=None, syringe_ul=5000,
-                                 speed_code_limit=10, waste_port=1)
+                                 speed_code_limit=10, waste_port=1, **kwargs)
 
 
 class FakeSyringe:
@@ -168,7 +168,7 @@ class TestStopDoesNotLatch:
         pump = _pump()
         pump.abort()
         with pytest.raises(AbortRequested):
-            _ran_the_chain(pump)
+            pump.execute()
 
     def test_reset_abort_clears_the_interrupt(self):
         """Otherwise the next wait returns instantly on a stale event."""
@@ -183,12 +183,6 @@ class TestSimulationHonoursInterruption:
     could exercise an interrupted operation -- which is why the sleep-through
     bug survived 230 passing tests.
     """
-
-    def test_execute_respects_a_prior_abort(self):
-        pump = _pump()
-        pump.abort()
-        with pytest.raises(AbortRequested):
-            _ran_the_chain(pump)
 
     def test_execute_clears_a_stale_interrupt(self):
         """stop() leaves the event set. If execute did not clear it, the next
@@ -206,9 +200,7 @@ class TestTheSharedRunControl:
 
     def test_abort_cancels_the_run_control_the_pump_was_built_with(self):
         control = RunControl()
-        pump = SyringePumpSimulation(sn=None, syringe_ul=5000,
-                                     speed_code_limit=10, waste_port=1,
-                                     run_control=control)
+        pump = _pump(run_control=control)
         pump.abort()
         assert isinstance(control.cause, AbortRequested)
 
@@ -226,19 +218,34 @@ class TestTheSharedRunControl:
     def test_a_pump_built_alone_gets_its_own(self):
         assert _pump().run_control is not _pump().run_control
 
-    def test_the_cause_is_set_before_the_waiter_is_woken(self):
-        """A waiter that wakes and finds no cause returns as if the move had
-        finished -- the silent half-completion the raise exists to end."""
-        pump = _pump()
+    def test_abort_halts_then_cancels_then_wakes(self):
+        """The whole ordering abort() promises, on the real pump's hooks: the
+        plunger is halted before the waiter can resume into a serial round
+        trip, and the cause is set before it wakes -- a waiter that wakes and
+        finds no cause returns as if the move had finished."""
+        pump = _real_pump()
         order = []
+        pump.syringe.terminateCmd = lambda: order.append("terminate")
         pump.run_control.cancel = lambda cause=None: order.append("cancel")
         pump._interrupt.set = lambda: order.append("wake")
         pump.abort()
-        assert order == ["cancel", "wake"]
+        assert order == ["terminate", "cancel", "wake"]
 
 
 class TestTheCancelPathOnTheRealPump:
-    def test_an_unreadable_position_does_not_replace_the_cancellation(self, caplog):
+    def test_a_cancelled_run_never_dispatches_a_chain(self):
+        """The entry check exists for the real pump: _arm() clears the wake
+        event first, so without it an execute() after an abort would send the
+        chain to the Tecan and then wait out the whole move before raising."""
+        pump = _real_pump()
+        dispatched = []
+        pump.syringe.executeChain = lambda minimal_reset=True: dispatched.append(True) or 0
+        pump.abort()
+        with pytest.raises(AbortRequested):
+            pump.execute()
+        assert dispatched == []
+
+    def test_an_unreadable_position_does_not_replace_the_cancellation(self, caplog, during_move):
         """After terminateCmd the plunger is still decelerating and the
         position read can fail. A driver error surfacing here would show the
         operator a pump fault instead of their own abort."""
@@ -252,13 +259,7 @@ class TestTheCancelPathOnTheRealPump:
             raise RuntimeError("no reply while decelerating")
 
         pump.get_plunger_position = unreadable
-        original_wait = pump.wait_for_stop
-
-        def abort_mid_move(t=0):
-            pump.abort()
-            return original_wait(t)
-
-        pump.wait_for_stop = abort_mid_move
+        during_move(pump, pump.abort)
         with caplog.at_level(logging.WARNING, logger="fluidics"):
             with pytest.raises(AbortRequested):
                 pump.execute()

@@ -2,7 +2,7 @@ import logging
 import fluidics.control.tecancavro as tecancavro
 import threading
 
-from ..errors import RunControl
+from ..errors import Cancelled, RunControl
 from .discovery import find_serial_port
 
 _logger = logging.getLogger(__name__)
@@ -33,11 +33,14 @@ class Interruptible:
 
     def _init_interrupt(self, run_control=None):
         self.is_busy = False
-        self.is_aborted = False
         self._interrupt = threading.Event()
-        # Shared with every other device of the run when built through
-        # build_devices; private when the pump is constructed alone.
         self.run_control = run_control if run_control is not None else RunControl()
+
+    @property
+    def is_aborted(self):
+        """Whether the run is cancelled -- the signal every device of the run
+        shares, read by the operations' early-return checks."""
+        return self.run_control.cancelled
 
     # --- what a real pump does and a simulated one cannot ---
 
@@ -52,16 +55,14 @@ class Interruptible:
     # --- interruption ---
 
     def abort(self):
-        # Halt first, then cancel, then wake: the waiter reads the cause the
-        # moment it wakes, and must not resume into a serial round trip while
+        # Halt, then cancel, then wake: the waiter reads the cause the moment
+        # it wakes, and must not resume into a serial round trip while
         # terminateCmd is still in flight on the same port.
         self._terminate()
-        self.is_aborted = True
         self.run_control.cancel()
         self._interrupt.set()
 
     def reset_abort(self):
-        self.is_aborted = False
         self.run_control.reset()
         self._interrupt.clear()
 
@@ -75,13 +76,10 @@ class Interruptible:
         Clearing before checking, and abort() cancelling before it sets the
         event, is what makes an abort landing anywhere around here still
         count: either the cause is already set and this raises, or the event
-        is set afterwards and wait_for_stop wakes on it and raises. Raising
-        here rather than returning is what keeps a cancelled run from pulsing
-        the pump once more on its way out.
+        is set afterwards and wait_for_stop wakes on it and raises.
         """
         self._interrupt.clear()
         self.run_control.check()
-        return not self.is_aborted
 
     def wait_for_stop(self, t=0):
         """Block until the move finishes, or until abort()/stop() interrupts.
@@ -249,25 +247,24 @@ class SyringePump(SpeedCodes, Interruptible):
 
     def execute(self):
         # wait_for_stop is the only waiting path.
-        if not self._arm():
-            return
+        self._arm()
         self.is_busy = True
         with self._serial_lock:
             t = self.syringe.executeChain(minimal_reset=True)
         try:
             self.wait_for_stop(t)
-        except BaseException:
-            # Unwinding on a cancel. The position read keeps the volume
-            # bookkeeping honest for the park-to-waste close, but the pump is
-            # still decelerating from terminateCmd and the read can fail --
-            # and a driver error here would replace the cancellation, so the
-            # operator sees a pump fault instead of their own abort.
+        except Cancelled:
+            # The position read keeps the volume bookkeeping honest for the
+            # park-to-waste close, but the pump is still decelerating from
+            # terminateCmd and the read can fail -- and a driver error here
+            # would replace the cancellation, so the operator would see a pump
+            # fault instead of their own abort.
             try:
                 self.get_plunger_position()
-            except Exception:
-                _logger.warning("Plunger position unreadable after the halt; "
-                                "volume bookkeeping may be off until the next move.",
-                                exc_info=True)
+            except Exception as e:
+                _logger.warning("Plunger position unreadable after the halt "
+                                "(%s); volume bookkeeping may be off until the "
+                                "next move.", e)
             raise
         finally:
             self.chained_volume = 0
@@ -406,13 +403,16 @@ class SyringePumpSimulation(SpeedCodes, Interruptible):
         self._chain = []
 
     def execute(self):
-        if not self._arm():
-            return
+        self._arm()
         self.is_busy = True
-        self.wait_for_stop(5)
-        self._held_ul = self._run(self._chain, self._held_ul)
-        self.executed.append(self._chain)
-        self._chain = []
+        try:
+            self.wait_for_stop(5)
+        finally:
+            # Consumed either way, as the Tecan's chain is: a cancelled chain
+            # must not resurface as chained volume the next call reports.
+            chain, self._chain = self._chain, []
+        self._held_ul = self._run(chain, self._held_ul)
+        self.executed.append(chain)
         self.get_plunger_position()
 
     def get_time_to_finish(self):

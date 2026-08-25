@@ -16,6 +16,7 @@ import pytest
 
 from fluidics.errors import AbortRequested
 from fluidics.flow_monitor import FlowFault
+from fluidics.sequences import APPLICATION_SEQUENCES
 
 from ..worker_helpers import record_run
 
@@ -25,6 +26,11 @@ from ..worker_helpers import record_run
 FLUIDIC_STEPS = {
     "flow_cell": [
         {"type": "flow_reagent", "fluidic_port": 1, "flow_rate": 500, "volume": 500},
+        # More than the half-full 5000 uL fixture syringe holds, so the draw
+        # first empties it to waste -- the one nested wrapper, which a cancel
+        # unwinds through twice.
+        {"name": "flow_reagent-full-syringe", "type": "flow_reagent",
+         "fluidic_port": 1, "flow_rate": 500, "volume": 3000},
         {"type": "priming", "fluidic_port": 1, "flow_rate": 500, "volume": 500},
         {"type": "clean_up", "fluidic_port": 1, "flow_rate": 500, "volume": 500},
     ],
@@ -47,6 +53,17 @@ NOT_YET = pytest.mark.xfail(
     reason="operations still return silently on a prior abort; the redesign raises")
 
 
+APPLICATION_NAMES = {"flow_cell": "Flow Cell", "open_chamber": "Open Chamber"}
+
+
+@pytest.mark.parametrize("app", list(FLUIDIC_STEPS))
+def test_the_step_table_covers_every_fluidic_type_of_the_application(app):
+    """A fluidic type added to the application without a row here would be
+    a wrapper nobody polices."""
+    covered = {seq["type"] for seq in FLUIDIC_STEPS[app]}
+    assert covered == set(APPLICATION_SEQUENCES[APPLICATION_NAMES[app]]) - {"set_temperature"}
+
+
 @pytest.fixture(params=list(SEQS))
 def stack(request):
     """(ops, syringe_pump, sequence, config) for each operations stack."""
@@ -63,7 +80,7 @@ def errors_in(events):
 @pytest.mark.parametrize(
     "app, seq",
     [(app, seq) for app, steps in FLUIDIC_STEPS.items() for seq in steps],
-    ids=lambda value: value["type"] if isinstance(value, dict) else value)
+    ids=lambda value: value.get("name", value["type"]) if isinstance(value, dict) else value)
 def test_an_abort_during_a_move_unwinds_by_raising(app, seq, request, during_move):
     """The operator presses Abort while the plunger is moving. The wait wakes,
     the device raises, and every wrapper on the way out lets it through -- the

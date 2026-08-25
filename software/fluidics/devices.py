@@ -74,10 +74,9 @@ class DeviceSet:
     """
 
     def __init__(self, config, controller, syringe_pump, selector_valves,
-                 disc_pump, temperature_controller, flow_sensors,
-                 run_control=None):
+                 disc_pump, temperature_controller, flow_sensors, run_control):
         self.config = config
-        self.run_control = run_control if run_control is not None else RunControl()
+        self.run_control = run_control
         self.controller = controller
         self.syringe_pump = syringe_pump
         self.selector_valves = selector_valves
@@ -163,8 +162,7 @@ def build_devices(config, simulation=False, on_issue=_print_issue):
     pump_cls = SyringePumpSimulation if simulation else SyringePump
     tc_cls = TCMControllerSimulation if simulation else TCMController
 
-    # One cancellation signal for the whole run, handed to every device that
-    # waits, so an abort from any entry point reaches all of them at once.
+    # One cancellation signal for the whole run -- see RunControl.
     run_control = RunControl()
     controller = controller_cls(config.microcontroller.serial_number)
     syringe_pump = pump_cls(
