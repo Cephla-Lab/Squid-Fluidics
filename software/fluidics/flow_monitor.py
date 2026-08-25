@@ -13,7 +13,7 @@ logs it, `stop` halts the draw and raises it.
 import threading
 import time
 
-from .experiment_worker import OperationError
+from .errors import OperationError
 
 
 def band(expected_ul_min, tolerance_fraction):

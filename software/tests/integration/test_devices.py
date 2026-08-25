@@ -19,6 +19,7 @@ from fluidics.control.selector_valve import SelectorValveSystem
 from fluidics.control.syringe_pump import SyringePumpSimulation
 from fluidics.control.temperature_controller import TCMControllerSimulation
 from fluidics.devices import DeviceSet, build_devices, build_operations
+from fluidics.errors import AbortRequested
 from fluidics.merfish_operations import MERFISHOperations
 from fluidics.open_chamber_operations import OpenChamberOperations
 
@@ -311,3 +312,29 @@ class TestDeviceSetClose:
         devices.close()
         assert devices.close() == []
         assert pump.events == [("pump", "reset_abort"), ("pump", "close", True)]
+
+
+class TestRunControlInjection:
+    """One signal for the whole run: every device that waits is handed the
+    same object, so an abort from either entry point reaches all of them."""
+
+    def test_the_syringe_pump_shares_the_set_s_run_control(self, flow_cell_config, built):
+        devices = built(flow_cell_config, simulation=True)
+        assert devices.syringe_pump.run_control is devices.run_control
+
+    def test_the_disc_pump_shares_it_too(self, open_chamber_config, built):
+        devices = built(open_chamber_config, simulation=True)
+        assert devices.disc_pump.run_control is devices.run_control
+
+    def test_abort_cancels_it(self, flow_cell_config, built):
+        devices = built(flow_cell_config, simulation=True)
+        devices.abort()
+        assert isinstance(devices.run_control.cause, AbortRequested)
+
+    def test_close_after_an_abort_resets_it_and_reports_no_errors(self, flow_cell_config, built):
+        """The real pump's close parks to waste with a move of its own; with
+        the signal still tripped that move would raise instead of parking."""
+        devices = built(flow_cell_config, simulation=True)
+        devices.abort()
+        assert devices.close() == []
+        assert not devices.run_control.cancelled

@@ -1,6 +1,6 @@
 import logging
 from time import sleep
-from .experiment_worker import AbortRequested, OperationError
+from .errors import Cancelled, OperationError
 from .flow_monitor import DrawGuard, FlowFault
 from . import sequence_utils
 
@@ -73,6 +73,8 @@ class MERFISHOperations():
             try:
                 self.sp.dispense_to_waste()
                 self.sp.execute()
+            except Cancelled:
+                raise
             except Exception as e:
                 raise OperationError(f"Failed to empty syringe pump: {str(e)}")
 
@@ -105,10 +107,11 @@ class MERFISHOperations():
                     return
                 self._guarded_execute(speed_code)
 
-        except FlowFault:
-            # Already an OperationError, and it carries the sensor, the band and
-            # the measurement. Falling into the wrapper below would flatten all
-            # of that into a string.
+        except (FlowFault, Cancelled):
+            # A fault already carries the sensor, the band and the measurement;
+            # a cancellation is the run ending on purpose. Falling into the
+            # wrapper below would flatten either into an OperationError string
+            # -- and report an abort as a failed step.
             raise
         except Exception as e:
             raise OperationError(f"Error in flow_reagent from port: {port}: {str(e)}")
@@ -151,5 +154,7 @@ class MERFISHOperations():
             if self.sp.is_aborted:
                 return
             self.sp.execute()
+        except Cancelled:
+            raise
         except Exception as e:
             raise OperationError(f"Error in priming_or_clean_up: {str(e)}")
