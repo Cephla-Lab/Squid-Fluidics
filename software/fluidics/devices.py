@@ -108,7 +108,7 @@ class DeviceSet:
         output off on every channel, drain pump off. Shielded per step;
         returns the exceptions raised, already logged, for the worker to
         report."""
-        steps = [self.syringe_pump.stop]
+        steps = [self.syringe_pump.halt]
         tc = self.temperature_controller
         if tc is not None:
             steps.extend(partial(tc.set_output_enabled, c, False)

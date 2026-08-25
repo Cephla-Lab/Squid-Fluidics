@@ -170,13 +170,13 @@ class TestDrainPumpAndCleanUpGuards:
                                   "flow_rate": 1000, "volume": 1000})
         assert drain == ["start", "stop"]
 
-    def test_an_aborted_clean_up_skips_the_final_aspiration(self, open_chamber_rig):
-        """Every sibling disc-pump call checks the latch first; the clean-up
-        aspiration did not. A cancel latches the disc pump too, so its wait
-        returned at once -- but the pump was still pulsed to full power."""
+    def test_a_cancel_after_the_final_chain_never_powers_the_drain(self, open_chamber_rig):
+        """clean_up ends with a 20 s aspiration. A cancel landing just before
+        it unwinds through the drain pump's own entry check -- before the
+        pump is powered, and by raising, not by a guard in the operation."""
         ops, sp = open_chamber_rig
-        aspirations = []
-        ops.dp.aspirate = lambda seconds: aspirations.append(seconds)
+        powered = []
+        ops.dp._set_power = lambda power: powered.append(power)
         original = sp.execute
 
         def abort_after_the_final_chain():
@@ -187,9 +187,10 @@ class TestDrainPumpAndCleanUpGuards:
                 sp.run_control.cancel()
 
         sp.execute = abort_after_the_final_chain
-        ops.process_sequence({"type": "clean_up", "fluidic_port": 10,
-                              "flow_rate": 1000, "volume": 1000})
-        assert aspirations == []
+        with pytest.raises(AbortRequested):
+            ops.process_sequence({"type": "clean_up", "fluidic_port": 10,
+                                  "flow_rate": 1000, "volume": 1000})
+        assert powered == []
 
 
 def test_an_abort_on_the_pump_reaches_the_drain_pump(open_chamber_rig):

@@ -109,7 +109,6 @@ class TestEveryRoundTripIsLocked:
         pytest.param(lambda p: p._move_finished(), "_checkReady",
                      id="move_finished"),
         pytest.param(halt_on_cancel, "terminateCmd", id="halt_on_cancel"),
-        pytest.param(lambda p: p.stop(), "terminateCmd", id="stop"),
     ])
     def test_the_call_reaches_the_driver_under_the_lock(self, drive, expected):
         pump = locked_pump()

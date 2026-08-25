@@ -162,9 +162,6 @@ class TCMController:
         if self.serial.is_open:
             self.serial.close()
 
-    @property
-    def is_aborted(self):
-        return self.run_control.cancelled
 
 
 class TCMControllerSimulation:
@@ -258,6 +255,3 @@ class TCMControllerSimulation:
             self._polling_thread.join()
         self._subscribers.clear()
 
-    @property
-    def is_aborted(self):
-        return self.run_control.cancelled

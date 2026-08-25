@@ -1,7 +1,7 @@
 import pytest
 
 from fluidics.control.temperature_controller import TCMControllerSimulation
-from fluidics.errors import OperationError
+from fluidics.errors import AbortRequested, OperationError, RunControl
 from fluidics.sequence_utils import set_temperature
 
 
@@ -13,7 +13,7 @@ class _StuckController:
         self.stabilization_timeout_seconds = stabilization_timeout_seconds
         self.target_temperatures = [0.0] * channels
         self.actual_temperatures = [0.0] * channels  # never matches a non-zero target
-        self.is_aborted = False
+        self.run_control = RunControl()
 
     def set_target_temperature(self, channel, t):
         self.target_temperatures[channel - 1] = t
@@ -45,9 +45,12 @@ class TestSetTemperature:
         with pytest.raises(OperationError, match="failed to stabilize"):
             set_temperature(tc, 50.0)
 
-    def test_abort_returns_silently(self):
+    def test_a_cancelled_run_raises_out_of_the_wait(self):
+        """Not a silent return: the caller could not tell 'reached target'
+        from 'gave up'."""
         tc = _StuckController(channels=1, stabilization_timeout_seconds=5)
-        tc.is_aborted = True
-        set_temperature(tc, 50.0)  # should return without raising
-        # target was still set on the controller before the abort check
+        tc.run_control.cancel()
+        with pytest.raises(AbortRequested):
+            set_temperature(tc, 50.0)
+        # The target was set before the wait; the cancel raised inside it.
         assert tc.target_temperatures == [50.0]

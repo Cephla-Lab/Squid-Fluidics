@@ -48,10 +48,9 @@ def real_clock(monkeypatch):
 def during_move():
     """Hook a side effect into a pump's wait_for_stop -- inside the move.
 
-    Not around execute(): execute() clears the pump's wake event on entry, so
-    a stop() delivered before it would be wiped by the very call it was meant
-    to interrupt -- and a cancel delivered before it takes a different path
-    (_arm() raises) from the mid-move one these tests model.
+    Not around execute(): a cancel delivered before execute() is caught by
+    _arm() before any chain is dispatched, a different path from the mid-move
+    one these tests model.
     """
     def _hook(sp, side_effect):
         original_wait = sp.wait_for_stop

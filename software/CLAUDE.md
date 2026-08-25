@@ -101,7 +101,7 @@ Speed codes (0–40) map to stroke times via `SPEED_SEC_MAPPING`. Use `flow_rate
 2. YAML sequences define operations as typed dicts with a `type` discriminator field (legacy CSV also supported)
 3. `config.application` (`"Flow Cell"` or `"Open Chamber"`) selects the operations class
 4. `ExperimentWorker` iterates the sequence list, calling `process_sequence()` on the operations class
-5. Worker runs in a separate thread with callback-based progress reporting and abort support via `threading.Event`
+5. Worker runs in a separate thread with callback-based progress reporting; cancellation comes through the run's shared `RunControl` (`fluidics/errors.py`)
 
 ### Operations Classes
 
@@ -111,7 +111,7 @@ Speed codes (0–40) map to stroke times via `SPEED_SEC_MAPPING`. Use `flow_rate
 
 ### Draw Protection
 
-`Flow Reagent`'s two draws run under a `DrawGuard` (`fluidics/flow_monitor.py`), which watches each configured flow sensor against the pump's actual rate for the speed code. `FlowMonitor` is the rule — a pure function of `(flow, timestamp)` with a ramp-up window and a consecutive-sample debounce; the guard is the plumbing that arms sensors, halts the pump, and raises.
+`Flow Reagent`'s two draws run under a `DrawGuard` (`fluidics/flow_monitor.py`), which watches each configured flow sensor against the pump's actual rate for the speed code. `FlowMonitor` is the rule — a pure function of `(flow, timestamp)` with a ramp-up window and a consecutive-sample debounce; the guard is the plumbing that arms sensors and, on a `stop` trip, cancels the run with the fault as its cause.
 
 Per sensor, `monitor` is `off` (plot only), `warn` (log and carry on), or `stop` (halt the draw and raise `FlowFault`). Config sets the starting mode; the Flow Sensors tab switches it at runtime. Each draw reads the mode once when it arms.
 
@@ -121,7 +121,7 @@ Notices go to `MERFISHOperations(on_warning=...)`, which becomes the `DrawGuard`
 
 Not guarded: the dispense-to-waste inside `_empty_syringe_pump_on_full`, and `Priming`/`Clean Up` — both move liquid out the waste port rather than through the flow cell, so the sensors would read nothing and every one would fault.
 
-`FlowFault` subclasses `OperationError` and is re-raised past `flow_reagent`'s `except Exception` wrapper so its fields survive. Halting uses `SyringePump.stop()`, not `abort()`: `abort()` latches and means "the operator cancelled".
+`FlowFault` is a `SafetyFault` — a `Cancelled`, sibling of `AbortRequested`, never a subclass of it — so the worker reports it with its diagnosis rather than as "aborted by user". The guard does no I/O from the reader thread: it cancels the run, the pump's wait wakes, halts the plunger on the sequence thread, and raises the fault out of `execute()`; the operations' `OperationError` wrappers let `Cancelled` through.
 
 **`OpenChamberOperations`** — syringe pump + disc pump for open chamber:
 - `Add Reagent` / `Clear Tubings and Add Reagent` — push reagent into chamber, disc pump aspirates waste
@@ -136,6 +136,6 @@ Not guarded: the dispense-to-waste inside `_empty_syringe_pump_on_full`, and `Pr
 
 - `fluidics/control/tecancavro/` is a vendored library for Tecan Cavro syringe pump protocol — avoid modifying
 - Config files in `sample_config/` (YAML), sequence files in `sample_sequences/` (YAML preferred, CSV supported for legacy)
-- The `abort` pattern: hardware classes expose `abort()` / `reset_abort()` and check `is_aborted` before operations
+- Cancellation: `DeviceSet.abort()` cancels the run's `RunControl` (no device I/O on the calling thread); every waiting device raises the cause on its own thread, so operations unwind by the raise -- there is no `is_aborted` polling. `DeviceSet.make_safe()` quiets the rig after any early end; `DeviceSet.reset()` clears the signal when the run ends.
 - `send_command_blocking()` = `send_command()` + `wait_for_completion()` (polls MCU status until not `IN_PROGRESS`)
 - `tests/hardware/startup.py` and `tests/hardware/demo.py` still import from `control.`, a stale path from before `software/control/` was renamed to `fluidics/control/` — both are currently broken and unrunnable (see the note under Commands)

@@ -16,7 +16,7 @@ import logging
 
 import pytest
 
-from fluidics.errors import OperationError
+from fluidics.errors import AbortRequested, Cancelled
 from fluidics.flow_monitor import FlowFault
 from fluidics.merfish_operations import MERFISHOperations
 
@@ -100,32 +100,28 @@ class TestFaultingDraw:
         with pytest.raises(FlowFault):
             ops.process_sequence(SEQ)
 
-    def test_the_fault_is_not_flattened_into_a_plain_operation_error(self, dead_flow):
-        """flow_reagent wraps everything else in OperationError(str(e)). A
-        FlowFault must come through with its fields, or the operator loses the
-        sensor name and the numbers."""
+    def test_the_fault_comes_through_with_its_fields(self, dead_flow):
+        """flow_reagent wraps everything else in OperationError(str(e)); a
+        cancellation passes through. The FlowFault must arrive intact, or the
+        operator loses the sensor name and the numbers."""
         ops, _sensor, _sp = dead_flow
-        with pytest.raises(OperationError) as excinfo:
+        with pytest.raises(Cancelled) as excinfo:
             ops.process_sequence(SEQ)
         assert isinstance(excinfo.value, FlowFault)
         assert excinfo.value.sensor_name == "syringe_draw"
         assert excinfo.value.measured_ul_min == pytest.approx(0.0)
         assert excinfo.value.expected_ul_min == pytest.approx(500.0)
 
-    def test_the_pump_is_stopped(self, dead_flow):
+    def test_the_fault_cancels_the_run_as_itself_never_as_an_abort(self, dead_flow):
+        """The fault is the run's cause: the pump's wait woke on it, halted,
+        and raised it. It is a SafetyFault, a sibling of AbortRequested -- an
+        abort would be reported as the operator's doing and the diagnosis
+        discarded."""
         ops, _sensor, sp = dead_flow
-        with pytest.raises(FlowFault):
+        with pytest.raises(FlowFault) as excinfo:
             ops.process_sequence(SEQ)
-        assert sp._interrupt.is_set()
-
-    def test_stopping_does_not_latch_the_abort_flag(self, dead_flow):
-        """A flow fault is not the operator cancelling. If it set is_aborted,
-        every later operation would silently return and the run would look
-        like it completed."""
-        ops, _sensor, sp = dead_flow
-        with pytest.raises(FlowFault):
-            ops.process_sequence(SEQ)
-        assert sp.is_aborted is False
+        assert sp.run_control.cause is excinfo.value
+        assert not isinstance(sp.run_control.cause, AbortRequested)
 
     def test_the_sensor_is_released_after_a_fault(self, dead_flow):
         ops, sensor, _sp = dead_flow

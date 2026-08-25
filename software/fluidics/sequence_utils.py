@@ -1,7 +1,7 @@
 """Shared sequence helpers used by both flow cell and open chamber operations."""
 import logging
 
-from time import sleep, time
+from time import time
 
 from .errors import OperationError
 
@@ -10,10 +10,11 @@ _logger = logging.getLogger(__name__)
 
 def set_temperature(tc, target):
     """Drive every channel on `tc` to `target` and block until all channels
-    are within tolerance, abort is requested, or timeout fires.
+    are within tolerance or the timeout fires.
 
-    On timeout, raises OperationError so the experiment worker stops.
-    If `tc` is None, logs a warning and returns.
+    On timeout, raises OperationError so the experiment worker stops. A
+    cancelled run raises its cause out of the wait. If `tc` is None, logs a
+    warning and returns.
     """
     if tc is None:
         _logger.warning("No temperature controller found. Skipping temperature control sequence.")
@@ -24,9 +25,7 @@ def set_temperature(tc, target):
 
     start_time = time()
     while True:
-        sleep(1)
-        if tc.is_aborted:
-            return
+        tc.run_control.sleep(1)
         actuals = [tc.get_actual_temperature(c) for c in range(1, tc.channels + 1)]
         if all(abs(t - target) <= tc.tolerance_celsius for t in actuals):
             return

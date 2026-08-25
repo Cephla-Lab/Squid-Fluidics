@@ -1,7 +1,7 @@
 import logging
 import threading
 
-from .errors import AbortRequested, RunControl
+from .errors import AbortRequested, Cancelled, RunControl
 # Re-exported: defined here before fluidics.errors existed, and scripts
 # outside this package may still import it from here.
 from .errors import OperationError  # noqa: F401
@@ -40,7 +40,6 @@ class ExperimentWorker:
         self.config = config
         self.callbacks = callbacks or {}
         self.run_control = run_control if run_control is not None else RunControl()
-        self._ended = False
         # Set once run() has returned through its finally. The thing to wait
         # on after a cancel -- not Thread.join(), see run_sequences.
         self.finished = threading.Event()
@@ -83,7 +82,7 @@ class ExperimentWorker:
         self.run_control.sleep(time_minutes * 60)
 
     def _end_early(self, message):
-        """Quiet the rig, then report why it stopped -- once.
+        """Quiet the rig, then report why it stopped.
 
         Act, then report: the console and run log already carry the message
         (the handlers log first); what trails make_safe's round trips is the
@@ -91,9 +90,6 @@ class ExperimentWorker:
         make_safe could not switch off is appended to the report -- after an
         abort, "the rig could not be made safe" is the line that matters.
         """
-        if self._ended:
-            return
-        self._ended = True
         failures = self._call_callback('make_safe') or []
         if failures:
             message += (" Making the rig safe failed: "
@@ -102,47 +98,46 @@ class ExperimentWorker:
 
     def run(self):
         current_sequence = 0
+        tag = None          # names the sequence in hand, the way the operator saw it
+        repeat = 0
         try:
             for index, seq in enumerate(self.sequences):
                 label = seq.get('name') or seq['type']
-                for r in range(seq.get('repeat', 1)):
-                    try:
-                        current_sequence += 1
-                        tag = f"Sequence {current_sequence}/{self.n_sequences} ({label})"
-                        # A cancel that landed between sequences must not
-                        # start the next one.
-                        self.run_control.check()
-                        _logger.info("%s: started", tag)
-                        self._call_callback('update_progress', index, current_sequence, "Started")
-                        self.experiment_ops.process_sequence(seq)
-                        self.run_control.check()
+                for repeat in range(1, seq.get('repeat', 1) + 1):
+                    current_sequence += 1
+                    tag = f"Sequence {current_sequence}/{self.n_sequences} ({label})"
+                    # A cancel that landed between sequences must not start
+                    # the next one. Inside one, the device that was waiting
+                    # raises the cause itself.
+                    self.run_control.check()
+                    _logger.info("%s: started", tag)
+                    self._call_callback('update_progress', index, current_sequence, "Started")
+                    self.experiment_ops.process_sequence(seq)
 
-                        incubation_time = seq.get('incubation_time', 0)
-                        if incubation_time > 0:
-                            _logger.info("%s: incubating %.1f min", tag, incubation_time)
-                            self._call_callback('update_progress', index, current_sequence, "Incubating")
-                            self.wait_for_incubation(incubation_time)
-                        _logger.info("%s: completed", tag)
-                        self._call_callback('update_progress', index, current_sequence, "Completed")
+                    incubation_time = seq.get('incubation_time', 0)
+                    if incubation_time > 0:
+                        _logger.info("%s: incubating %.1f min", tag, incubation_time)
+                        self._call_callback('update_progress', index, current_sequence, "Incubating")
+                        self.wait_for_incubation(incubation_time)
+                    _logger.info("%s: completed", tag)
+                    self._call_callback('update_progress', index, current_sequence, "Completed")
 
-                    except AbortRequested:
-                        _logger.warning("Run aborted by user.")
-                        self._end_early("Operation aborted by user")
-                        return
-                    except Exception as e:
-                        # Same tag as the narrative lines above, so the error
-                        # names the sequence the way the operator just saw it.
-                        message = f"{tag}: failed on repeat {r + 1}: {e}"
-                        _logger.error(message, exc_info=True)
-                        self._end_early(message)
-                        return
-
+        except AbortRequested:
+            _logger.warning("Run aborted by user.")
+            self._end_early("Operation aborted by user")
+        except Cancelled as fault:
+            # The instrument stopped itself -- a flow fault, say. Reported
+            # with its diagnosis, never as an abort.
+            message = f"{tag}: {fault}" if tag else str(fault)
+            _logger.error(message)
+            self._end_early(message)
         except Exception as e:
-            # Faults outside the per-sequence try -- the sequence list itself
-            # failing, say -- are programming errors, where the traceback
-            # matters most.
-            _logger.error("Run failed: %s", e, exc_info=True)
-            self._end_early(str(e))
+            # Named the way the operator just saw it when a sequence was in
+            # hand; outside any sequence -- the sequence list itself failing
+            # -- it is a programming error, where the traceback matters most.
+            message = (f"{tag}: failed on repeat {repeat}: {e}" if tag else str(e))
+            _logger.error(message, exc_info=True)
+            self._end_early(message)
         finally:
             _logger.info("Run finished.")
             self._call_callback('on_finished')

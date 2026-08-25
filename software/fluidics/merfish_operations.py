@@ -1,7 +1,7 @@
 import logging
 from time import sleep
 from .errors import Cancelled, OperationError
-from .flow_monitor import DrawGuard, FlowFault
+from .flow_monitor import DrawGuard
 from . import sequence_utils
 
 _logger = logging.getLogger(__name__)
@@ -26,11 +26,10 @@ class MERFISHOperations():
     def _guarded_execute(self, speed_code):
         """Run the queued chain with the flow sensors watching it.
 
-        The whole protocol lives here rather than at the call sites, because
-        the last step is the forgettable one: a draw that arms and executes but
-        never raises would stop the pump on a fault, unwind cleanly, leave
-        is_aborted False, and return -- and the operation would carry on to its
-        next step as though the draw had succeeded.
+        A `stop` sensor's fault cancels the run with itself as the cause; the
+        pump's wait wakes, halts the plunger and raises the fault out of
+        execute(), here, on the sequence thread -- so the operation unwinds
+        with the diagnosis intact.
 
         The expectation is the pump's actual rate for the code, not the rate
         the sequence asked for: flow_rate_to_speed_code quantizes to the 41
@@ -39,15 +38,16 @@ class MERFISHOperations():
         """
         guard = DrawGuard(self.flow_sensors,
                           expected_ul_min=self.sp.get_flow_rate(speed_code),
-                          stop_pump=self.sp.stop,
+                          run_control=self.sp.run_control,
                           log=self.on_warning)
         with guard:
             self.sp.execute()
-            # Raised here, on the sequence thread: the fault is recorded by the
-            # reader thread, which cannot unwind this operation.
-            guard.raise_if_faulted()
 
     def process_sequence(self, sequence):
+        # A cancelled run starts nothing -- not even the valve move that
+        # precedes the first pump call, which is where the raise would
+        # otherwise come from.
+        self.sp.run_control.check()
         _logger.debug("Running: %s", sequence)
         seq_type = sequence['type']
 
@@ -94,24 +94,18 @@ class MERFISHOperations():
             self._empty_syringe_pump_on_full(volume)
             self.sv.open_port(port)
             self.sp.extract(self.extract_port, volume, speed_code)
-            if self.sp.is_aborted:
-                return
             self._guarded_execute(speed_code)
-            if self.sp.is_aborted:
-                return
             if fill_tubing_with_port:
                 self.sv.open_port(int(fill_tubing_with_port))
                 self._empty_syringe_pump_on_full(self.sv.get_tubing_fluid_amount_to_valve(fill_tubing_with_port))
                 self.sp.extract(self.extract_port, self.sv.get_tubing_fluid_amount_to_valve(fill_tubing_with_port), speed_code)
-                if self.sp.is_aborted:
-                    return
                 self._guarded_execute(speed_code)
 
-        except (FlowFault, Cancelled):
-            # A fault already carries the sensor, the band and the measurement;
-            # a cancellation is the run ending on purpose. Falling into the
-            # wrapper below would flatten either into an OperationError string
-            # -- and report an abort as a failed step.
+        except Cancelled:
+            # The run ending on purpose -- an abort, or a flow fault raised on
+            # the draw with its sensor, band and measurement. The wrapper
+            # below would flatten either into an OperationError string and
+            # report it as a failed step.
             raise
         except Exception as e:
             raise OperationError(f"Error in flow_reagent from port: {port}: {str(e)}")
@@ -127,11 +121,7 @@ class MERFISHOperations():
         try:
             self.sp.reset_chain()
             self.sp.dispense_to_waste()
-            if self.sp.is_aborted:
-                return
             self.sp.execute()
-            if self.sp.is_aborted:
-                return
             for i in range(1, self.sv.available_port_number + 1):
                 if use_ports is not None and i not in use_ports:
                     continue
@@ -140,19 +130,13 @@ class MERFISHOperations():
                     self.sv.open_port(i)
                     self.sp.extract(self.extract_port, volume_to_port, speed_code)
                     self.sp.dispense_to_waste()
-                    if self.sp.is_aborted:
-                        return
                     self.sp.execute()
                     # There could be a lot of air in a flow cell system, which may delay the stabilization of the liquid flow.
                     # So we sleep for 1 second here to wait for the flow to stabilize.
                     sleep(1)
-                    if self.sp.is_aborted:
-                        return
 
             self.sv.open_port(port)
             self.sp.extract(self.extract_port, volume, speed_code)
-            if self.sp.is_aborted:
-                return
             self.sp.execute()
         except Cancelled:
             raise

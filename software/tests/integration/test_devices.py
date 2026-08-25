@@ -206,8 +206,8 @@ class RecordingPump:
     def __init__(self, events=None):
         self.events = events if events is not None else []
 
-    def stop(self):
-        self.events.append(("pump", "stop"))
+    def halt(self):
+        self.events.append(("pump", "halt"))
 
     def close(self, to_waste=False):
         self.events.append(("pump", "close", to_waste))
@@ -264,7 +264,7 @@ class TestMakeSafe:
         """Already halted after a cancel; not after a failure mid-move."""
         pump = RecordingPump()
         device_set(flow_cell_config, pump=pump).make_safe()
-        assert pump.events == [("pump", "stop")]
+        assert pump.events == [("pump", "halt")]
 
     def test_switches_every_tec_channel_off(self, flow_cell_config):
         tc = TCMControllerSimulation(channels=2)

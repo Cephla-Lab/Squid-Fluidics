@@ -25,6 +25,10 @@ class OpenChamberOperations():
         self.chamber_volume_ul = self.config.samples.chamber_volume_ul
 
     def process_sequence(self, sequence):
+        # A cancelled run starts nothing -- not even the valve move that
+        # precedes the first pump call, which is where the raise would
+        # otherwise come from.
+        self.sp.run_control.check()
         _logger.debug("Running: %s", sequence)
         seq_type = sequence['type']
 
@@ -72,47 +76,29 @@ class OpenChamberOperations():
         try:
             self.sp.reset_chain()
             self.sp.dispense_to_waste(self.speed_code_limit)
-            if self.sp.is_aborted:
-                return
             self.sp.execute()
-            if self.sp.is_aborted:
-                return
             self.sv.open_port(port)
             # Clear previous buffer in tubings (selector valve to syringe pump)
             self.sp.extract(self.extract_port, self.tubing_sv_to_sp, self.speed_code_limit)
             self.sp.dispense_to_waste(self.speed_code_limit)
             # Assume reagent volume is greater than 'tubing_sv_to_sp'
             self.sp.extract(self.extract_port, volume - self.tubing_sv_to_sp, self.speed_code_limit)
-            if self.sp.is_aborted:
-                return
             self.sp.execute()
-            if self.sp.is_aborted:
-                return
             if fill_tubing_with_port:
                 self.sv.open_port(int(fill_tubing_with_port))
             # Draw all reagent into syringe
             self.sp.extract(self.extract_port, self.tubing_sv_to_sp, self.speed_code_limit)
-            if self.sp.is_aborted:
-                return
             self.sp.execute()
-            if self.sp.is_aborted:
-                return
             self.dp.aspirate(10)
             # Clear previous buffer in tubings (syringe pump to chamber)
             # Assume reagent volume is greater than 'tubing_sp_to_oc'
             self.sp.dispense(self.dispense_port, self.tubing_sp_to_oc, speed_code)
-            if self.sp.is_aborted:
-                return
             self.sp.execute()
-            if self.sp.is_aborted:
-                return
             self.dp.aspirate(10)
             # Push reagent to open chamber
             self.sp.dispense(self.dispense_port, volume - self.tubing_sp_to_oc, speed_code)
             self.sp.extract(self.extract_port, self.tubing_sp_to_oc, self.speed_code_limit)
             self.sp.dispense(self.dispense_port, self.tubing_sp_to_oc, speed_code)
-            if self.sp.is_aborted:
-                return
             self.sp.execute()
         except Cancelled:
             raise
@@ -128,11 +114,7 @@ class OpenChamberOperations():
         try:
             self.sp.reset_chain()
             self.sp.dispense_to_waste(self.speed_code_limit)
-            if self.sp.is_aborted:
-                return
             self.sp.execute()
-            if self.sp.is_aborted:
-                return
             # Assume syringe_volume > (sp_to_oc + sv_to_sp) > sp_to_oc > sv_to_sp > overflow (sp_to_oc + sv_to_sp - chamber_volume)
             # and syringe_volume > chamber_volume > sp_to_oc > sv_to_sp > overflow (sp_to_oc + sv_to_sp - chamber_volume)
             # TODO: Make sure if this assumption is true in most cases. If not, we may need to update the sequence logic
@@ -141,11 +123,7 @@ class OpenChamberOperations():
                 self.sv.open_port(port)
                 syringe_vol += max(volume - self.tubing_sp_to_oc - self.tubing_sv_to_sp, 0)
                 self.sp.extract(self.extract_port, syringe_vol, self.speed_code_limit)
-                if self.sp.is_aborted:
-                    return
                 self.sp.execute()
-                if self.sp.is_aborted:
-                    return
                 self.sv.open_port(int(fill_tubing_with_port))
                 # Draw sv_to_sp into syringe
                 syringe_vol += self.tubing_sv_to_sp
@@ -155,28 +133,18 @@ class OpenChamberOperations():
                 syringe_vol -= overflow
                 if overflow > 0:
                     self.sp.dispense(self.waste_port, overflow, speed_code)
-                    if self.sp.is_aborted:
-                        return
                     self.sp.execute()
-                    if self.sp.is_aborted:
-                        return
             else:
                 self.sv.open_port(port)
                 # Draw the amount needed into syringe (volume - sp_to_oc)
                 syringe_vol = volume - self.tubing_sp_to_oc
                 self.sp.extract(self.extract_port, syringe_vol, self.speed_code_limit)
-                if self.sp.is_aborted:
-                    return
                 self.sp.execute()
-                if self.sp.is_aborted:
-                    return
             # Push reagent to sample
             self.sp.dispense(self.dispense_port, syringe_vol, speed_code)
             self.sp.extract(self.extract_port, self.tubing_sp_to_oc, self.speed_code_limit)
             self.sp.dispense(self.dispense_port, self.tubing_sp_to_oc, speed_code)
             # Clear previous liquid in open chamber
-            if self.sp.is_aborted:
-                return
             self.dp.aspirate(10)
             self.sp.execute()
         except Cancelled:
@@ -193,33 +161,21 @@ class OpenChamberOperations():
         try:
             self.sp.reset_chain()
             self.sp.dispense_to_waste(self.speed_code_limit)
-            if self.sp.is_aborted:
-                return
             self.sp.execute()
-            if self.sp.is_aborted:
-                return
             self.sv.open_port(port)
             # No need to clear previous liquid in tubings (sv_to_sp)
             self.sp.extract(self.extract_port, volume - self.tubing_sv_to_sp, self.speed_code_limit)
-            if self.sp.is_aborted:
-                return
             self.sp.execute()
-            if self.sp.is_aborted:
-                return
             if fill_tubing_with_port:
                 self.sv.open_port(fill_tubing_with_port)
             self.sp.extract(self.extract_port, self.tubing_sv_to_sp, self.speed_code_limit)
             self.sp.dispense(self.dispense_port, volume, speed_code)
             # Push reagent to open chamber
-            if self.sp.is_aborted:
-                return
             self._execute_under_drain()
             if fill_tubing_with_port:
                 # Wash with additional amount of buffer in tubing sp_to_oc and fill with next reagent
                 self.sp.extract(self.extract_port, self.tubing_sp_to_oc, self.speed_code_limit)
                 self.sp.dispense(self.dispense_port, self.tubing_sp_to_oc, speed_code)
-                if self.sp.is_aborted:
-                    return
                 self._execute_under_drain()
             sleep(1)
         except Cancelled:
@@ -249,11 +205,7 @@ class OpenChamberOperations():
         try:
             self.sp.reset_chain()
             self.sp.dispense_to_waste()
-            if self.sp.is_aborted:
-                return
             self.sp.execute()  # TODO: needs some refactoring here
-            if self.sp.is_aborted:
-                return
             for i in range(1, self.sv.available_port_number + 1):
                 if use_ports is not None and i not in use_ports:
                     continue
@@ -262,20 +214,12 @@ class OpenChamberOperations():
                     self.sv.open_port(i)
                     self.sp.extract(self.extract_port, volume_to_port, priming_speed_code_limit)
                     self.sp.dispense_to_waste()
-                    if self.sp.is_aborted:
-                        return
                     self.sp.execute()
-                    if self.sp.is_aborted:
-                        return
 
             self.sv.open_port(port)
             self.sp.extract(self.extract_port, volume, priming_speed_code_limit)
             self.sp.dispense(self.dispense_port, volume, speed_code)
-            if self.sp.is_aborted:
-                return
             self.sp.execute()
-            if self.sp.is_aborted:
-                return
             if clean_up:
                 self.dp.aspirate(20)
         except Cancelled:
