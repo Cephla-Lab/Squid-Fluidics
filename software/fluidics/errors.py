@@ -48,8 +48,7 @@ class RunControl:
     cancel() itself does no device I/O -- it is called from the Qt thread, a
     SIGINT handler, or the MCU reader thread, none of which owns a serial
     port -- and a device whose wait wakes on it stops itself on the thread
-    that owns it. Until the fan-in lands, the device abort() methods that trip
-    this still halt their hardware on the caller's thread first, as before.
+    that owns it.
 
     First cause wins: the operator's reflex after a flow alarm is to press
     Abort a second later, and last-writer-wins would overwrite the fault with

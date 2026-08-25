@@ -7,7 +7,6 @@ planned cancellation redesign can rewrite the internals against these tests
 instead of rewriting the tests.
 """
 
-import threading
 from types import SimpleNamespace
 
 import pytest
@@ -150,21 +149,9 @@ class TestTheSharedSignal:
     the devices share -- so one cancel reaches the operation, the incubation
     wait, and the check between sequences alike."""
 
-    def test_abort_cancels_the_shared_signal(self):
+    def test_a_cancel_during_incubation_reports_aborted_after_making_safe(self, cancel_during_wait):
         control = RunControl()
-        worker = ExperimentWorker(RecordingOps(), [FLOW], CONFIG, run_control=control)
-        worker.abort()
-        assert isinstance(control.cause, AbortRequested)
-
-    def test_a_cancel_during_incubation_reports_aborted_after_making_safe(self):
-        control = RunControl()
-        original_wait = control.wait
-
-        def cancel_during(seconds):
-            control.cancel()
-            return original_wait(seconds)
-
-        control.wait = cancel_during
+        cancel_during_wait(control)
         events = record_run(RecordingOps(), [dict(FLOW, incubation_time=30)],
                             CONFIG, run_control=control)
         assert ("progress", 1, "Incubating") in events
@@ -174,7 +161,10 @@ class TestTheSharedSignal:
         assert events.index(("make_safe",)) < events.index(("error", errors[0]))
         assert events[-1] == ("finished",)
 
-    def test_a_cancel_between_sequences_stops_the_run(self):
+    def test_a_cancel_inside_an_operation_is_caught_when_it_returns(self):
+        """Until the operations raise on a prior abort, one that returned
+        early on is_aborted returns normally; the check after dispatch is
+        what keeps that from being reported as Completed."""
         control = RunControl()
 
         class CancelAfterFirst(RecordingOps):
@@ -209,25 +199,19 @@ class TestTheSharedSignal:
         assert ("progress", 2, "Started") not in events
         assert any("aborted" in e[1] for e in events if e[0] == "error")
 
-    def test_make_safe_runs_on_the_thread_that_ran_the_operations(self):
-        """The rig's I/O happens where the run's I/O always happened, not on
-        the Qt thread or in a signal handler."""
-        control = RunControl()
-        threads = {}
-
-        class CancellingOps(RecordingOps):
-            def process_sequence(self, seq):
-                threads["ops"] = threading.get_ident()
-                control.cancel()
-
-        worker = ExperimentWorker(CancellingOps(), [FLOW], CONFIG, callbacks={
-            "make_safe": lambda: threads.setdefault("make_safe", threading.get_ident()),
-        }, run_control=control)
-        worker.run()
-        assert threads["make_safe"] == threads["ops"]
 
     def test_make_safe_is_not_called_on_success_or_on_a_failed_step(self):
         assert ("make_safe",) not in record_run(RecordingOps(), [FLOW], CONFIG)
         failed = record_run(RecordingOps(raise_on={0: ValueError("bad step")}),
                             [FLOW], CONFIG)
         assert ("make_safe",) not in failed
+
+    def test_finished_is_set_last(self):
+        """After on_finished: whoever waits on it may tear the devices down."""
+        seen = []
+        worker = ExperimentWorker(RecordingOps(), [FLOW], CONFIG, callbacks={
+            "on_finished": lambda: seen.append(worker.finished.is_set()),
+        })
+        worker.run()
+        assert seen == [False]
+        assert worker.finished.is_set()

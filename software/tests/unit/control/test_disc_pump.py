@@ -44,37 +44,12 @@ class TestAspirate:
             pump.aspirate(20)
         assert power_commands(pump) == []
 
-    def test_a_cancel_mid_way_switches_off_then_raises(self, pump):
-        original_wait = pump.run_control.wait
-
-        def cancel_during(seconds):
-            pump.run_control.cancel()
-            return original_wait(seconds)
-
-        pump.run_control.wait = cancel_during
+    def test_a_cancel_mid_way_switches_off_then_raises(self, pump, cancel_during_wait):
+        cancel_during_wait(pump.run_control)
         with pytest.raises(AbortRequested):
             pump.aspirate(20)
         assert power_commands(pump) == [MCU_CONSTANTS.TTP_MAX_PW, 0]
 
-
-class TestAbort:
-    def test_abort_only_cancels_even_with_the_drain_running(self, pump):
-        """No I/O on the cancelling thread: the drain is switched off by the
-        operation unwinding and by DeviceSet.make_safe, not here."""
-        pump.start(0.3)
-        pump.abort()
-        assert power_commands(pump) == [0.3 * MCU_CONSTANTS.TTP_MAX_PW]
-        assert pump.run_control.cancelled
-
-    def test_an_idle_pump_only_cancels(self, pump):
-        pump.abort()
-        assert power_commands(pump) == []
-        assert pump.run_control.cancelled
-
-    def test_reset_abort_resets_the_run_control(self, pump):
-        pump.abort()
-        pump.reset_abort()
-        assert not pump.run_control.cancelled
 
 
 def test_a_pump_built_alone_gets_a_private_run_control():

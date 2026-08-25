@@ -86,7 +86,7 @@ def test_an_abort_during_a_move_unwinds_by_raising(app, seq, request, during_mov
     the device raises, and every wrapper on the way out lets it through -- the
     operation must not carry on to its next step or return as if finished."""
     ops, sp = request.getfixturevalue(f"{app}_rig")
-    during_move(sp, sp.abort)
+    during_move(sp, sp.run_control.cancel)
     with pytest.raises(AbortRequested):
         ops.process_sequence(seq)
 
@@ -97,7 +97,7 @@ def test_an_abort_before_the_operation_starts_raises(stack):
     way through -- reset_chain, open the valve, queue a draw that the pump
     then refuses -- and return success."""
     ops, sp, seq, _ = stack
-    sp.abort()
+    sp.run_control.cancel()
     with pytest.raises(AbortRequested):
         ops.process_sequence(seq)
 
@@ -108,7 +108,7 @@ def test_the_worker_learns_of_the_abort_from_the_operation(stack):
     that the operation it called was cancelled -- so it neither reports that
     sequence as completed nor starts the next one."""
     ops, sp, seq, config = stack
-    sp.abort()
+    sp.run_control.cancel()
     events = record_run(ops, [seq, seq], config)
     assert ("progress", 1, "Completed") not in events
     assert ("progress", 2, "Started") not in events

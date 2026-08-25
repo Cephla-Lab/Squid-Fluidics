@@ -8,6 +8,8 @@ survivable failure degrades, and that teardown runs everything even when a
 step fails.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 import fluidics.devices as devices_module
@@ -18,7 +20,7 @@ from fluidics.control.flow_sensor import FlowSensorSimulation
 from fluidics.control.selector_valve import SelectorValveSystem
 from fluidics.control.syringe_pump import SyringePumpSimulation
 from fluidics.control.temperature_controller import TCMControllerSimulation
-from fluidics.devices import DeviceSet, build_devices, build_operations
+from fluidics.devices import DeviceSet, build_devices, build_operations, build_worker
 from fluidics.errors import AbortRequested, RunControl
 from fluidics.merfish_operations import MERFISHOperations
 from fluidics.open_chamber_operations import OpenChamberOperations
@@ -158,6 +160,18 @@ class TestSurvivableFailures:
         assert RecordingTCM.last.closes == 1
 
 
+class TestBuildWorker:
+    def test_the_worker_waits_on_the_set_s_signal_and_makes_it_safe(self, flow_cell_config, built):
+        """The one wiring that works, so neither entry point can forget half
+        of it: an abort that cannot reach the worker, or a TEC left on."""
+        devices = built(flow_cell_config, simulation=True)
+        ops = build_operations(flow_cell_config, devices)
+        worker = build_worker(devices, ops, [], callbacks={"on_error": lambda m: None})
+        assert worker.run_control is devices.run_control
+        assert worker.callbacks["make_safe"] == devices.make_safe
+        assert worker.callbacks["on_error"] is not None
+
+
 class TestBuildOperations:
     def test_flow_cell_selects_merfish_operations(self, flow_cell_config, built):
         devices = built(flow_cell_config, simulation=True)
@@ -191,16 +205,6 @@ class RecordingPump:
         self.events.append(("pump", "close", to_waste))
 
 
-class RecordingRunControl(RunControl):
-    def __init__(self, events):
-        super().__init__()
-        self.events = events
-
-    def reset(self):
-        self.events.append(("run_control", "reset"))
-        super().reset()
-
-
 class ClosableStub:
     def __init__(self, name="device", events=None, fail=False):
         self.name = name
@@ -224,30 +228,17 @@ def device_set(config, pump=None, controller=None, tc=None, sensors=(),
                      run_control=run_control if run_control is not None else RunControl())
 
 
-class Touchy:
-    """A device stub that records any call made on it -- to prove none is."""
-
-    def __init__(self, name, events):
-        self.name = name
-        self.events = events
-
-    def __getattr__(self, method):
-        return lambda *args: self.events.append((self.name, method, args))
-
-
 class TestDeviceSetAbort:
     """One signal, no device I/O on the calling thread: the GUI's Abort button
     and the CLI's Ctrl+C both cancel through here, and every device that
     waits stops itself when its wait wakes."""
 
     def test_abort_cancels_the_shared_signal_and_touches_no_device(self, flow_cell_config):
-        events = []
-        devices = device_set(flow_cell_config, pump=Touchy("pump", events),
-                             tc=Touchy("tc", events),
-                             disc_pump=Touchy("disc_pump", events))
+        # Bare objects: any call on a device would be an AttributeError.
+        devices = device_set(flow_cell_config, pump=object(), tc=object(),
+                             disc_pump=object())
         devices.abort()
         assert isinstance(devices.run_control.cause, AbortRequested)
-        assert events == []
 
     def test_reset_clears_it_for_the_next_run(self, flow_cell_config):
         devices = device_set(flow_cell_config)
@@ -269,10 +260,10 @@ class TestMakeSafe:
         assert tc.output_enabled == [False, False]
 
     def test_stops_the_drain_pump(self, open_chamber_config):
-        events = []
+        stops = []
         device_set(open_chamber_config,
-                   disc_pump=Touchy("disc_pump", events)).make_safe()
-        assert events == [("disc_pump", "stop", ())]
+                   disc_pump=SimpleNamespace(stop=lambda: stops.append(True))).make_safe()
+        assert stops == [True]
 
     def test_absent_devices_are_skipped(self, flow_cell_config):
         assert device_set(flow_cell_config).make_safe() == []
@@ -284,12 +275,12 @@ class TestMakeSafe:
             def set_output_enabled(self, channel, on):
                 raise IOError(f"channel {channel} not answering")
 
-        events = []
+        stops = []
         errors = device_set(open_chamber_config, tc=StuckOutput(),
-                            disc_pump=Touchy("disc_pump", events)).make_safe()
+                            disc_pump=SimpleNamespace(stop=lambda: stops.append(True))).make_safe()
         assert [str(e) for e in errors] == ["channel 1 not answering",
                                             "channel 2 not answering"]
-        assert events == [("disc_pump", "stop", ())]
+        assert stops == [True]
 
 
 class TestDeviceSetClose:
@@ -320,7 +311,8 @@ class TestDeviceSetClose:
             controller=ClosableStub("controller", events),
             tc=ClosableStub("tc", events),
             sensors=[ClosableStub("sensor", events)],
-            run_control=RecordingRunControl(events))
+            run_control=SimpleNamespace(
+                reset=lambda: events.append(("run_control", "reset"))))
         devices.close()
         assert events == [
             ("tc", "close"),

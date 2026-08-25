@@ -48,9 +48,10 @@ def real_clock(monkeypatch):
 def during_move():
     """Hook a side effect into a pump's wait_for_stop -- inside the move.
 
-    Not around execute(): execute() clears the interrupt on entry, so an abort
-    or a sensor reading delivered before it would have its stop() wiped by the
-    very call it was meant to interrupt.
+    Not around execute(): execute() clears the pump's wake event on entry, so
+    a stop() delivered before it would be wiped by the very call it was meant
+    to interrupt -- and a cancel delivered before it takes a different path
+    (_arm() raises) from the mid-move one these tests model.
     """
     def _hook(sp, side_effect):
         original_wait = sp.wait_for_stop
@@ -60,6 +61,22 @@ def during_move():
             return original_wait(t)
 
         sp.wait_for_stop = wait_for_stop
+
+    return _hook
+
+
+@pytest.fixture
+def cancel_during_wait():
+    """Cancel a RunControl from inside its own wait -- the shape of an abort
+    landing mid-incubation or mid-aspiration."""
+    def _hook(control):
+        original_wait = control.wait
+
+        def wait(timeout):
+            control.cancel()
+            return original_wait(timeout)
+
+        control.wait = wait
 
     return _hook
 

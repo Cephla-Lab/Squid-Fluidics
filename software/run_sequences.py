@@ -6,8 +6,7 @@ from fluidics.sequences import (
     check_ports_against_config, get_included_sequences, load_sequences,
 )
 from fluidics.control.config import load_config
-from fluidics.devices import build_devices, build_operations
-from fluidics.experiment_worker import ExperimentWorker
+from fluidics.devices import build_devices, build_operations, build_worker
 from fluidics.run_log import (
     setup_uncaught_exception_logging, start_log_file, stop_log_file,
 )
@@ -35,18 +34,18 @@ def parse_args():
     )
     return parser.parse_args()
 
-def _wait_for_run(finished, thread):
-    """Block until the worker reports finished, then reap its thread.
+def _wait_for_run(worker, thread):
+    """Block until the worker has finished, then reap its thread.
 
     On the worker's own event, not Thread.join(): on CPython 3.10 a
     KeyboardInterrupt delivered inside join() marks the thread as stopped
     (Thread._wait_for_tstate_lock releases the state lock on the way out), so
     the join() after the handler's abort returns at once, is_alive() says
     False, and close() would park the syringe and reset the signal underneath
-    a worker still driving the pump. The event is set from run()'s finally,
-    so it cannot be fooled the same way.
+    a worker still driving the pump. worker.finished is set from run()'s
+    finally, so it cannot be fooled the same way.
     """
-    finished.wait()
+    worker.finished.wait()
     thread.join()
 
 
@@ -56,9 +55,7 @@ def main():
     start_log_file()
 
     devices = None
-    worker = None
     thread = None
-    finished = threading.Event()
     run_errors = []
     close_errors = []
 
@@ -77,19 +74,15 @@ def main():
         # The worker narrates its own run through the fluidics logger, so
         # the CLI needs no rendering callbacks -- but a failed run must not
         # exit 0, and the worker reports failure only through on_error.
-        devices.reset()
-        worker = ExperimentWorker(experiment_ops, included, config,
-                                  callbacks={"on_error": run_errors.append,
-                                             "make_safe": devices.make_safe,
-                                             "on_finished": finished.set},
-                                  run_control=devices.run_control)
-        # Assigned only once running: a start() that raises must not leave
-        # the handlers below waiting on a run that never began.
+        worker = build_worker(devices, experiment_ops, included,
+                              callbacks={"on_error": run_errors.append})
+        # Assigned only once running, so a Ctrl+C landing inside start()
+        # finds no run to wait on.
         starting = threading.Thread(target=worker.run)
         starting.start()
         thread = starting
 
-        _wait_for_run(finished, thread)
+        _wait_for_run(worker, thread)
 
     except KeyboardInterrupt:
         # `except Exception` would not catch this, so without it Ctrl+C fell
@@ -104,12 +97,12 @@ def main():
         if devices is not None:
             devices.abort()
         if thread is not None:
-            _wait_for_run(finished, thread)
+            _wait_for_run(worker, thread)
         sys.exit(130)
     except Exception as e:
+        # Nothing after the thread starts raises through here, so there is
+        # no run to wait on: straight to teardown.
         _logger.exception("%s", e)
-        if thread is not None:
-            _wait_for_run(finished, thread)
         sys.exit(1)
     finally:
         # DeviceSet.close owns the teardown ordering: sensors detach before the

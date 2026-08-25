@@ -6,15 +6,13 @@ bring-up and moves instant; the run log and crash hook are stubbed out."""
 
 import sys
 import threading
-from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import run_sequences
 
-SOFTWARE = Path(run_sequences.__file__).parent
-FLOW_CELL = (SOFTWARE / "sample_sequences" / "merfish-experiment.yaml",
-             SOFTWARE / "sample_config" / "flow_cell_config.yaml")
+from .test_sample_files import QUICKSTART_PAIRS, SOFTWARE
 
 
 @pytest.fixture
@@ -24,9 +22,13 @@ def cli(monkeypatch):
     monkeypatch.setattr(run_sequences, "setup_uncaught_exception_logging", lambda: None)
 
     def run(sequences, config):
-        """main()'s exit code: a clean run returns, everything else exits."""
-        monkeypatch.setattr(sys, "argv", ["run_sequences.py", "--path", str(sequences),
-                                          "--config", str(config), "--simulation"])
+        """main()'s exit code for the documented pairing: a clean run
+        returns, everything else exits."""
+        monkeypatch.setattr(sys, "argv", [
+            "run_sequences.py",
+            "--path", str(SOFTWARE / "sample_sequences" / sequences),
+            "--config", str(SOFTWARE / "sample_config" / config),
+            "--simulation"])
         try:
             run_sequences.main()
         except SystemExit as exit_info:
@@ -36,15 +38,23 @@ def cli(monkeypatch):
     return run
 
 
-def test_a_clean_simulated_run_exits_zero(cli):
-    assert cli(*FLOW_CELL) == 0
+@pytest.mark.parametrize("sequences, config", QUICKSTART_PAIRS)
+def test_a_clean_simulated_run_exits_zero(cli, sequences, config):
+    assert cli(sequences, config) == 0
 
 
-def test_a_thread_that_fails_to_start_does_not_hang_the_exit(cli, monkeypatch):
-    """`thread` used to be assigned before start(); a start() that raised
-    left the error handler waiting on a finished event no thread would set."""
-    def cannot_start(self):
-        raise RuntimeError("can't start new thread")
+def test_a_thread_that_fails_to_start_exits_promptly(cli, monkeypatch):
+    """Only a run that began is waited on: the worker thread is assigned
+    after start() returns, so a start() that raises goes straight to
+    teardown and exit 1. Only the CLI's own Thread is stubbed -- the
+    simulated drivers keep theirs."""
+    class CannotStart:
+        def __init__(self, *args, **kwargs):
+            pass
 
-    monkeypatch.setattr(threading.Thread, "start", cannot_start)
-    assert cli(*FLOW_CELL) == 1
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(run_sequences, "threading",
+                        SimpleNamespace(Thread=CannotStart, Event=threading.Event))
+    assert cli(*QUICKSTART_PAIRS[0]) == 1

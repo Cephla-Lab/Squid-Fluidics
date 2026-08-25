@@ -1,4 +1,5 @@
 import logging
+import threading
 
 from .errors import AbortRequested, RunControl
 # Re-exported: defined here before fluidics.errors existed, and scripts
@@ -24,8 +25,8 @@ class ExperimentWorker:
                 - 'on_finished': fn()
                 - 'on_estimate': fn(time_to_finish, n_sequences)
                 - 'make_safe': fn() -- called on the worker thread once a
-                  cancelled run has unwound, before on_error; the entry
-                  points pass DeviceSet.make_safe
+                  cancelled run has unwound, before on_error (devices
+                  .build_worker passes DeviceSet.make_safe)
             run_control: the run's cancellation signal, shared with the
                 devices (DeviceSet.run_control) so one abort reaches the
                 operation, the incubation wait, and the check between
@@ -37,6 +38,9 @@ class ExperimentWorker:
         self.config = config
         self.callbacks = callbacks or {}
         self.run_control = run_control if run_control is not None else RunControl()
+        # Set once run() has returned through its finally. The thing to wait
+        # on after a cancel -- not Thread.join(), see run_sequences.
+        self.finished = threading.Event()
 
         self.time_to_finish, self.n_sequences = self.get_time_to_finish()
         # The worker narrates its own run: one source feeds the console, the
@@ -72,9 +76,6 @@ class ExperimentWorker:
 
     def wait_for_incubation(self, time_minutes):
         self.run_control.sleep(time_minutes * 60)
-
-    def abort(self):
-        self.run_control.cancel()
 
     def run(self):
         current_sequence = 0
@@ -123,3 +124,5 @@ class ExperimentWorker:
         finally:
             _logger.info("Run finished.")
             self._call_callback('on_finished')
+            # Last: whoever waits on it may tear the devices down.
+            self.finished.set()

@@ -21,10 +21,12 @@ from serial import SerialException
 from fluidics.control.config import load_config
 from fluidics.control.discovery import DeviceNotFoundError
 from fluidics.devices import (
-    ISSUE_FLOW_SENSORS, ISSUE_TEMPERATURE_CONTROLLER,
-    build_devices, build_operations,
+    ISSUE_FLOW_SENSORS,
+    ISSUE_TEMPERATURE_CONTROLLER,
+    build_devices,
+    build_operations,
+    build_worker,
 )
-from fluidics.experiment_worker import ExperimentWorker
 from fluidics.run_log import setup_uncaught_exception_logging, start_log_file
 from fluidics.sequences import (
     load_sequences, save_sequences_yaml, get_included_sequences,
@@ -168,10 +170,7 @@ class SequencesWidget(QWidget):
         super().__init__()
         self.config = config
         self.devices = devices
-        self.syringePump = devices.syringe_pump
         self.selectorValveSystem = devices.selector_valves
-        self.discPump = devices.disc_pump
-        self.temperatureController = devices.temperature_controller
 
         self.worker = None
         self._running_rows = []  # Tree rows of the sequences handed to the worker
@@ -458,8 +457,6 @@ class SequencesWidget(QWidget):
             'on_error': self.handleError,
             'on_finished': self.onWorkerFinished,
             'on_estimate': self.setTimeEstimate,
-            # Runs on the worker thread once an aborted run has unwound.
-            'make_safe': self.devices.make_safe,
         }
 
         self._warnings.clear()
@@ -469,11 +466,7 @@ class SequencesWidget(QWidget):
         self.abortButton.setEnabled(True)
         self.sequence_running.emit(True)
 
-        # Cleared again here, not only when the last run ended: a run must
-        # never start already cancelled.
-        self.devices.reset()
-        self.worker = ExperimentWorker(self.experiment_ops, selected, self.config, callbacks,
-                                       run_control=self.devices.run_control)
+        self.worker = build_worker(self.devices, self.experiment_ops, selected, callbacks)
         self.worker_thread = threading.Thread(target=self.worker.run, daemon=True)
 
         self.sequenceLabel.setText(f"0/{self.total_sequences} sequences")

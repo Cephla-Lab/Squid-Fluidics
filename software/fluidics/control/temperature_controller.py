@@ -1,12 +1,11 @@
 import logging
 import threading
-
-from ..errors import RunControl
 import time
 
 import serial
 
 from .controller import Subscribers
+from ..errors import RunControl
 from .discovery import find_serial_port
 
 _logger = logging.getLogger(__name__)
@@ -131,9 +130,7 @@ class TCMController:
         it for its plots -- the driver still owns the thread; before this
         the GUI assigned a single callback slot and started the driver's
         private thread itself. Safe to call more than once; not restartable
-        after close(). The guard is a flag, not is_alive(): under the test
-        suite's patched Event.wait, Thread.start() can return before the
-        bootstrap marks the thread alive, and a second start() would
+        after close(). The guard is a flag so a second start() cannot
         double-start the same Thread object.
         """
         if self._polling_started:
@@ -168,12 +165,6 @@ class TCMController:
     @property
     def is_aborted(self):
         return self.run_control.cancelled
-
-    def abort(self):
-        self.run_control.cancel()
-
-    def reset_abort(self):
-        self.run_control.reset()
 
 
 class TCMControllerSimulation:
@@ -270,9 +261,3 @@ class TCMControllerSimulation:
     @property
     def is_aborted(self):
         return self.run_control.cancelled
-
-    def abort(self):
-        self.run_control.cancel()
-
-    def reset_abort(self):
-        self.run_control.reset()

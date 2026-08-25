@@ -11,14 +11,15 @@ _logger = logging.getLogger(__name__)
 class Interruptible:
     """Halting a move that is already running, shared by both pump classes.
 
-    Two ways to interrupt, differing only in whether they latch:
+    Two ways a running move is interrupted, differing in whether they latch:
 
-      abort()  the operator cancelled. Cancels the run and touches no
-               hardware on the caller's thread: the thread inside
-               wait_for_stop wakes, halts the plunger on the thread that
-               owns the port, and raises AbortRequested out of the device
-               call -- the operation unwinds instead of returning as if it
-               had finished. Latches until reset_abort().
+      a cancel on the run's RunControl -- the operator pressed Abort. It
+               touches no hardware on the cancelling thread: the thread
+               inside wait_for_stop wakes (the pump registers its own wake
+               event as a waker), halts the plunger on the thread that owns
+               the port, and raises the cause out of the device call, so the
+               operation unwinds instead of returning as if it had finished.
+               Latches until RunControl.reset().
       stop()   a fault the caller is about to raise on -- a flow fault, say.
                Halts the plunger from the caller's thread, does not latch and
                does not cancel the run: the run is being failed by whoever
@@ -60,13 +61,6 @@ class Interruptible:
 
     # --- interruption ---
 
-    def abort(self):
-        self.run_control.cancel()
-
-    def reset_abort(self):
-        self.run_control.reset()
-        self._interrupt.clear()
-
     def stop(self):
         self._terminate()
         self._interrupt.set()
@@ -74,10 +68,10 @@ class Interruptible:
     def _arm(self):
         """Clear any stale interrupt; raise if the run is already cancelled.
 
-        Clearing before checking, and abort() cancelling before it sets the
-        event, is what makes an abort landing anywhere around here still
-        count: either the cause is already set and this raises, or the event
-        is set afterwards and wait_for_stop wakes on it and raises.
+        Clearing before checking, and cancel() setting the cause before the
+        waker sets the event, is what makes a cancel landing anywhere around
+        here still count: either the cause is already set and this raises, or
+        the event is set afterwards and wait_for_stop wakes on it and raises.
         """
         self._interrupt.clear()
         self.run_control.check()

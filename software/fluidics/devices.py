@@ -15,6 +15,7 @@ sensors); anything else raises.
 """
 
 import logging
+from functools import partial
 
 from .control._def import CMD_SET
 from .control.controller import FluidController, FluidControllerSimulation
@@ -24,6 +25,7 @@ from .control.selector_valve import SelectorValveSystem
 from .control.syringe_pump import SyringePump, SyringePumpSimulation
 from .control.temperature_controller import TCMController, TCMControllerSimulation
 from .errors import RunControl
+from .experiment_worker import ExperimentWorker
 from .merfish_operations import MERFISHOperations
 from .open_chamber_operations import OpenChamberOperations
 
@@ -96,27 +98,22 @@ class DeviceSet:
         self.run_control.cancel()
 
     def reset(self):
-        """Clear the cancellation before a run starts -- the one place it is
-        cleared, apart from close(), which must still park an aborted run."""
+        """Clear the cancellation once the run that raised it has ended, before
+        anything else uses the devices (the GUI's manual tab). Nothing cancels
+        outside a run, so a run never starts already cancelled. close() also
+        clears it, ahead of its own park-to-waste move."""
         self.run_control.reset()
 
     def make_safe(self):
-        """Leave nothing running once a cancelled run has unwound.
-
-        The TEC output goes off on every channel (an abort ends the
-        experiment -- decided 2026-08-24; pause deliberately does not do
-        this) and the drain pump goes off. Called by the worker on its own
-        thread, after the operation has raised, so the I/O happens where the
-        run's I/O always happened. The syringe pump is absent: it halted
-        itself on the way out. Shielded per step; returns the exceptions
-        raised, already logged, for a caller with something to report.
-        """
+        """Leave nothing running once a cancelled run has unwound: TEC output
+        off on every channel (an abort ends the experiment), drain pump off.
+        The syringe pump halted itself in wait_for_stop. Shielded per step;
+        returns the exceptions raised, already logged."""
         steps = []
         tc = self.temperature_controller
         if tc is not None:
-            steps.extend(
-                (lambda c=c: tc.set_output_enabled(c, False))
-                for c in range(1, tc.channels + 1))
+            steps.extend(partial(tc.set_output_enabled, c, False)
+                         for c in range(1, tc.channels + 1))
         if self.disc_pump is not None:
             steps.append(self.disc_pump.stop)
         return _run_shielded(steps, doing="making the rig safe after an abort")
@@ -269,3 +266,16 @@ def build_operations(config, devices, on_warning=None):
                                      devices.disc_pump,
                                      devices.temperature_controller)
     raise ValueError(f"Unsupported application: {config.application!r}")
+
+
+def build_worker(devices, operations, sequences, callbacks=None):
+    """The worker for one run on `devices`, wired the one way that works: it
+    waits on the set's run_control, so the one abort reaches it, and makes
+    the rig safe through the set after a cancel. Both entry points call this
+    rather than spelling the wiring out -- forgetting either half yields a
+    worker an abort cannot reach, or one that leaves the TEC on.
+    """
+    callbacks = dict(callbacks or {})
+    callbacks["make_safe"] = devices.make_safe
+    return ExperimentWorker(operations, sequences, devices.config, callbacks,
+                            run_control=devices.run_control)
