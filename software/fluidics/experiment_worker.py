@@ -25,8 +25,8 @@ class ExperimentWorker:
                 - 'on_finished': fn()
                 - 'on_estimate': fn(time_to_finish, n_sequences)
                 - 'make_safe': fn() -- called on the worker thread once a
-                  cancelled run has unwound, before on_error (devices
-                  .build_worker passes DeviceSet.make_safe)
+                  run has ended early, aborted or failed, before on_error
+                  (devices.build_worker passes DeviceSet.make_safe)
             run_control: the run's cancellation signal, shared with the
                 devices (DeviceSet.run_control) so one abort reaches the
                 operation, the incubation wait, and the check between
@@ -77,6 +77,18 @@ class ExperimentWorker:
     def wait_for_incubation(self, time_minutes):
         self.run_control.sleep(time_minutes * 60)
 
+    def _end_early(self, message):
+        """Quiet the rig, then report why it stopped.
+
+        make_safe first, so the TEC and the drain are off before the operator
+        reads the message -- and, on a failure nobody is present for, before
+        anyone reads it at all. Every early end comes through here: only a run
+        that reached its last sequence leaves the temperature holding, which
+        is what a run ending in set_temperature is for.
+        """
+        self._call_callback('make_safe')
+        self._call_callback('on_error', message)
+
     def run(self):
         current_sequence = 0
         try:
@@ -104,15 +116,14 @@ class ExperimentWorker:
 
                     except AbortRequested:
                         _logger.warning("Run aborted by user.")
-                        self._call_callback('make_safe')
-                        self._call_callback('on_error', "Operation aborted by user")
+                        self._end_early("Operation aborted by user")
                         return
                     except Exception as e:
                         # Same tag as the narrative lines above, so the error
                         # names the sequence the way the operator just saw it.
                         message = f"{tag}: failed on repeat {r + 1}: {e}"
                         _logger.error(message, exc_info=True)
-                        self._call_callback('on_error', message)
+                        self._end_early(message)
                         return
 
         except Exception as e:
@@ -120,7 +131,7 @@ class ExperimentWorker:
             # dict, say -- are programming errors, where the traceback matters
             # most.
             _logger.error("Run failed: %s", e, exc_info=True)
-            self._call_callback('on_error', str(e))
+            self._end_early(str(e))
         finally:
             _logger.info("Run finished.")
             self._call_callback('on_finished')

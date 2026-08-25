@@ -105,10 +105,13 @@ class DeviceSet:
         self.run_control.reset()
 
     def make_safe(self):
-        """Leave nothing running once a cancelled run has unwound: TEC output
-        off on every channel (an abort ends the experiment), drain pump off.
-        The syringe pump halted itself in wait_for_stop. Shielded per step;
-        returns the exceptions raised, already logged."""
+        """Leave nothing running once a run has ended early: TEC output off on
+        every channel, drain pump off. Called for an abort and for a failure
+        alike (decided 2026-08-25) -- an ended run drives nothing, and the
+        failure case is the unattended one. Only a run that finished leaves
+        the temperature holding. The syringe pump halted itself in
+        wait_for_stop. Shielded per step; returns the exceptions raised,
+        already logged."""
         steps = []
         tc = self.temperature_controller
         if tc is not None:
@@ -116,7 +119,7 @@ class DeviceSet:
                          for c in range(1, tc.channels + 1))
         if self.disc_pump is not None:
             steps.append(self.disc_pump.stop)
-        return _run_shielded(steps, doing="making the rig safe after an abort")
+        return _run_shielded(steps, doing="making the rig safe")
 
     def close(self, empty_syringe=None):
         """Release every device, tolerating failures along the way.

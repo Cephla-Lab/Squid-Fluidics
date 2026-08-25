@@ -200,11 +200,27 @@ class TestTheSharedSignal:
         assert any("aborted" in e[1] for e in events if e[0] == "error")
 
 
-    def test_make_safe_is_not_called_on_success_or_on_a_failed_step(self):
+    def test_a_completed_run_leaves_the_rig_alone(self):
+        """The temperature must keep holding: a run whose last step is
+        set_temperature exists to leave the sample at it."""
         assert ("make_safe",) not in record_run(RecordingOps(), [FLOW], CONFIG)
-        failed = record_run(RecordingOps(raise_on={0: ValueError("bad step")}),
+
+    def test_a_failed_step_makes_the_rig_safe_before_reporting(self):
+        """Decided 2026-08-25: a failure switches the TEC off like an abort.
+        An abort has the operator standing at the rig; a failure is the one
+        nobody is present for."""
+        events = record_run(RecordingOps(raise_on={0: ValueError("bad step")}),
                             [FLOW], CONFIG)
-        assert ("make_safe",) not in failed
+        errors = [e for e in events if e[0] == "error"]
+        assert len(errors) == 1 and "bad step" in errors[0][1]
+        assert events.index(("make_safe",)) < events.index(errors[0])
+
+    def test_a_fault_outside_the_sequence_loop_makes_the_rig_safe_too(self):
+        """A malformed sequence dict raises where no tag exists yet. The run
+        has still ended, so the rig is still quieted."""
+        events = record_run(RecordingOps(), [{"repeat": 1}], CONFIG)
+        assert ("make_safe",) in events
+        assert any(e[0] == "error" for e in events)
 
     def test_finished_is_set_last(self):
         """After on_finished: whoever waits on it may tear the devices down."""
