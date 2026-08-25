@@ -239,6 +239,21 @@ class TestTheCancelPathOnTheRealPump:
             pump.execute()
         assert pump.syringe.terminated == 1
 
+    def test_a_failed_halt_is_logged_and_the_abort_still_raises(self, caplog):
+        """If terminateCmd fails, the abort must still reach the worker --
+        its safety cleanup depends on it -- with the failure on record."""
+        pump = _real_pump(ready=True)
+
+        def broken():
+            raise IOError("no reply from pump")
+
+        pump.syringe.terminateCmd = broken
+        pump.run_control.cancel()
+        with caplog.at_level(logging.ERROR, logger="fluidics"):
+            with pytest.raises(AbortRequested):
+                pump.wait_for_stop(0)
+        assert "no reply from pump" in caplog.text
+
     def test_a_cancel_landing_after_dispatch_still_halts_the_move(self):
         """The window between _arm() and executeChain: a cancel there could
         not stop the dispatch, so the wait must halt the move that just

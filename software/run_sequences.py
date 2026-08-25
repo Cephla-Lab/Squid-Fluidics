@@ -83,8 +83,11 @@ def main():
                                              "make_safe": devices.make_safe,
                                              "on_finished": finished.set},
                                   run_control=devices.run_control)
-        thread = threading.Thread(target=worker.run)
-        thread.start()
+        # Assigned only once running: a start() that raises must not leave
+        # the handlers below waiting on a run that never began.
+        starting = threading.Thread(target=worker.run)
+        starting.start()
+        thread = starting
 
         _wait_for_run(finished, thread)
 

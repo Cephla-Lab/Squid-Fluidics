@@ -92,8 +92,13 @@ def _fast_clock(monkeypatch):
         return fake_time[0]
 
     def fake_event_wait(self, timeout=None):
-        if timeout is not None:
-            fake_time[0] += timeout
+        if timeout is None:
+            # An untimed wait has no clock to fake: it blocks until another
+            # thread sets the event. Thread.start() relies on exactly that
+            # to return only once the thread is really running; faking it
+            # let start() return early and a following join() raise.
+            return _pristine_wait(self)
+        fake_time[0] += timeout
         return self.is_set()
 
     # Patch the time module itself

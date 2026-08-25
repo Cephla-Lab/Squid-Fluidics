@@ -104,7 +104,14 @@ class Interruptible:
             # also closes the window between _arm() and dispatch: a cancel
             # landing there wakes this wait at once and halts the move it
             # could not prevent.
-            self._terminate()
+            try:
+                self._terminate()
+            except Exception as e:
+                # The abort still has to reach the worker -- its safety
+                # cleanup depends on it -- so the halt failure is reported
+                # here, loudly, rather than replacing the cancellation.
+                _logger.error("Halting the plunger after the abort failed; the "
+                              "pump may still be moving: %s", e, exc_info=True)
         self.run_control.check()
 
 

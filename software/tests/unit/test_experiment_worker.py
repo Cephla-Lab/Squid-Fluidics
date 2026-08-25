@@ -189,6 +189,26 @@ class TestTheSharedSignal:
         assert ("progress", 2, "Started") not in events
         assert ("make_safe",) in events
 
+    def test_a_cancel_landing_between_sequences_does_not_start_the_next(self):
+        """After the post-operation check and before the next dispatch is a
+        real window: the operator's abort can land while the worker reports
+        'Completed'. The next sequence must not even be reported as started."""
+        control = RunControl()
+        events = []
+
+        def on_progress(index, num, status):
+            events.append(("progress", num, status))
+            if (num, status) == (1, "Completed"):
+                control.cancel()
+
+        worker = ExperimentWorker(RecordingOps(), [dict(FLOW), dict(FLOW)], CONFIG, callbacks={
+            "update_progress": on_progress,
+            "on_error": lambda message: events.append(("error", message)),
+        }, run_control=control)
+        worker.run()
+        assert ("progress", 2, "Started") not in events
+        assert any("aborted" in e[1] for e in events if e[0] == "error")
+
     def test_make_safe_runs_on_the_thread_that_ran_the_operations(self):
         """The rig's I/O happens where the run's I/O always happened, not on
         the Qt thread or in a signal handler."""

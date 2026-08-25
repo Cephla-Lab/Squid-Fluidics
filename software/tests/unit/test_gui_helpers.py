@@ -374,3 +374,32 @@ class TestAbortSequences:
         )
         gui.SequencesWidget.abortSequences(stub)
         assert aborted == [True]
+
+
+class TestRunFinished:
+    """The cancellation belongs to the run: _handle_finished clears it after
+    the worker is reaped and before the manual tab is re-enabled, or the
+    tab's moves would raise on a stale abort. Called unbound against a stub."""
+
+    def test_the_signal_is_reset_before_the_manual_tab_returns(self, monkeypatch):
+        order = []
+        monkeypatch.setattr(gui.QMessageBox, "information",
+                            lambda *args: order.append("dialog"))
+        noop = lambda *args: None
+        stub = SimpleNamespace(
+            runButton=SimpleNamespace(setEnabled=noop),
+            abortButton=SimpleNamespace(setEnabled=noop),
+            progressBar=SimpleNamespace(setValue=noop),
+            timeLabel=SimpleNamespace(setText=noop),
+            sequenceLabel=SimpleNamespace(setText=noop),
+            timer=SimpleNamespace(stop=noop),
+            highlightRow=noop,
+            worker=object(),
+            worker_thread=SimpleNamespace(join=lambda: order.append("join")),
+            devices=SimpleNamespace(reset=lambda: order.append("reset")),
+            sequence_running=SimpleNamespace(
+                emit=lambda running: order.append(("running", running))),
+        )
+        gui.SequencesWidget._handle_finished(stub)
+        assert order == ["join", "reset", ("running", False), "dialog"]
+        assert stub.worker is None

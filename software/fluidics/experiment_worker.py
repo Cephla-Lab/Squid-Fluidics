@@ -85,6 +85,9 @@ class ExperimentWorker:
                     try:
                         current_sequence += 1
                         tag = f"Sequence {current_sequence}/{self.n_sequences} ({label})"
+                        # A cancel that landed between sequences must not
+                        # start the next one.
+                        self.run_control.check()
                         _logger.info("%s: started", tag)
                         self._call_callback('update_progress', index, current_sequence, "Started")
                         self.experiment_ops.process_sequence(seq)

@@ -469,7 +469,8 @@ class SequencesWidget(QWidget):
         self.abortButton.setEnabled(True)
         self.sequence_running.emit(True)
 
-        # A previous abort must not cancel this run before it starts.
+        # Cleared again here, not only when the last run ended: a run must
+        # never start already cancelled.
         self.devices.reset()
         self.worker = ExperimentWorker(self.experiment_ops, selected, self.config, callbacks,
                                        run_control=self.devices.run_control)
@@ -544,11 +545,14 @@ class SequencesWidget(QWidget):
         self.sequenceLabel.setText("0/0 sequences")
         self.timer.stop()
         self.highlightRow(None)
-        self.sequence_running.emit(False)
-        
+
         if self.worker:
             self.worker_thread.join()
             self.worker = None
+        # The cancellation belongs to the run that just ended: clear it before
+        # the manual tab comes back, or its moves would raise on a stale abort.
+        self.devices.reset()
+        self.sequence_running.emit(False)
 
         QMessageBox.information(self, "Finished", "Sequence execution finished.")
 
