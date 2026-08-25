@@ -59,7 +59,7 @@ class RecordingControl(RunControl):
 
 def guard_for(*sensors, control=None, expected=500.0, log=None):
     return DrawGuard(list(sensors), expected_ul_min=expected,
-                     run_control=control if control is not None else RecordingControl(),
+                     run_control=control if control is not None else RunControl(),
                      log=(log if log is not None else lambda m: None))
 
 
@@ -145,16 +145,6 @@ class TestSamplesArrivingAfterTheDraw:
         _replay(handler, [0.0] * 10)
         assert not g.run_control.cancelled
 
-    def test_a_late_sample_does_not_record_a_fault(self):
-        """It would land on a guard nobody will check again, so the run would
-        carry on with a fault recorded and never reported."""
-        sensor = FakeSensor(monitor="stop")
-        g = guard_for(sensor)
-        with g:
-            handler = sensor.subscribers[0]
-        _replay(handler, [0.0] * 10)
-        assert g.fault is None
-
     def test_a_late_sample_does_not_log_a_warning(self):
         lines = []
         sensor = FakeSensor(monitor="warn")
@@ -192,7 +182,7 @@ class TestStopPolicy:
 
     def test_the_run_is_cancelled_once_however_long_the_fault_persists(self):
         sensor = FakeSensor(monitor="stop")
-        g = guard_for(sensor)
+        g = guard_for(sensor, control=RecordingControl())
         with pytest.raises(FlowFault):
             draw(g, sensor, [0.0] * 200)
         assert g.run_control.cancels == 1

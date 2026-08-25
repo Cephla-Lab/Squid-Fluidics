@@ -5,12 +5,17 @@ from . import sequence_utils
 _logger = logging.getLogger(__name__)
 
 class OpenChamberOperations():
-    def __init__(self, config, syringe_pump, selector_valves, disc_pump, temperature_controller=None):
+    def __init__(self, config, syringe_pump, selector_valves, disc_pump,
+                 temperature_controller=None, run_control=None):
         self.config = config
         self.sp = syringe_pump
         self.sv = selector_valves
         self.dp = disc_pump
         self.tc = temperature_controller
+        # The run's cancellation signal, borrowed once here rather than read
+        # off whichever device is in scope. build_operations passes the
+        # DeviceSet's, which every device shares.
+        self.run_control = run_control if run_control is not None else syringe_pump.run_control
 
         # Cache frequently used config values
         sp = self.config.syringe_pump
@@ -24,10 +29,6 @@ class OpenChamberOperations():
         self.chamber_volume_ul = self.config.samples.chamber_volume_ul
 
     def process_sequence(self, sequence):
-        # A cancelled run starts nothing -- not even the valve move that
-        # precedes the first pump call, which is where the raise would
-        # otherwise come from.
-        self.sp.run_control.check()
         _logger.debug("Running: %s", sequence)
         seq_type = sequence['type']
 
@@ -178,7 +179,7 @@ class OpenChamberOperations():
                 self._execute_under_drain()
             # On the run's signal, so a cancel landing in this settle wait
             # raises out of the operation instead of returning normally.
-            self.sp.run_control.sleep(1)
+            self.run_control.sleep(1)
         except Cancelled:
             raise
         except Exception as e:
@@ -229,4 +230,4 @@ class OpenChamberOperations():
             raise OperationError(f"Error in priming_or_clean_up: {str(e)}")
 
     def set_temperature(self, target):
-        sequence_utils.set_temperature(self.tc, target)
+        sequence_utils.set_temperature(self.tc, target, self.run_control)

@@ -1,4 +1,6 @@
 import logging
+
+from ..errors import RunControl
 from ._def import CMD_SET
 from .config import available_port_count
 
@@ -36,9 +38,10 @@ class SelectorValve():
 class SelectorValveSystem():
     PORTS_PER_VALVE = 10
 
-    def __init__(self, fluid_controller, config):
+    def __init__(self, fluid_controller, config, run_control=None):
         self.fc = fluid_controller
         self.config = config
+        self.run_control = run_control if run_control is not None else RunControl()
         rs = self.config.reagent_selection
         sv_config = rs.selector_valves
         self.common_tubing_fluid_amount_ul = rs.common_tubing_fluid_amount_ul
@@ -57,6 +60,11 @@ class SelectorValveSystem():
         return name_mapping.get('port_' + str(port_index))
 
     def open_port(self, port_index):
+        # No motion on a cancelled run: this is the last driver call that
+        # started one without checking, and the operations sit between valve
+        # moves and pump chains often enough that a cancel would otherwise
+        # rotate a valve on its way out.
+        self.run_control.check()
         if not 1 <= port_index <= self.available_port_number:
             # This used to be a silent return, which left whatever port was
             # last open selected -- the draw then pulled the wrong reagent

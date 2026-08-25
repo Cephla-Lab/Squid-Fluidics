@@ -22,12 +22,11 @@ class DiscPump():
     def aspirate(self, time_s):
         """Full power for time_s seconds, then off. Raises the run's cause if
         cancelled before starting or mid-way -- the latter after switching off."""
-        self.run_control.check()
-        self._set_power(MCU_CONSTANTS.TTP_MAX_PW)
+        self.start(1.0)
         try:
             self.run_control.sleep(time_s)
         finally:
-            self._set_power(0)
+            self.stop()
 
     def start(self, power_percentage):
         """Power the pump until stop(). Raises the run's cause if it is already

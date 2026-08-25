@@ -80,8 +80,12 @@ def test_an_abort_before_the_operation_starts_raises(stack):
     way through -- nor move a valve on a run that is over: the operation
     checks the signal before it touches anything."""
     ops, sp, seq, _ = stack
+    # Spy on the real open_port rather than replacing it: the valve system's
+    # own entry check is what refuses, so a stub would bypass the thing under
+    # test and record a move that production would not make.
     moved = []
-    ops.sv.open_port = lambda port: moved.append(port)
+    original = ops.sv.open_port
+    ops.sv.open_port = lambda port: (original(port), moved.append(port))
     sp.run_control.cancel()
     with pytest.raises(AbortRequested):
         ops.process_sequence(seq)
@@ -101,10 +105,8 @@ def test_the_worker_learns_of_the_abort_from_the_operation(stack):
 
 
 def test_a_flow_fault_reaches_the_operator_as_a_fault_not_an_abort(flow_cell_config):
-    """Pinned before the taxonomy moves. Today this rests on FlowFault not
-    deriving from AbortRequested, which the worker catches first; after the
-    redesign, on the worker reporting by cause. Either way the operator must
-    see the diagnosis, not 'aborted by user'."""
+    """The worker reports by cause: a fault carries its diagnosis, and the
+    operator never sees 'aborted by user' for something they did not do."""
     class FaultingOps:
         def process_sequence(self, seq):
             raise FlowFault("inlet", expected_ul_min=500.0,

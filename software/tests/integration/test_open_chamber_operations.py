@@ -3,6 +3,8 @@ import pytest
 
 from fluidics.errors import AbortRequested
 
+from ..conftest import dispenses
+
 
 @pytest.fixture
 def oc_ops(open_chamber_rig):
@@ -147,38 +149,29 @@ class TestProcessSequence:
             oc_ops.process_sequence(seq)
 
 
-class TestNothingStartsOnACancelledRun:
-    def test_a_cancel_in_the_settle_wait_raises_out_of_the_operation(self, open_chamber_rig):
+class TestACancelMidOperation:
+    def test_a_cancel_in_the_settle_wait_raises_out_of_the_operation(
+            self, open_chamber_rig, cancel_after_chain):
         """wash_with_constant_flow ends with a one-second settle wait. On the
         run's signal, so a cancel landing there unwinds the operation instead
         of returning normally and letting the worker report it completed."""
         ops, sp = open_chamber_rig
-        original = sp.execute
-
-        def cancel_after_the_last_chain():
-            original()
-            if any(op[0] == "dispense" for op in sp.executed[-1]):
-                sp.run_control.cancel()
-
-        sp.execute = cancel_after_the_last_chain
+        cancel_after_chain(sp, lambda chains: dispenses(chains[-1]))
         with pytest.raises(AbortRequested):
             ops.process_sequence({"type": "wash_constant_flow", "fluidic_port": 6,
                                   "flow_rate": 1000, "volume": 1000})
 
-    def test_the_drain_is_never_powered_once_the_run_is_cancelled(self, open_chamber_rig):
+    def test_the_drain_is_never_started_once_the_run_is_cancelled(
+            self, open_chamber_rig, cancel_after_chain):
         """_execute_under_drain starts the drain before the syringe pump's
-        checked execute; the drain pump's own entry check is what keeps a
-        cancelled run from pulsing it."""
+        checked execute, so the drain pump's own entry check is the only thing
+        standing between a cancelled run and a pulse. Cancelling after the
+        draw (chain 2) puts dp.start next in line -- cancelling earlier would
+        raise at the following execute and prove nothing."""
         ops, sp = open_chamber_rig
         powered = []
         ops.dp._set_power = lambda power: powered.append(power)
-        original = sp.execute
-
-        def cancel_after_the_first_chain():
-            original()
-            sp.run_control.cancel()
-
-        sp.execute = cancel_after_the_first_chain
+        cancel_after_chain(sp, lambda chains: len(chains) == 2)
         with pytest.raises(AbortRequested):
             ops.process_sequence({"type": "wash_constant_flow", "fluidic_port": 6,
                                   "flow_rate": 1000, "volume": 1000})
@@ -208,23 +201,15 @@ class TestDrainPumpAndCleanUpGuards:
                                   "flow_rate": 1000, "volume": 1000})
         assert drain == ["start", "stop"]
 
-    def test_a_cancel_after_the_final_chain_never_powers_the_drain(self, open_chamber_rig):
+    def test_a_cancel_after_the_final_chain_never_powers_the_drain(
+            self, open_chamber_rig, cancel_after_chain):
         """clean_up ends with a 20 s aspiration. A cancel landing just before
         it unwinds through the drain pump's own entry check -- before the
         pump is powered, and by raising, not by a guard in the operation."""
         ops, sp = open_chamber_rig
         powered = []
         ops.dp._set_power = lambda power: powered.append(power)
-        original = sp.execute
-
-        def abort_after_the_final_chain():
-            original()
-            # Only the last chain dispenses to the chamber; an earlier abort
-            # would return through one of the guards that already existed.
-            if any(op[0] == "dispense" for op in sp.executed[-1]):
-                sp.run_control.cancel()
-
-        sp.execute = abort_after_the_final_chain
+        cancel_after_chain(sp, lambda chains: dispenses(chains[-1]))
         with pytest.raises(AbortRequested):
             ops.process_sequence({"type": "clean_up", "fluidic_port": 10,
                                   "flow_rate": 1000, "volume": 1000})

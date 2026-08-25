@@ -8,11 +8,16 @@ _logger = logging.getLogger(__name__)
 
 class MERFISHOperations():
     def __init__(self, config, syringe_pump, selector_valves,
-                 temperature_controller=None, flow_sensors=None, on_warning=None):
+                 temperature_controller=None, flow_sensors=None, on_warning=None,
+                 run_control=None):
         self.config = config
         self.sp = syringe_pump
         self.sv = selector_valves
         self.tc = temperature_controller
+        # The run's cancellation signal, borrowed once here rather than read
+        # off whichever device is in scope. build_operations passes the
+        # DeviceSet's, which every device shares.
+        self.run_control = run_control if run_control is not None else syringe_pump.run_control
         self.flow_sensors = flow_sensors or []
         # Where a draw-protection notice goes. Defaults to the fluidics
         # logger's WARNING -- console and the run log -- which is all the CLI
@@ -35,18 +40,13 @@ class MERFISHOperations():
         available codes, so a sequence asking for 480 uL/min gets 500, and
         measuring against 480 would bias the whole band by the rounding.
         """
-        guard = DrawGuard(self.flow_sensors,
-                          expected_ul_min=self.sp.get_flow_rate(speed_code),
-                          run_control=self.sp.run_control,
-                          log=self.on_warning)
-        with guard:
+        with DrawGuard(self.flow_sensors,
+                       expected_ul_min=self.sp.get_flow_rate(speed_code),
+                       run_control=self.run_control,
+                       log=self.on_warning):
             self.sp.execute()
 
     def process_sequence(self, sequence):
-        # A cancelled run starts nothing -- not even the valve move that
-        # precedes the first pump call, which is where the raise would
-        # otherwise come from.
-        self.sp.run_control.check()
         _logger.debug("Running: %s", sequence)
         seq_type = sequence['type']
 
@@ -63,7 +63,8 @@ class MERFISHOperations():
                 sequence['volume'],
                 sequence.get('use_ports'))
         elif seq_type == "set_temperature":
-            sequence_utils.set_temperature(self.tc, sequence['temperature'])
+            sequence_utils.set_temperature(self.tc, sequence['temperature'],
+                                           self.run_control)
         else:
             raise ValueError(f"Unknown sequence type: {seq_type}")
 
@@ -134,7 +135,7 @@ class MERFISHOperations():
                     # So we wait a second here for the flow to stabilize -- on
                     # the run's signal, so a cancel raises out of it rather
                     # than being noticed a second later.
-                    self.sp.run_control.sleep(1)
+                    self.run_control.sleep(1)
 
             self.sv.open_port(port)
             self.sp.extract(self.extract_port, volume, speed_code)

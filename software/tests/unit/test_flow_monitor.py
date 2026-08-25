@@ -7,6 +7,7 @@ under the autouse _fast_clock fixture without any interaction with it.
 
 import pytest
 
+from fluidics.errors import AbortRequested, SafetyFault
 from fluidics.flow_monitor import FlowMonitor, FlowFault
 
 
@@ -147,7 +148,6 @@ class TestFaultContents:
     def test_fault_is_a_safety_fault_not_an_abort(self):
         """A cancellation the worker reports by cause -- with its diagnosis,
         never as 'aborted by user'."""
-        from fluidics.errors import AbortRequested, SafetyFault
         fault = feed(make(ramp_up=0.0), [0.0] * 3)
         assert isinstance(fault, SafetyFault)
         assert not isinstance(fault, AbortRequested)

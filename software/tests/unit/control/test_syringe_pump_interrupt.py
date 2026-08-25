@@ -52,16 +52,6 @@ def _real_pump(ready=True):
     return bare_pump(FakeSyringe(ready=ready))
 
 
-def _ran_the_chain(pump):
-    """Whether execute() dispatched the chain rather than raising at the
-    cancel check. is_busy cannot answer this -- it is False either way by the
-    time execute returns."""
-    awaited = []
-    pump.wait_for_stop = lambda t=0: awaited.append(t)
-    pump.execute()
-    return bool(awaited)
-
-
 class TestTheRealPumpsHooks:
     def test_halt_halts_the_plunger(self):
         pump = _real_pump()
@@ -136,7 +126,12 @@ class TestTheSignal:
         pump = _pump()
         pump.run_control.cancel()
         pump.run_control.reset()
-        assert _ran_the_chain(pump)
+        # is_busy cannot answer whether the chain was dispatched -- it is
+        # False either way by the time execute returns.
+        awaited = []
+        pump.wait_for_stop = lambda t=0: awaited.append(t)
+        pump.execute()
+        assert awaited == [5]
 
     def test_a_pump_built_alone_gets_its_own(self):
         assert _pump().run_control is not _pump().run_control

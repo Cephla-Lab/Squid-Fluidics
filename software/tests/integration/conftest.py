@@ -52,7 +52,10 @@ def _make_sim_hardware(config):
         speed_code_limit=config.syringe_pump.speed_code_limit,
         waste_port=config.syringe_pump.waste_port,
     )
-    sv = SelectorValveSystem(fc, config)
+    # Every device that can start motion shares one signal, as build_devices
+    # wires them: on separate ones a cancel would reach the pump but not the
+    # valves, and the operations would keep moving liquid.
+    sv = SelectorValveSystem(fc, config, sp.run_control)
     return fc, sp, sv
 
 
@@ -67,8 +70,6 @@ def flow_cell_hardware(flow_cell_config):
 def open_chamber_hardware(open_chamber_config):
     """Return (config, syringe_pump, selector_valves, disc_pump, temperature_controller) for open chamber."""
     fc, sp, sv = _make_sim_hardware(open_chamber_config)
-    # The rig's two waiting devices share one signal, as build_devices wires
-    # them; on separate ones an abort would never cross from pump to drain.
     dp = DiscPump(fc, sp.run_control)
     tc = TCMControllerSimulation(channels=2)
     return open_chamber_config, sp, sv, dp, tc

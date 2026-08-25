@@ -111,7 +111,7 @@ class TestSurvivableFailures:
         The TCM's close raises here, proving each cleanup is shielded: the
         controller after it must still close, and the operator must still see
         the valve error, not the close error that happened while unwinding."""
-        def explode(controller, config):
+        def explode(controller, config, run_control):
             raise RuntimeError("current position is 3; expected 1")
 
         monkeypatch.setattr(devices_module, "SelectorValveSystem", explode)
@@ -158,6 +158,17 @@ class TestSurvivableFailures:
         assert all(s.terminate_reading_thread for s in started)
         assert RecordingController.last.closes == 1
         assert RecordingTCM.last.closes == 1
+
+
+class TestBuildOperationsWiring:
+    def test_the_operations_hold_one_accessor_for_the_run_s_signal(self, flow_cell_hardware):
+        """One accessor, borrowed once in the constructor: before this the
+        operations read the signal off whichever device was in scope.
+        build_operations passes the DeviceSet's explicitly, which on a wired
+        set is the same object this falls back to -- so only the fallback is
+        observable, and it is what a script building operations by hand gets."""
+        config, sp, sv = flow_cell_hardware
+        assert MERFISHOperations(config, sp, sv).run_control is sp.run_control
 
 
 class TestBuildWorker:
@@ -376,11 +387,12 @@ class TestRunControlInjection:
         devices = built(open_chamber_config, simulation=True)
         assert devices.disc_pump.run_control is devices.run_control
 
-    def test_the_temperature_controller_shares_it_too(self, flow_cell_config, built):
-        flow_cell_config.temperature_controller = TemperatureControllerConfig(
-            serial_number="TC1", channels=1)
+    def test_the_selector_valves_share_it_too(self, flow_cell_config, built):
+        """Every driver that starts motion waits on the one signal. The
+        temperature controller holds none: it never waits, so the operations'
+        stabilization loop is handed the signal directly."""
         devices = built(flow_cell_config, simulation=True)
-        assert devices.temperature_controller.run_control is devices.run_control
+        assert devices.selector_valves.run_control is devices.run_control
 
     def test_close_after_an_abort_resets_it_and_reports_no_errors(self, flow_cell_config, built):
         """The real pump's close parks to waste with a move of its own; with

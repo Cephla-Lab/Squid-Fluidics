@@ -65,6 +65,33 @@ def during_move():
 
 
 @pytest.fixture
+def cancel_after_chain():
+    """Cancel the run once the pump has executed a chain `when` picks out.
+
+    Where a cancel lands relative to the queued chains decides which checked
+    call raises next, so it is the seam the operations' unwinding is tested
+    at. `when` receives the list of chains executed so far.
+    """
+    def _hook(sp, when):
+        original = sp.execute
+
+        def execute():
+            original()
+            if when(sp.executed):
+                sp.run_control.cancel()
+
+        sp.execute = execute
+
+    return _hook
+
+
+def dispenses(chain):
+    """Whether a chain pushes liquid out -- the last chain of a fluidic
+    operation, as opposed to a draw or a dump to waste."""
+    return any(op[0] == "dispense" for op in chain)
+
+
+@pytest.fixture
 def cancel_during_wait():
     """Cancel a RunControl from inside its own wait -- the shape of an abort
     landing mid-incubation or mid-aspiration."""
@@ -122,12 +149,11 @@ def _fast_clock(monkeypatch):
     monkeypatch.setattr("time.time", fake_time_fn)
 
     # Patch modules that use 'from time import sleep' or 'from time import time'
-    # The operations' settle waits go through RunControl.sleep -> Event.wait,
-    # patched below, so neither module holds a sleep of its own any more.
-    monkeypatch.setattr("fluidics.open_chamber_operations.time", fake_time_fn, raising=False)
+    # The operations' settle waits and sequence_utils' stabilization wait go
+    # through RunControl.sleep -> Event.wait, patched below; none of those
+    # modules holds a sleep of its own any more.
     monkeypatch.setattr("fluidics.control.controller.sleep", fake_sleep)
     monkeypatch.setattr("fluidics.control.controller.time", fake_time_fn)
-    monkeypatch.setattr("fluidics.sequence_utils.sleep", fake_sleep, raising=False)
     monkeypatch.setattr("fluidics.sequence_utils.time", fake_time_fn, raising=False)
 
     # Patch threading.Event.wait (used by DiscPump.aspirate)

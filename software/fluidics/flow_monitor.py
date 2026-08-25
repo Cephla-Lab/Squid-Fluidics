@@ -7,7 +7,8 @@ process-wide -- a rule that read the clock itself could not be tested at all.
 
 Deciding is separated from acting. `sample()` returns a fault rather than
 raising or touching the pump, so the caller chooses what a fault means: `warn`
-logs it, `stop` halts the draw and raises it.
+logs it, `stop` cancels the run with it -- the pump's wait then halts the
+plunger and raises it on the thread running the sequence.
 """
 
 import threading
@@ -176,14 +177,6 @@ class DrawGuard:
         self._lock = threading.Lock()
         self._fault = None
         self._active = False
-
-    @property
-    def fault(self):
-        """The first fault a `stop` sensor saw, or None. Set from the reader
-        thread. A `warn` sensor never fills this -- warn logs and nothing more,
-        so a fault recorded here always means the draw is being failed."""
-        with self._lock:
-            return self._fault
 
     def __enter__(self):
         started_at = time.time()

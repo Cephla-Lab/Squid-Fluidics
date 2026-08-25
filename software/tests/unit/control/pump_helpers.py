@@ -22,7 +22,7 @@ def bare_pump(syringe, lock=None, **attrs):
     pump._serial_lock = lock if lock is not None else threading.Lock()
     for name, value in attrs.items():
         setattr(pump, name, value)
-    pump._init_interrupt()
+    pump._init_run_control()
     return pump
 
 

@@ -98,8 +98,9 @@ class ExperimentWorker:
 
     def run(self):
         current_sequence = 0
-        tag = None          # names the sequence in hand, the way the operator saw it
-        repeat = 0
+        # Both name the sequence in hand, the way the operator saw it; the
+        # handlers read them only under `if tag`, and they are bound together.
+        tag = None
         try:
             for index, seq in enumerate(self.sequences):
                 label = seq.get('name') or seq['type']

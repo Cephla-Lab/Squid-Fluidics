@@ -16,7 +16,7 @@ import logging
 
 import pytest
 
-from fluidics.errors import AbortRequested, Cancelled
+from fluidics.errors import Cancelled
 from fluidics.flow_monitor import FlowFault
 from fluidics.merfish_operations import MERFISHOperations
 
@@ -95,11 +95,6 @@ class TestFaultingDraw:
         sensor.flow = 0.0
         return ops, sensor, sp
 
-    def test_a_dead_draw_raises_a_flow_fault(self, dead_flow):
-        ops, _sensor, _sp = dead_flow
-        with pytest.raises(FlowFault):
-            ops.process_sequence(SEQ)
-
     def test_the_fault_comes_through_with_its_fields(self, dead_flow):
         """flow_reagent wraps everything else in OperationError(str(e)); a
         cancellation passes through. The FlowFault must arrive intact, or the
@@ -121,7 +116,6 @@ class TestFaultingDraw:
         with pytest.raises(FlowFault) as excinfo:
             ops.process_sequence(SEQ)
         assert sp.run_control.cause is excinfo.value
-        assert not isinstance(sp.run_control.cause, AbortRequested)
 
     def test_the_sensor_is_released_after_a_fault(self, dead_flow):
         ops, sensor, _sp = dead_flow
