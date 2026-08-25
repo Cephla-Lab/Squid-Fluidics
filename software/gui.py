@@ -21,10 +21,12 @@ from serial import SerialException
 from fluidics.control.config import load_config
 from fluidics.control.discovery import DeviceNotFoundError
 from fluidics.devices import (
-    ISSUE_FLOW_SENSORS, ISSUE_TEMPERATURE_CONTROLLER,
-    build_devices, build_operations,
+    ISSUE_FLOW_SENSORS,
+    ISSUE_TEMPERATURE_CONTROLLER,
+    build_devices,
+    build_operations,
+    build_worker,
 )
-from fluidics.experiment_worker import ExperimentWorker
 from fluidics.run_log import setup_uncaught_exception_logging, start_log_file
 from fluidics.sequences import (
     load_sequences, save_sequences_yaml, get_included_sequences,
@@ -168,10 +170,7 @@ class SequencesWidget(QWidget):
         super().__init__()
         self.config = config
         self.devices = devices
-        self.syringePump = devices.syringe_pump
         self.selectorValveSystem = devices.selector_valves
-        self.discPump = devices.disc_pump
-        self.temperatureController = devices.temperature_controller
 
         self.worker = None
         self._running_rows = []  # Tree rows of the sequences handed to the worker
@@ -457,7 +456,7 @@ class SequencesWidget(QWidget):
             'update_progress': self.updateProgress,
             'on_error': self.handleError,
             'on_finished': self.onWorkerFinished,
-            'on_estimate': self.setTimeEstimate
+            'on_estimate': self.setTimeEstimate,
         }
 
         self._warnings.clear()
@@ -467,7 +466,7 @@ class SequencesWidget(QWidget):
         self.abortButton.setEnabled(True)
         self.sequence_running.emit(True)
 
-        self.worker = ExperimentWorker(self.experiment_ops, selected, self.config, callbacks)
+        self.worker = build_worker(self.devices, self.experiment_ops, selected, callbacks)
         self.worker_thread = threading.Thread(target=self.worker.run, daemon=True)
 
         self.sequenceLabel.setText(f"0/{self.total_sequences} sequences")
@@ -539,17 +538,15 @@ class SequencesWidget(QWidget):
         self.sequenceLabel.setText("0/0 sequences")
         self.timer.stop()
         self.highlightRow(None)
-        self.sequence_running.emit(False)
-        
+
         if self.worker:
             self.worker_thread.join()
             self.worker = None
+        # The cancellation belongs to the run that just ended: clear it before
+        # the manual tab comes back, or its moves would raise on a stale abort.
+        self.devices.reset()
+        self.sequence_running.emit(False)
 
-        self.syringePump.reset_abort()
-        if self.temperatureController is not None:
-            self.temperatureController.reset_abort()
-        if self.discPump is not None:
-            self.discPump.reset_abort()
         QMessageBox.information(self, "Finished", "Sequence execution finished.")
 
     def _handle_time_estimate(self, time_to_finish, n_sequences):
@@ -571,10 +568,7 @@ class SequencesWidget(QWidget):
 
     def abortSequences(self):
         if self.worker and self.experiment_ops:
-            # Worker first. With the device latches set before the worker's
-            # event, an operation returns early, the worker sees no abort,
-            # and advances to the next sequence reporting each as completed.
-            self.worker.abort()
+            # One signal, shared by the worker and every waiting device.
             self.devices.abort()
             self.abortButton.setEnabled(False)
 
@@ -1097,6 +1091,9 @@ class TemperatureChannelWidget(TimeSeriesPlotWidget):
         self._sync_output_button()
 
     def _on_reading(self, temp, current_time):
+        # The driver's output state can change under a run (make_safe
+        # switches it off after an abort); follow it rather than assume it.
+        self._sync_output_button()
         if current_time - self.last_update < self.query_interval:
             return
         self.temp_label.setText(f"{temp:.1f}°C")

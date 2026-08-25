@@ -12,7 +12,8 @@ parametrize below.
 
 import pytest
 
-from .pump_helpers import bare_pump
+
+from .pump_helpers import bare_pump, halt_on_cancel
 
 
 class SpyLock:
@@ -107,7 +108,7 @@ class TestEveryRoundTripIsLocked:
                      id="time_to_finish"),
         pytest.param(lambda p: p._move_finished(), "_checkReady",
                      id="move_finished"),
-        pytest.param(lambda p: p.abort(), "terminateCmd", id="abort"),
+        pytest.param(halt_on_cancel, "terminateCmd", id="halt_on_cancel"),
         pytest.param(lambda p: p.stop(), "terminateCmd", id="stop"),
     ])
     def test_the_call_reaches_the_driver_under_the_lock(self, drive, expected):
@@ -121,7 +122,7 @@ class TestEveryRoundTripIsLocked:
 class TestTheLockNeverSpansAMove:
     def test_execute_releases_the_lock_before_waiting(self):
         """Held across the wait, the lock would freeze the GUI's position
-        poll for the whole move and make abort() queue behind it -- the two
+        poll for the whole move and make a cancel's halt queue behind it -- the two
         things the per-transaction design exists to keep live."""
         pump = locked_pump()
         held_during_wait = []

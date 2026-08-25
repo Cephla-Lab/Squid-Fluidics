@@ -48,9 +48,10 @@ def real_clock(monkeypatch):
 def during_move():
     """Hook a side effect into a pump's wait_for_stop -- inside the move.
 
-    Not around execute(): execute() clears the interrupt on entry, so an abort
-    or a sensor reading delivered before it would have its stop() wiped by the
-    very call it was meant to interrupt.
+    Not around execute(): execute() clears the pump's wake event on entry, so
+    a stop() delivered before it would be wiped by the very call it was meant
+    to interrupt -- and a cancel delivered before it takes a different path
+    (_arm() raises) from the mid-move one these tests model.
     """
     def _hook(sp, side_effect):
         original_wait = sp.wait_for_stop
@@ -60,6 +61,22 @@ def during_move():
             return original_wait(t)
 
         sp.wait_for_stop = wait_for_stop
+
+    return _hook
+
+
+@pytest.fixture
+def cancel_during_wait():
+    """Cancel a RunControl from inside its own wait -- the shape of an abort
+    landing mid-incubation or mid-aspiration."""
+    def _hook(control):
+        original_wait = control.wait
+
+        def wait(timeout):
+            control.cancel()
+            return original_wait(timeout)
+
+        control.wait = wait
 
     return _hook
 
@@ -92,8 +109,13 @@ def _fast_clock(monkeypatch):
         return fake_time[0]
 
     def fake_event_wait(self, timeout=None):
-        if timeout is not None:
-            fake_time[0] += timeout
+        if timeout is None:
+            # An untimed wait has no clock to fake: it blocks until another
+            # thread sets the event. Thread.start() relies on exactly that
+            # to return only once the thread is really running; faking it
+            # let start() return early and a following join() raise.
+            return _pristine_wait(self)
+        fake_time[0] += timeout
         return self.is_set()
 
     # Patch the time module itself

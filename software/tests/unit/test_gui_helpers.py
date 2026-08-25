@@ -359,17 +359,47 @@ class TestFlowRecordingRows:
         gui.FlowSensorWidget._on_fault(stub, "stop", make_flow_fault(), 100.06)
 
 
-class TestAbortOrder:
-    """Worker before devices -- abortSequences says why. Called unbound
-    against a stub."""
+class TestAbortSequences:
+    """One signal: the button cancels through the DeviceSet, which the worker
+    waits on. Called unbound against a stub; worker=SimpleNamespace() only
+    satisfies the `if self.worker` guard."""
 
-    def test_the_worker_is_aborted_before_the_devices(self):
-        order = []
+    def test_abort_goes_through_the_device_set_only(self):
+        aborted = []
         stub = SimpleNamespace(
-            worker=SimpleNamespace(abort=lambda: order.append("worker")),
+            worker=SimpleNamespace(),
             experiment_ops=object(),
-            devices=SimpleNamespace(abort=lambda: order.append("devices")),
+            devices=SimpleNamespace(abort=lambda: aborted.append(True)),
             abortButton=SimpleNamespace(setEnabled=lambda enabled: None),
         )
         gui.SequencesWidget.abortSequences(stub)
-        assert order == ["worker", "devices"]
+        assert aborted == [True]
+
+
+class TestRunFinished:
+    """The cancellation belongs to the run: _handle_finished clears it after
+    the worker is reaped and before the manual tab is re-enabled, or the
+    tab's moves would raise on a stale abort. Called unbound against a stub."""
+
+    class Quiet:
+        """Any attribute is another Quiet; calling one does nothing -- the
+        widgets _handle_finished tidies up that this test does not care about."""
+
+        def __getattr__(self, name):
+            return TestRunFinished.Quiet()
+
+        def __call__(self, *args):
+            return None
+
+    def test_the_signal_is_reset_before_the_manual_tab_returns(self, monkeypatch):
+        monkeypatch.setattr(gui.QMessageBox, "information", lambda *args: None)
+        order = []
+        stub = self.Quiet()
+        stub.worker = object()
+        stub.worker_thread = SimpleNamespace(join=lambda: order.append("join"))
+        stub.devices = SimpleNamespace(reset=lambda: order.append("reset"))
+        stub.sequence_running = SimpleNamespace(
+            emit=lambda running: order.append(("running", running)))
+        gui.SequencesWidget._handle_finished(stub)
+        assert order == ["join", "reset", ("running", False)]
+        assert stub.worker is None

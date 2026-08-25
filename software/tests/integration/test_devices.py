@@ -8,6 +8,8 @@ survivable failure degrades, and that teardown runs everything even when a
 step fails.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 import fluidics.devices as devices_module
@@ -18,7 +20,7 @@ from fluidics.control.flow_sensor import FlowSensorSimulation
 from fluidics.control.selector_valve import SelectorValveSystem
 from fluidics.control.syringe_pump import SyringePumpSimulation
 from fluidics.control.temperature_controller import TCMControllerSimulation
-from fluidics.devices import DeviceSet, build_devices, build_operations
+from fluidics.devices import DeviceSet, build_devices, build_operations, build_worker
 from fluidics.errors import AbortRequested, RunControl
 from fluidics.merfish_operations import MERFISHOperations
 from fluidics.open_chamber_operations import OpenChamberOperations
@@ -158,6 +160,23 @@ class TestSurvivableFailures:
         assert RecordingTCM.last.closes == 1
 
 
+class TestBuildWorker:
+    def test_the_worker_waits_on_the_set_s_signal_and_makes_it_safe(self, flow_cell_config, built):
+        """So neither entry point can forget half of the wiring: an abort that
+        cannot reach the worker, or a TEC left on."""
+        devices = built(flow_cell_config, simulation=True)
+        on_error = lambda message: None
+        worker = build_worker(devices, object(), [], callbacks={"on_error": on_error})
+        assert worker.run_control is devices.run_control
+        assert worker.callbacks["make_safe"] == devices.make_safe
+        assert worker.callbacks["on_error"] is on_error
+
+    def test_a_caller_s_make_safe_is_refused_not_silently_replaced(self, flow_cell_config, built):
+        devices = built(flow_cell_config, simulation=True)
+        with pytest.raises(ValueError, match="make_safe"):
+            build_worker(devices, object(), [], callbacks={"make_safe": lambda: []})
+
+
 class TestBuildOperations:
     def test_flow_cell_selects_merfish_operations(self, flow_cell_config, built):
         devices = built(flow_cell_config, simulation=True)
@@ -187,8 +206,8 @@ class RecordingPump:
     def __init__(self, events=None):
         self.events = events if events is not None else []
 
-    def reset_abort(self):
-        self.events.append(("pump", "reset_abort"))
+    def stop(self):
+        self.events.append(("pump", "stop"))
 
     def close(self, to_waste=False):
         self.events.append(("pump", "close", to_waste))
@@ -208,64 +227,91 @@ class ClosableStub:
             raise IOError("port already gone")
 
 
-def device_set(config, pump=None, controller=None, tc=None, sensors=()):
+def device_set(config, pump=None, controller=None, tc=None, sensors=(),
+               disc_pump=None, run_control=None):
     return DeviceSet(config, controller if controller is not None else ClosableStub(),
                      pump if pump is not None else RecordingPump(),
-                     selector_valves=None, disc_pump=None,
+                     selector_valves=None, disc_pump=disc_pump,
                      temperature_controller=tc, flow_sensors=list(sensors),
-                     run_control=RunControl())
-
-
-class Abortable:
-    def __init__(self, name, events):
-        self.name = name
-        self.events = events
-
-    def abort(self):
-        self.events.append(self.name)
+                     run_control=run_control if run_control is not None else RunControl())
 
 
 class TestDeviceSetAbort:
-    """One fan-out list for both entry points -- the GUI's Abort button and
-    the CLI's Ctrl+C call this instead of each keeping its own device list."""
+    """One signal, no device I/O on the calling thread: the GUI's Abort button
+    and the CLI's Ctrl+C both cancel through here, and every device that
+    waits stops itself when its wait wakes."""
 
-    def test_aborts_every_abortable_device(self, flow_cell_config):
-        events = []
-        devices = DeviceSet(flow_cell_config, controller=None,
-                            syringe_pump=Abortable("pump", events),
-                            selector_valves=None,
-                            disc_pump=Abortable("disc_pump", events),
-                            temperature_controller=Abortable("tc", events),
-                            flow_sensors=[], run_control=RunControl())
+    def test_abort_cancels_the_shared_signal_and_touches_no_device(self, flow_cell_config):
+        # Bare objects: any call on a device would be an AttributeError.
+        devices = device_set(flow_cell_config, pump=object(), tc=object(),
+                             disc_pump=object())
         devices.abort()
-        assert events == ["pump", "disc_pump", "tc"]
+        assert isinstance(devices.run_control.cause, AbortRequested)
+
+    def test_reset_clears_it_for_the_next_run(self, flow_cell_config):
+        devices = device_set(flow_cell_config)
+        devices.abort()
+        devices.reset()
+        assert not devices.run_control.cancelled
+
+
+class TestMakeSafe:
+    """After a cancelled run has unwound: TEC output off on every channel (an
+    abort ends the experiment), drain pump off. Called by the worker on its
+    own thread; the syringe pump halted itself on the way out."""
+
+    def test_halts_the_syringe_pump(self, flow_cell_config):
+        """Already halted after a cancel; not after a failure mid-move."""
+        pump = RecordingPump()
+        device_set(flow_cell_config, pump=pump).make_safe()
+        assert pump.events == [("pump", "stop")]
+
+    def test_switches_every_tec_channel_off(self, flow_cell_config):
+        tc = TCMControllerSimulation(channels=2)
+        tc.set_output_enabled(1, True)
+        tc.set_output_enabled(2, True)
+        assert device_set(flow_cell_config, tc=tc).make_safe() == []
+        assert tc.output_enabled == [False, False]
+
+    def test_stops_the_drain_pump(self, open_chamber_config):
+        stops = []
+        device_set(open_chamber_config,
+                   disc_pump=SimpleNamespace(stop=lambda: stops.append(True))).make_safe()
+        assert stops == [True]
 
     def test_absent_devices_are_skipped(self, flow_cell_config):
-        events = []
-        devices = DeviceSet(flow_cell_config, controller=None,
-                            syringe_pump=Abortable("pump", events),
-                            selector_valves=None, disc_pump=None,
-                            temperature_controller=None, flow_sensors=[],
-                            run_control=RunControl())
-        devices.abort()
-        assert events == ["pump"]
+        assert device_set(flow_cell_config).make_safe() == []
+
+    def test_a_failing_channel_skips_nothing_and_is_returned(self, open_chamber_config):
+        class StuckOutput:
+            channels = 2
+
+            def set_output_enabled(self, channel, on):
+                raise IOError(f"channel {channel} not answering")
+
+        stops = []
+        errors = device_set(open_chamber_config, tc=StuckOutput(),
+                            disc_pump=SimpleNamespace(stop=lambda: stops.append(True))).make_safe()
+        assert [str(e) for e in errors] == ["channel 1 not answering",
+                                            "channel 2 not answering"]
+        assert stops == [True]
 
 
 class TestDeviceSetClose:
     def test_flow_cell_parks_the_syringe_empty(self, flow_cell_config):
         pump = RecordingPump()
         device_set(flow_cell_config, pump=pump).close()
-        assert pump.events == [("pump", "reset_abort"), ("pump", "close", True)]
+        assert pump.events == [("pump", "close", True)]
 
     def test_open_chamber_does_not(self, open_chamber_config):
         pump = RecordingPump()
         device_set(open_chamber_config, pump=pump).close()
-        assert pump.events == [("pump", "reset_abort"), ("pump", "close", False)]
+        assert pump.events == [("pump", "close", False)]
 
     def test_an_explicit_choice_beats_the_application_default(self, flow_cell_config):
         pump = RecordingPump()
         device_set(flow_cell_config, pump=pump).close(empty_syringe=False)
-        assert pump.events == [("pump", "reset_abort"), ("pump", "close", False)]
+        assert pump.events == [("pump", "close", False)]
 
     def test_the_teardown_order_is_tc_sensors_pump_controller(self, flow_cell_config):
         """The docstring calls the ends load-bearing: sensors detach from the
@@ -278,12 +324,14 @@ class TestDeviceSetClose:
             pump=RecordingPump(events),
             controller=ClosableStub("controller", events),
             tc=ClosableStub("tc", events),
-            sensors=[ClosableStub("sensor", events)])
+            sensors=[ClosableStub("sensor", events)],
+            run_control=SimpleNamespace(
+                reset=lambda: events.append(("run_control", "reset"))))
         devices.close()
         assert events == [
             ("tc", "close"),
             ("sensor", "close"),
-            ("pump", "reset_abort"),
+            ("run_control", "reset"),
             ("pump", "close", True),
             ("controller", "close"),
         ]
@@ -313,7 +361,7 @@ class TestDeviceSetClose:
         devices = device_set(flow_cell_config, pump=pump)
         devices.close()
         assert devices.close() == []
-        assert pump.events == [("pump", "reset_abort"), ("pump", "close", True)]
+        assert pump.events == [("pump", "close", True)]
 
 
 class TestRunControlInjection:
@@ -328,10 +376,11 @@ class TestRunControlInjection:
         devices = built(open_chamber_config, simulation=True)
         assert devices.disc_pump.run_control is devices.run_control
 
-    def test_abort_cancels_it(self, flow_cell_config, built):
+    def test_the_temperature_controller_shares_it_too(self, flow_cell_config, built):
+        flow_cell_config.temperature_controller = TemperatureControllerConfig(
+            serial_number="TC1", channels=1)
         devices = built(flow_cell_config, simulation=True)
-        devices.abort()
-        assert isinstance(devices.run_control.cause, AbortRequested)
+        assert devices.temperature_controller.run_control is devices.run_control
 
     def test_close_after_an_abort_resets_it_and_reports_no_errors(self, flow_cell_config, built):
         """The real pump's close parks to waste with a move of its own; with

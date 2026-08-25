@@ -9,12 +9,10 @@ instead of rewriting the tests.
 
 from types import SimpleNamespace
 
-import pytest
-
-from fluidics.errors import AbortRequested
+from fluidics.errors import AbortRequested, RunControl
 from fluidics.experiment_worker import ExperimentWorker
 
-from ..worker_helpers import record_run
+from ..worker_helpers import errors_in, record_run
 
 
 class RecordingOps:
@@ -33,11 +31,11 @@ CONFIG = SimpleNamespace(
     reagent_selection=SimpleNamespace(common_tubing_fluid_amount_ul=800))
 
 
-def run_worker(sequences, ops=None):
+def run_worker(sequences, ops=None, run_control=None):
     """RecordingOps over the stub config; returns (ops, events) -- the
     event shapes are record_run's."""
     ops = ops or RecordingOps()
-    return ops, record_run(ops, sequences, CONFIG)
+    return ops, record_run(ops, sequences, CONFIG, run_control=run_control)
 
 
 FLOW = {"type": "flow_reagent", "fluidic_port": 1, "flow_rate": 500,
@@ -142,3 +140,127 @@ class TestRunNarrative:
         assert len(errors) == 1
         assert "pump went away" in errors[0].getMessage()
         assert "Run finished." in caplog.text
+
+
+class TestTheSharedSignal:
+    """The worker waits and checks on the run's RunControl -- the same object
+    the devices share -- so one cancel reaches the operation, the incubation
+    wait, and the check between sequences alike; and every early end makes
+    the rig safe before it is reported."""
+
+    def test_a_cancel_during_incubation_reports_aborted_after_making_safe(self, cancel_during_wait):
+        control = RunControl()
+        cancel_during_wait(control)
+        _, events = run_worker([dict(FLOW, incubation_time=30)], run_control=control)
+        assert ("progress", 1, "Incubating") in events
+        assert ("progress", 1, "Completed") not in events
+        (error,) = errors_in(events)
+        assert "aborted" in error
+        assert events.index(("make_safe",)) < events.index(("error", error))
+        assert events[-1] == ("finished",)
+
+    def test_a_cancel_inside_an_operation_is_caught_when_it_returns(self):
+        """Until the operations raise on a prior abort, one that returned
+        early on is_aborted returns normally; the check after dispatch is
+        what keeps that from being reported as Completed."""
+        control = RunControl()
+
+        class CancelAfterFirst(RecordingOps):
+            def process_sequence(self, seq):
+                super().process_sequence(seq)
+                if len(self.processed) == 1:
+                    control.cancel()
+
+        ops, events = run_worker([dict(FLOW), dict(FLOW)], ops=CancelAfterFirst(),
+                                 run_control=control)
+        assert len(ops.processed) == 1
+        assert ("progress", 2, "Started") not in events
+        assert ("make_safe",) in events
+
+    def test_a_cancel_landing_between_sequences_does_not_start_the_next(self):
+        """After the post-operation check and before the next dispatch is a
+        real window: the operator's abort can land while the worker reports
+        'Completed'. The next sequence must not even be reported as started."""
+        control = RunControl()
+        events = []
+
+        def on_progress(index, num, status):
+            events.append(("progress", num, status))
+            if (num, status) == (1, "Completed"):
+                control.cancel()
+
+        worker = ExperimentWorker(RecordingOps(), [dict(FLOW), dict(FLOW)], CONFIG, callbacks={
+            "update_progress": on_progress,
+            "on_error": lambda message: events.append(("error", message)),
+        }, run_control=control)
+        worker.run()
+        assert ("progress", 2, "Started") not in events
+        assert any("aborted" in message for message in errors_in(events))
+
+    def test_a_completed_run_leaves_the_rig_alone(self):
+        """The temperature must keep holding: a run whose last step is
+        set_temperature exists to leave the sample at it."""
+        _, events = run_worker([FLOW])
+        assert ("make_safe",) not in events
+
+    def test_a_failed_step_makes_the_rig_safe_before_reporting(self):
+        """A failure switches the TEC off like an abort: an abort has the
+        operator standing at the rig; a failure is the one nobody is present
+        for."""
+        _, events = run_worker([FLOW], ops=RecordingOps(raise_on={0: ValueError("bad step")}))
+        (error,) = errors_in(events)
+        assert "bad step" in error
+        assert events.index(("make_safe",)) < events.index(("error", error))
+
+    def test_a_fault_outside_the_sequence_loop_makes_the_rig_safe_too(self):
+        """The outer except catches faults raised where no sequence tag exists
+        yet -- before any operation, so nothing has moved. The run has still
+        ended, so the rig is still quieted."""
+        events = []
+        worker = ExperimentWorker(RecordingOps(), [FLOW], CONFIG, callbacks={
+            "make_safe": lambda: events.append("make_safe"),
+            "on_error": lambda message: events.append(("error", message)),
+        })
+        # Past the estimate in __init__; fails on the run's own pass.
+        worker.sequences = [None]
+        worker.run()
+        assert events[0] == "make_safe"
+        assert events[1][0] == "error"
+
+    def test_what_make_safe_could_not_switch_off_reaches_the_report(self):
+        """After an abort, "the rig could not be made safe" is the line that
+        matters; the ERROR in the log alone does not reach the dialog."""
+        errors = []
+        worker = ExperimentWorker(RecordingOps(raise_on={0: ValueError("bad step")}), [FLOW], CONFIG, callbacks={
+            "make_safe": lambda: [IOError("TEC channel 1 not answering")],
+            "on_error": errors.append,
+        })
+        worker.run()
+        (error,) = errors
+        assert "bad step" in error
+        assert "TEC channel 1 not answering" in error
+
+    def test_the_rig_is_made_safe_once_even_if_reporting_raises(self):
+        """on_error raising inside the per-sequence handler lands in the outer
+        one; the rig must not be quieted twice on the way out."""
+        made_safe = []
+
+        def broken_report(message):
+            raise RuntimeError("dialog gone")
+
+        worker = ExperimentWorker(RecordingOps(raise_on={0: ValueError("bad step")}), [FLOW], CONFIG, callbacks={
+            "make_safe": lambda: made_safe.append(True),
+            "on_error": broken_report,
+        })
+        worker.run()
+        assert made_safe == [True]
+
+    def test_finished_is_set_last(self):
+        """After on_finished: whoever waits on it may tear the devices down."""
+        seen = []
+        worker = ExperimentWorker(RecordingOps(), [FLOW], CONFIG, callbacks={
+            "on_finished": lambda: seen.append(worker.finished.is_set()),
+        })
+        worker.run()
+        assert seen == [False]
+        assert worker.finished.is_set()

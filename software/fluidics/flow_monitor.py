@@ -266,8 +266,8 @@ class DrawGuard:
             if claimed:
                 self.log(f"Stopping draw: {fault}")
                 # terminateCmd() from the reader thread, while the sequence
-                # thread sits in wait_for_stop -- the same crossing abort()
-                # already makes from the Qt thread. If it raises we must not
+                # thread sits in wait_for_stop -- the one halt issued from a
+                # thread other than the run's own. If it raises we must not
                 # take the reader down with it; the fault is already recorded
                 # and will still be raised.
                 try:

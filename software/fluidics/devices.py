@@ -15,6 +15,7 @@ sensors); anything else raises.
 """
 
 import logging
+from functools import partial
 
 from .control._def import CMD_SET
 from .control.controller import FluidController, FluidControllerSimulation
@@ -24,6 +25,7 @@ from .control.selector_valve import SelectorValveSystem
 from .control.syringe_pump import SyringePump, SyringePumpSimulation
 from .control.temperature_controller import TCMController, TCMControllerSimulation
 from .errors import RunControl
+from .experiment_worker import ExperimentWorker
 from .merfish_operations import MERFISHOperations
 from .open_chamber_operations import OpenChamberOperations
 
@@ -44,7 +46,7 @@ def _print_issue(kind, message):
     _logger.warning(message)
 
 
-def _run_shielded(steps):
+def _run_shielded(steps, doing="closing devices"):
     """Run every step, shielding each from the others' failures.
 
     Teardown's loop: a step that cannot run now never gets another chance, so
@@ -59,7 +61,7 @@ def _run_shielded(steps):
             step()
         except Exception as e:
             errors.append(e)
-            _logger.error("Error while closing devices: %s", e)
+            _logger.error("Error while %s: %s", doing, e)
     return errors
 
 
@@ -86,19 +88,34 @@ class DeviceSet:
         self._closed = False
 
     def abort(self):
-        """Ask every abortable device to halt.
+        """Cancel the run: one signal, no device I/O on this thread.
 
-        The shared fan-out behind the GUI's Abort button and the CLI's Ctrl+C,
-        kept here so a new abortable device is added to one list, not one per
-        entry point. Deliberately device-only: the experiment worker's own
-        abort belongs to whoever owns the run, and the planned cancellation
-        redesign will absorb this method rather than several scattered lists.
+        The GUI's Abort button and the CLI's Ctrl+C call this from threads
+        that own no serial port. Every device that waits shares run_control
+        and stops itself when its wait wakes; the worker waits on it too.
         """
-        self.syringe_pump.abort()
+        self.run_control.cancel()
+
+    def reset(self):
+        """Clear the cancellation once the run that raised it has ended, before
+        anything else uses the devices (the GUI's manual tab)."""
+        self.run_control.reset()
+
+    def make_safe(self):
+        """Leave nothing running once a run has ended early -- abort or failure
+        alike; the failure is the unattended case. Halts the syringe pump
+        (already halted after a cancel, not after a failure mid-move), TEC
+        output off on every channel, drain pump off. Shielded per step;
+        returns the exceptions raised, already logged, for the worker to
+        report."""
+        steps = [self.syringe_pump.stop]
+        tc = self.temperature_controller
+        if tc is not None:
+            steps.extend(partial(tc.set_output_enabled, c, False)
+                         for c in range(1, tc.channels + 1))
         if self.disc_pump is not None:
-            self.disc_pump.abort()
-        if self.temperature_controller is not None:
-            self.temperature_controller.abort()
+            steps.append(self.disc_pump.stop)
+        return _run_shielded(steps, doing="making the rig safe")
 
     def close(self, empty_syringe=None):
         """Release every device, tolerating failures along the way.
@@ -128,13 +145,13 @@ class DeviceSet:
             empty_syringe = self.config.application == "Flow Cell"
 
         # One call per step, so a failure skips nothing but itself: one dead
-        # sensor must not strand its siblings, and a failed reset_abort must
-        # not skip the park-to-waste close.
+        # sensor must not strand its siblings. The cancellation is cleared
+        # before the park-to-waste close, which is a move of its own.
         steps = []
         if self.temperature_controller is not None:
             steps.append(self.temperature_controller.close)
         steps.extend(sensor.close for sensor in self.flow_sensors)
-        steps.append(self.syringe_pump.reset_abort)
+        steps.append(self.run_control.reset)
         steps.append(lambda: self.syringe_pump.close(empty_syringe))
         steps.append(self.controller.close)
 
@@ -181,6 +198,7 @@ def build_devices(config, simulation=False, on_issue=_print_issue):
                 channels=tc_cfg.channels,
                 tolerance_celsius=tc_cfg.tolerance_celsius,
                 stabilization_timeout_seconds=tc_cfg.stabilization_timeout_seconds,
+                run_control=run_control,
             )
         except Exception as e:
             # Survivable only on hardware, where the usual cause is a flaky
@@ -247,3 +265,14 @@ def build_operations(config, devices, on_warning=None):
                                      devices.disc_pump,
                                      devices.temperature_controller)
     raise ValueError(f"Unsupported application: {config.application!r}")
+
+
+def build_worker(devices, operations, sequences, callbacks=None):
+    """Wire one run's worker to `devices`: the shared run_control, and the
+    make_safe callback, which this function owns."""
+    callbacks = dict(callbacks or {})
+    if "make_safe" in callbacks:
+        raise ValueError("build_worker supplies make_safe; do not pass one")
+    callbacks["make_safe"] = devices.make_safe
+    return ExperimentWorker(operations, sequences, devices.config, callbacks,
+                            run_control=devices.run_control)

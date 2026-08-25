@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from fluidics.control.config import load_config
-from fluidics.devices import build_operations
+from fluidics.devices import build_operations, build_worker
 from fluidics.experiment_worker import ExperimentWorker
 from fluidics.sequences import (
     APPLICATION_SEQUENCES, get_included_sequences, load_sequences,
@@ -86,7 +86,7 @@ class TestQuickstartRunsEndToEnd:
 
         errors, statuses, finished = [], [], []
         ops = build_operations(config, devices)
-        worker = ExperimentWorker(ops, included, config, callbacks={
+        worker = build_worker(devices, ops, included, callbacks={
             "on_error": errors.append,
             "update_progress":
                 lambda index, num, status: statuses.append(status),

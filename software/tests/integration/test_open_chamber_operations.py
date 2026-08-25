@@ -184,8 +184,7 @@ class TestDrainPumpAndCleanUpGuards:
             # Only the last chain dispenses to the chamber; an earlier abort
             # would return through one of the guards that already existed.
             if any(op[0] == "dispense" for op in sp.executed[-1]):
-                sp.abort()
-                ops.dp.abort()
+                sp.run_control.cancel()
 
         sp.execute = abort_after_the_final_chain
         ops.process_sequence({"type": "clean_up", "fluidic_port": 10,
@@ -198,6 +197,6 @@ def test_an_abort_on_the_pump_reaches_the_drain_pump(open_chamber_rig):
     them. On separate signals an abort landing between a syringe move and the
     drain's timed aspiration would run the aspiration in full."""
     ops, sp = open_chamber_rig
-    sp.abort()
+    sp.run_control.cancel()
     with pytest.raises(AbortRequested):
         ops.dp.aspirate(20)

@@ -5,6 +5,7 @@ import time
 import serial
 
 from .controller import Subscribers
+from ..errors import RunControl
 from .discovery import find_serial_port
 
 _logger = logging.getLogger(__name__)
@@ -19,7 +20,8 @@ class TCMController:
     """
 
     def __init__(self, sn, channels=2, tolerance_celsius=1.0,
-                 stabilization_timeout_seconds=300, baud_rate=57600, timeout=0.5):
+                 stabilization_timeout_seconds=300, baud_rate=57600, timeout=0.5,
+                 run_control=None):
         if channels not in (1, 2):
             raise ValueError(f"channels must be 1 or 2, got {channels}")
 
@@ -42,7 +44,7 @@ class TCMController:
             target=self._update_loop, daemon=True
         )
 
-        self.is_aborted = False
+        self.run_control = run_control if run_control is not None else RunControl()
 
         _logger.info("Temperature controller initialized: serial_number=%s, "
                      "channels=%s, port=%s", sn, channels, port)
@@ -128,9 +130,7 @@ class TCMController:
         it for its plots -- the driver still owns the thread; before this
         the GUI assigned a single callback slot and started the driver's
         private thread itself. Safe to call more than once; not restartable
-        after close(). The guard is a flag, not is_alive(): under the test
-        suite's patched Event.wait, Thread.start() can return before the
-        bootstrap marks the thread alive, and a second start() would
+        after close(). The guard is a flag so a second start() cannot
         double-start the same Thread object.
         """
         if self._polling_started:
@@ -162,11 +162,9 @@ class TCMController:
         if self.serial.is_open:
             self.serial.close()
 
-    def abort(self):
-        self.is_aborted = True
-
-    def reset_abort(self):
-        self.is_aborted = False
+    @property
+    def is_aborted(self):
+        return self.run_control.cancelled
 
 
 class TCMControllerSimulation:
@@ -176,7 +174,8 @@ class TCMControllerSimulation:
     """
 
     def __init__(self, sn=None, channels=2, tolerance_celsius=1.0,
-                 stabilization_timeout_seconds=300, baud_rate=57600, timeout=0.5):
+                 stabilization_timeout_seconds=300, baud_rate=57600, timeout=0.5,
+                 run_control=None):
         if channels not in (1, 2):
             raise ValueError(f"channels must be 1 or 2, got {channels}")
 
@@ -195,7 +194,7 @@ class TCMControllerSimulation:
             target=self._update_loop, daemon=True
         )
 
-        self.is_aborted = False
+        self.run_control = run_control if run_control is not None else RunControl()
 
         _logger.info("Temperature controller (simulation) initialized: channels=%s", channels)
 
@@ -259,8 +258,6 @@ class TCMControllerSimulation:
             self._polling_thread.join()
         self._subscribers.clear()
 
-    def abort(self):
-        self.is_aborted = True
-
-    def reset_abort(self):
-        self.is_aborted = False
+    @property
+    def is_aborted(self):
+        return self.run_control.cancelled

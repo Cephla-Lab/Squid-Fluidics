@@ -16,10 +16,10 @@ import time
 
 import pytest
 
-from fluidics.control.syringe_pump import SyringePump, SyringePumpSimulation
+from fluidics.control.syringe_pump import SyringePumpSimulation
 from fluidics.errors import AbortRequested, RunControl
 
-from .pump_helpers import bare_pump
+from .pump_helpers import bare_pump, halt_on_cancel
 
 
 def _pump(**kwargs):
@@ -58,10 +58,12 @@ class TestTheRealPumpsHooks:
         pump.stop()
         assert pump.syringe.terminated == 1
 
-    def test_abort_halts_the_plunger(self):
+    def test_a_cancel_touches_nothing_with_no_move_in_flight(self):
+        """The halt belongs to the thread inside the wait; with nothing
+        waiting there is nothing to halt."""
         pump = _real_pump()
-        pump.abort()
-        assert pump.syringe.terminated == 1
+        pump.run_control.cancel()
+        assert pump.syringe.terminated == 0
 
     def test_the_plunger_is_halted_before_the_waiter_is_woken(self):
         """Both run on the interrupting thread while the sequence thread waits.
@@ -120,7 +122,7 @@ class TestInterruptWakesTheWait:
         pump = _pump()
 
         started = time.monotonic()
-        threading.Timer(0.05, pump.abort).start()
+        threading.Timer(0.05, pump.run_control.cancel).start()
         with pytest.raises(AbortRequested):
             pump.wait_for_stop(3)
         elapsed = time.monotonic() - started
@@ -140,8 +142,8 @@ class TestInterruptWakesTheWait:
 
 
 class TestStopDoesNotLatch:
-    """stop() is for a fault the caller is about to raise on. abort() means
-    the operator cancelled. Conflating them would make a flow fault report as
+    """stop() is for a fault the caller is about to raise on. A cancel means
+    the operator aborted. Conflating them would make a flow fault report as
     a user action, and would silently disable every later operation.
     """
 
@@ -150,32 +152,33 @@ class TestStopDoesNotLatch:
         pump.stop()
         assert pump.is_aborted is False
 
-    def test_abort_sets_is_aborted(self):
+    def test_a_cancel_sets_is_aborted(self):
         pump = _pump()
-        pump.abort()
+        pump.run_control.cancel()
         assert pump.is_aborted is True
 
     def test_a_later_execute_still_runs_after_stop(self):
-        """A stopped draw must not disable the run. Contrast abort, which
+        """A stopped draw must not disable the run. Contrast a cancel, which
         deliberately does."""
         pump = _pump()
         pump.stop()
         assert _ran_the_chain(pump)
 
-    def test_a_later_execute_raises_after_abort(self):
+    def test_a_later_execute_raises_after_a_cancel(self):
         """Raises rather than returns: a silent no-op is how an aborted
         operation used to report success."""
         pump = _pump()
-        pump.abort()
+        pump.run_control.cancel()
         with pytest.raises(AbortRequested):
             pump.execute()
 
-    def test_reset_abort_clears_the_interrupt(self):
-        """Otherwise the next wait returns instantly on a stale event."""
+    def test_a_reset_lets_the_next_chain_run(self):
+        """The cancel left the wake event set; _arm() clears it on entry, so
+        the next wait does not return instantly on a stale event."""
         pump = _pump()
-        pump.abort()
-        pump.reset_abort()
-        assert not pump._interrupt.is_set()
+        pump.run_control.cancel()
+        pump.run_control.reset()
+        assert _ran_the_chain(pump)
 
 
 class TestSimulationHonoursInterruption:
@@ -195,20 +198,9 @@ class TestSimulationHonoursInterruption:
 
 
 class TestTheSharedRunControl:
-    """abort() speaks through the run's RunControl, the object every waiting
-    device of the run shares; stop() deliberately does not."""
-
-    def test_abort_cancels_the_run_control_the_pump_was_built_with(self):
-        control = RunControl()
-        pump = _pump(run_control=control)
-        pump.abort()
-        assert isinstance(control.cause, AbortRequested)
-
-    def test_reset_abort_resets_it(self):
-        pump = _pump()
-        pump.abort()
-        pump.reset_abort()
-        assert not pump.run_control.cancelled
+    """A cancel on the run's RunControl -- the object every waiting device
+    shares -- reaches the pump's own wake event through the waker; stop()
+    deliberately stays off the signal."""
 
     def test_stop_does_not_cancel_the_run(self):
         pump = _pump()
@@ -218,21 +210,43 @@ class TestTheSharedRunControl:
     def test_a_pump_built_alone_gets_its_own(self):
         assert _pump().run_control is not _pump().run_control
 
-    def test_abort_halts_then_cancels_then_wakes(self):
-        """The whole ordering abort() promises, on the real pump's hooks: the
-        plunger is halted before the waiter can resume into a serial round
-        trip, and the cause is set before it wakes -- a waiter that wakes and
-        finds no cause returns as if the move had finished."""
-        pump = _real_pump()
-        order = []
-        pump.syringe.terminateCmd = lambda: order.append("terminate")
-        pump.run_control.cancel = lambda cause=None: order.append("cancel")
-        pump._interrupt.set = lambda: order.append("wake")
-        pump.abort()
-        assert order == ["terminate", "cancel", "wake"]
+    def test_a_cancel_wakes_the_waiter_through_the_waker(self):
+        """The wait blocks on the pump's own event (stop() sets it too); a
+        cancel on the control the pump was built with reaches that event
+        through the waker."""
+        control = RunControl()
+        pump = _pump(run_control=control)
+        control.cancel()
+        assert pump._interrupt.is_set()
 
 
 class TestTheCancelPathOnTheRealPump:
+    def test_a_cancel_mid_move_is_halted_by_the_waiting_thread(self, during_move):
+        """No I/O on the cancelling thread: the thread inside the wait halts
+        the plunger, then raises. The same branch closes the window between
+        _arm() and dispatch -- a cancel landing there wakes the wait at once
+        and halts the move it could not prevent."""
+        pump = _real_pump(ready=False)
+        pump.syringe.executeChain = lambda minimal_reset=True: 0
+        during_move(pump, pump.run_control.cancel)
+        with pytest.raises(AbortRequested):
+            pump.execute()
+        assert pump.syringe.terminated == 1
+
+    def test_a_failed_halt_is_logged_and_the_abort_still_raises(self, caplog):
+        """If terminateCmd fails, the abort must still reach the worker --
+        its safety cleanup depends on it -- with the failure on record."""
+        pump = _real_pump(ready=True)
+
+        def broken():
+            raise IOError("no reply from pump")
+
+        pump.syringe.terminateCmd = broken
+        with caplog.at_level(logging.ERROR, logger="fluidics"):
+            halt_on_cancel(pump)
+        assert "no reply from pump" in caplog.text
+
+
     def test_a_cancelled_run_never_dispatches_a_chain(self):
         """The entry check exists for the real pump: _arm() clears the wake
         event first, so without it an execute() after an abort would send the
@@ -240,7 +254,7 @@ class TestTheCancelPathOnTheRealPump:
         pump = _real_pump()
         dispatched = []
         pump.syringe.executeChain = lambda minimal_reset=True: dispatched.append(True) or 0
-        pump.abort()
+        pump.run_control.cancel()
         with pytest.raises(AbortRequested):
             pump.execute()
         assert dispatched == []
@@ -259,7 +273,7 @@ class TestTheCancelPathOnTheRealPump:
             raise RuntimeError("no reply while decelerating")
 
         pump.get_plunger_position = unreadable
-        during_move(pump, pump.abort)
+        during_move(pump, pump.run_control.cancel)
         with caplog.at_level(logging.WARNING, logger="fluidics"):
             with pytest.raises(AbortRequested):
                 pump.execute()
