@@ -457,7 +457,9 @@ class SequencesWidget(QWidget):
             'update_progress': self.updateProgress,
             'on_error': self.handleError,
             'on_finished': self.onWorkerFinished,
-            'on_estimate': self.setTimeEstimate
+            'on_estimate': self.setTimeEstimate,
+            # Runs on the worker thread once an aborted run has unwound.
+            'make_safe': self.devices.make_safe,
         }
 
         self._warnings.clear()
@@ -467,7 +469,10 @@ class SequencesWidget(QWidget):
         self.abortButton.setEnabled(True)
         self.sequence_running.emit(True)
 
-        self.worker = ExperimentWorker(self.experiment_ops, selected, self.config, callbacks)
+        # A previous abort must not cancel this run before it starts.
+        self.devices.reset()
+        self.worker = ExperimentWorker(self.experiment_ops, selected, self.config, callbacks,
+                                       run_control=self.devices.run_control)
         self.worker_thread = threading.Thread(target=self.worker.run, daemon=True)
 
         self.sequenceLabel.setText(f"0/{self.total_sequences} sequences")
@@ -545,11 +550,6 @@ class SequencesWidget(QWidget):
             self.worker_thread.join()
             self.worker = None
 
-        self.syringePump.reset_abort()
-        if self.temperatureController is not None:
-            self.temperatureController.reset_abort()
-        if self.discPump is not None:
-            self.discPump.reset_abort()
         QMessageBox.information(self, "Finished", "Sequence execution finished.")
 
     def _handle_time_estimate(self, time_to_finish, n_sequences):
@@ -571,10 +571,7 @@ class SequencesWidget(QWidget):
 
     def abortSequences(self):
         if self.worker and self.experiment_ops:
-            # Worker first. With the device latches set before the worker's
-            # event, an operation returns early, the worker sees no abort,
-            # and advances to the next sequence reporting each as completed.
-            self.worker.abort()
+            # One signal, shared by the worker and every waiting device.
             self.devices.abort()
             self.abortButton.setEnabled(False)
 
@@ -1097,6 +1094,9 @@ class TemperatureChannelWidget(TimeSeriesPlotWidget):
         self._sync_output_button()
 
     def _on_reading(self, temp, current_time):
+        # The driver's output state can change under a run (make_safe
+        # switches it off after an abort); follow it rather than assume it.
+        self._sync_output_button()
         if current_time - self.last_update < self.query_interval:
             return
         self.temp_label.setText(f"{temp:.1f}°C")

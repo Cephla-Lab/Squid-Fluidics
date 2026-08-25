@@ -35,6 +35,21 @@ def parse_args():
     )
     return parser.parse_args()
 
+def _wait_for_run(finished, thread):
+    """Block until the worker reports finished, then reap its thread.
+
+    On the worker's own event, not Thread.join(): on CPython 3.10 a
+    KeyboardInterrupt delivered inside join() marks the thread as stopped
+    (Thread._wait_for_tstate_lock releases the state lock on the way out), so
+    the join() after the handler's abort returns at once, is_alive() says
+    False, and close() would park the syringe and reset the signal underneath
+    a worker still driving the pump. The event is set from run()'s finally,
+    so it cannot be fooled the same way.
+    """
+    finished.wait()
+    thread.join()
+
+
 def main():
     args = parse_args()
     setup_uncaught_exception_logging()
@@ -43,6 +58,7 @@ def main():
     devices = None
     worker = None
     thread = None
+    finished = threading.Event()
     run_errors = []
     close_errors = []
 
@@ -61,34 +77,36 @@ def main():
         # The worker narrates its own run through the fluidics logger, so
         # the CLI needs no rendering callbacks -- but a failed run must not
         # exit 0, and the worker reports failure only through on_error.
+        devices.reset()
         worker = ExperimentWorker(experiment_ops, included, config,
-                                  callbacks={"on_error": run_errors.append})
+                                  callbacks={"on_error": run_errors.append,
+                                             "make_safe": devices.make_safe,
+                                             "on_finished": finished.set},
+                                  run_control=devices.run_control)
         thread = threading.Thread(target=worker.run)
         thread.start()
 
-        thread.join()
+        _wait_for_run(finished, thread)
 
     except KeyboardInterrupt:
         # `except Exception` would not catch this, so without it Ctrl+C fell
         # straight into finally, tearing down devices -- including the Flow
         # Cell park-to-waste move -- underneath a worker thread still driving
-        # the pump on the same serial port. Quiesce the run first: abort wakes
-        # the worker out of any wait (incubation, wait_for_stop), the join
-        # lets it unwind through its own error path, and only then does the
-        # finally block touch the hardware, single-threaded. Worker before
-        # devices -- the same order-sensitive pair as gui.abortSequences.
+        # the pump on the same serial port. Quiesce the run first: the one
+        # cancel signal wakes the worker out of any wait (incubation,
+        # wait_for_stop), the join lets it unwind through its own error
+        # path, and only then does the finally block touch the hardware,
+        # single-threaded.
         _logger.warning("Interrupted; stopping the run before closing devices...")
-        if worker is not None:
-            worker.abort()
         if devices is not None:
             devices.abort()
         if thread is not None:
-            thread.join()
+            _wait_for_run(finished, thread)
         sys.exit(130)
     except Exception as e:
         _logger.exception("%s", e)
         if thread is not None:
-            thread.join()
+            _wait_for_run(finished, thread)
         sys.exit(1)
     finally:
         # DeviceSet.close owns the teardown ordering: sensors detach before the

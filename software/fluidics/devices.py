@@ -44,7 +44,7 @@ def _print_issue(kind, message):
     _logger.warning(message)
 
 
-def _run_shielded(steps):
+def _run_shielded(steps, doing="closing devices"):
     """Run every step, shielding each from the others' failures.
 
     Teardown's loop: a step that cannot run now never gets another chance, so
@@ -59,7 +59,7 @@ def _run_shielded(steps):
             step()
         except Exception as e:
             errors.append(e)
-            _logger.error("Error while closing devices: %s", e)
+            _logger.error("Error while %s: %s", doing, e)
     return errors
 
 
@@ -86,19 +86,40 @@ class DeviceSet:
         self._closed = False
 
     def abort(self):
-        """Ask every abortable device to halt.
+        """Cancel the run: one signal, no device I/O on this thread.
 
-        The shared fan-out behind the GUI's Abort button and the CLI's Ctrl+C,
-        kept here so a new abortable device is added to one list, not one per
-        entry point. Deliberately device-only: the experiment worker's own
-        abort belongs to whoever owns the run, and the planned cancellation
-        redesign will absorb this method rather than several scattered lists.
+        The GUI's Abort button and the CLI's Ctrl+C call this from threads
+        that own no serial port. Every device that waits shares run_control
+        and stops itself when its wait wakes; the worker shares it too, so
+        there is no separate worker abort to order against this one.
         """
-        self.syringe_pump.abort()
+        self.run_control.cancel()
+
+    def reset(self):
+        """Clear the cancellation before a run starts -- the one place it is
+        cleared, apart from close(), which must still park an aborted run."""
+        self.run_control.reset()
+
+    def make_safe(self):
+        """Leave nothing running once a cancelled run has unwound.
+
+        The TEC output goes off on every channel (an abort ends the
+        experiment -- decided 2026-08-24; pause deliberately does not do
+        this) and the drain pump goes off. Called by the worker on its own
+        thread, after the operation has raised, so the I/O happens where the
+        run's I/O always happened. The syringe pump is absent: it halted
+        itself on the way out. Shielded per step; returns the exceptions
+        raised, already logged, for a caller with something to report.
+        """
+        steps = []
+        tc = self.temperature_controller
+        if tc is not None:
+            steps.extend(
+                (lambda c=c: tc.set_output_enabled(c, False))
+                for c in range(1, tc.channels + 1))
         if self.disc_pump is not None:
-            self.disc_pump.abort()
-        if self.temperature_controller is not None:
-            self.temperature_controller.abort()
+            steps.append(self.disc_pump.stop)
+        return _run_shielded(steps, doing="making the rig safe after an abort")
 
     def close(self, empty_syringe=None):
         """Release every device, tolerating failures along the way.
@@ -128,13 +149,13 @@ class DeviceSet:
             empty_syringe = self.config.application == "Flow Cell"
 
         # One call per step, so a failure skips nothing but itself: one dead
-        # sensor must not strand its siblings, and a failed reset_abort must
-        # not skip the park-to-waste close.
+        # sensor must not strand its siblings. The cancellation is cleared
+        # before the park-to-waste close, which is a move of its own.
         steps = []
         if self.temperature_controller is not None:
             steps.append(self.temperature_controller.close)
         steps.extend(sensor.close for sensor in self.flow_sensors)
-        steps.append(self.syringe_pump.reset_abort)
+        steps.append(self.run_control.reset)
         steps.append(lambda: self.syringe_pump.close(empty_syringe))
         steps.append(self.controller.close)
 
@@ -181,6 +202,7 @@ def build_devices(config, simulation=False, on_issue=_print_issue):
                 channels=tc_cfg.channels,
                 tolerance_celsius=tc_cfg.tolerance_celsius,
                 stabilization_timeout_seconds=tc_cfg.stabilization_timeout_seconds,
+                run_control=run_control,
             )
         except Exception as e:
             # Survivable only on hardware, where the usual cause is a flaky

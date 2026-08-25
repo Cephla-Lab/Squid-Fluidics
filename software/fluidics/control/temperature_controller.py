@@ -1,5 +1,7 @@
 import logging
 import threading
+
+from ..errors import RunControl
 import time
 
 import serial
@@ -19,7 +21,8 @@ class TCMController:
     """
 
     def __init__(self, sn, channels=2, tolerance_celsius=1.0,
-                 stabilization_timeout_seconds=300, baud_rate=57600, timeout=0.5):
+                 stabilization_timeout_seconds=300, baud_rate=57600, timeout=0.5,
+                 run_control=None):
         if channels not in (1, 2):
             raise ValueError(f"channels must be 1 or 2, got {channels}")
 
@@ -42,7 +45,7 @@ class TCMController:
             target=self._update_loop, daemon=True
         )
 
-        self.is_aborted = False
+        self.run_control = run_control if run_control is not None else RunControl()
 
         _logger.info("Temperature controller initialized: serial_number=%s, "
                      "channels=%s, port=%s", sn, channels, port)
@@ -162,11 +165,15 @@ class TCMController:
         if self.serial.is_open:
             self.serial.close()
 
+    @property
+    def is_aborted(self):
+        return self.run_control.cancelled
+
     def abort(self):
-        self.is_aborted = True
+        self.run_control.cancel()
 
     def reset_abort(self):
-        self.is_aborted = False
+        self.run_control.reset()
 
 
 class TCMControllerSimulation:
@@ -176,7 +183,8 @@ class TCMControllerSimulation:
     """
 
     def __init__(self, sn=None, channels=2, tolerance_celsius=1.0,
-                 stabilization_timeout_seconds=300, baud_rate=57600, timeout=0.5):
+                 stabilization_timeout_seconds=300, baud_rate=57600, timeout=0.5,
+                 run_control=None):
         if channels not in (1, 2):
             raise ValueError(f"channels must be 1 or 2, got {channels}")
 
@@ -195,7 +203,7 @@ class TCMControllerSimulation:
             target=self._update_loop, daemon=True
         )
 
-        self.is_aborted = False
+        self.run_control = run_control if run_control is not None else RunControl()
 
         _logger.info("Temperature controller (simulation) initialized: channels=%s", channels)
 
@@ -259,8 +267,12 @@ class TCMControllerSimulation:
             self._polling_thread.join()
         self._subscribers.clear()
 
+    @property
+    def is_aborted(self):
+        return self.run_control.cancelled
+
     def abort(self):
-        self.is_aborted = True
+        self.run_control.cancel()
 
     def reset_abort(self):
-        self.is_aborted = False
+        self.run_control.reset()

@@ -15,8 +15,9 @@ class DiscPump():
         _logger.info("Disc pump initialized.")
 
     def abort(self):
-        if self._is_started:
-            self.stop()
+        """Cancel the run; no device I/O here. A running drain is switched
+        off by whoever started it as the operation unwinds, and by
+        DeviceSet.make_safe() afterwards, on the run's own thread."""
         self.run_control.cancel()
 
     def reset_abort(self):

@@ -359,17 +359,18 @@ class TestFlowRecordingRows:
         gui.FlowSensorWidget._on_fault(stub, "stop", make_flow_fault(), 100.06)
 
 
-class TestAbortOrder:
-    """Worker before devices -- abortSequences says why. Called unbound
-    against a stub."""
+class TestAbortSequences:
+    """One signal: the button cancels through the DeviceSet, which the worker
+    shares, so there is no separate worker abort to order against it. Called
+    unbound against a stub whose worker has no abort() to call."""
 
-    def test_the_worker_is_aborted_before_the_devices(self):
-        order = []
+    def test_abort_goes_through_the_device_set_only(self):
+        aborted = []
         stub = SimpleNamespace(
-            worker=SimpleNamespace(abort=lambda: order.append("worker")),
+            worker=SimpleNamespace(),
             experiment_ops=object(),
-            devices=SimpleNamespace(abort=lambda: order.append("devices")),
+            devices=SimpleNamespace(abort=lambda: aborted.append(True)),
             abortButton=SimpleNamespace(setEnabled=lambda enabled: None),
         )
         gui.SequencesWidget.abortSequences(stub)
-        assert order == ["worker", "devices"]
+        assert aborted == [True]

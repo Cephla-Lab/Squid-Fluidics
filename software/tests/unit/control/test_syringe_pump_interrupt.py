@@ -58,10 +58,12 @@ class TestTheRealPumpsHooks:
         pump.stop()
         assert pump.syringe.terminated == 1
 
-    def test_abort_halts_the_plunger(self):
+    def test_abort_touches_nothing_with_no_move_in_flight(self):
+        """abort() only cancels; the halt belongs to the thread inside the
+        wait, and with nothing waiting there is nothing to halt."""
         pump = _real_pump()
         pump.abort()
-        assert pump.syringe.terminated == 1
+        assert pump.syringe.terminated == 0
 
     def test_the_plunger_is_halted_before_the_waiter_is_woken(self):
         """Both run on the interrupting thread while the sequence thread waits.
@@ -218,21 +220,41 @@ class TestTheSharedRunControl:
     def test_a_pump_built_alone_gets_its_own(self):
         assert _pump().run_control is not _pump().run_control
 
-    def test_abort_halts_then_cancels_then_wakes(self):
-        """The whole ordering abort() promises, on the real pump's hooks: the
-        plunger is halted before the waiter can resume into a serial round
-        trip, and the cause is set before it wakes -- a waiter that wakes and
-        finds no cause returns as if the move had finished."""
-        pump = _real_pump()
-        order = []
-        pump.syringe.terminateCmd = lambda: order.append("terminate")
-        pump.run_control.cancel = lambda cause=None: order.append("cancel")
-        pump._interrupt.set = lambda: order.append("wake")
-        pump.abort()
-        assert order == ["terminate", "cancel", "wake"]
+    def test_a_cancel_wakes_the_waiter_through_the_waker(self):
+        """The wait blocks on the pump's own event (stop() sets it too); a
+        cancel from anywhere reaches that event through the waker."""
+        pump = _pump()
+        pump.run_control.cancel()
+        assert pump._interrupt.is_set()
 
 
 class TestTheCancelPathOnTheRealPump:
+    def test_a_cancel_mid_move_is_halted_by_the_waiting_thread(self, during_move):
+        """No I/O on the cancelling thread: the thread inside the wait halts
+        the plunger, then raises."""
+        pump = _real_pump(ready=False)
+        pump.syringe.executeChain = lambda minimal_reset=True: 0
+        during_move(pump, pump.abort)
+        with pytest.raises(AbortRequested):
+            pump.execute()
+        assert pump.syringe.terminated == 1
+
+    def test_a_cancel_landing_after_dispatch_still_halts_the_move(self):
+        """The window between _arm() and executeChain: a cancel there could
+        not stop the dispatch, so the wait must halt the move that just
+        started before it raises. (ready=True keeps this from spinning if
+        the waker is ever lost; the waker itself is pinned separately.)"""
+        pump = _real_pump(ready=True)
+
+        def dispatch_then_cancel(minimal_reset=True):
+            pump.run_control.cancel()
+            return 240
+
+        pump.syringe.executeChain = dispatch_then_cancel
+        with pytest.raises(AbortRequested):
+            pump.execute()
+        assert pump.syringe.terminated == 1
+
     def test_a_cancelled_run_never_dispatches_a_chain(self):
         """The entry check exists for the real pump: _arm() clears the wake
         event first, so without it an execute() after an abort would send the

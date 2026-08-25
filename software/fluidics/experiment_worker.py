@@ -1,7 +1,6 @@
 import logging
-import threading
 
-from .errors import AbortRequested
+from .errors import AbortRequested, RunControl
 # Re-exported: defined here before fluidics.errors existed, and scripts
 # outside this package may still import it from here.
 from .errors import OperationError  # noqa: F401
@@ -10,7 +9,8 @@ _logger = logging.getLogger(__name__)
 
 
 class ExperimentWorker:
-    def __init__(self, experiment_ops, sequences, config, callbacks=None):
+    def __init__(self, experiment_ops, sequences, config, callbacks=None,
+                 run_control=None):
         """
         Initialize ExperimentWorker with callbacks instead of signals.
 
@@ -23,14 +23,20 @@ class ExperimentWorker:
                 - 'on_error': fn(error_message)
                 - 'on_finished': fn()
                 - 'on_estimate': fn(time_to_finish, n_sequences)
+                - 'make_safe': fn() -- called on the worker thread once a
+                  cancelled run has unwound, before on_error; the entry
+                  points pass DeviceSet.make_safe
+            run_control: the run's cancellation signal, shared with the
+                devices (DeviceSet.run_control) so one abort reaches the
+                operation, the incubation wait, and the check between
+                sequences alike. Private when omitted.
         """
 
         self.experiment_ops = experiment_ops
         self.sequences = sequences
         self.config = config
         self.callbacks = callbacks or {}
-        self._abort_event = threading.Event()
-        self._abort_event.clear()
+        self.run_control = run_control if run_control is not None else RunControl()
 
         self.time_to_finish, self.n_sequences = self.get_time_to_finish()
         # The worker narrates its own run: one source feeds the console, the
@@ -65,12 +71,10 @@ class ExperimentWorker:
         return total_time, total_sequences
 
     def wait_for_incubation(self, time_minutes):
-        total_seconds = time_minutes * 60  # Convert minutes to seconds
-        if self._abort_event.wait(total_seconds):
-            raise AbortRequested()
+        self.run_control.sleep(time_minutes * 60)
 
     def abort(self):
-        self._abort_event.set()
+        self.run_control.cancel()
 
     def run(self):
         current_sequence = 0
@@ -84,8 +88,7 @@ class ExperimentWorker:
                         _logger.info("%s: started", tag)
                         self._call_callback('update_progress', index, current_sequence, "Started")
                         self.experiment_ops.process_sequence(seq)
-                        if self._abort_event.is_set():
-                            raise AbortRequested()
+                        self.run_control.check()
 
                         incubation_time = seq.get('incubation_time', 0)
                         if incubation_time > 0:
@@ -97,6 +100,7 @@ class ExperimentWorker:
 
                     except AbortRequested:
                         _logger.warning("Run aborted by user.")
+                        self._call_callback('make_safe')
                         self._call_callback('on_error', "Operation aborted by user")
                         return
                     except Exception as e:

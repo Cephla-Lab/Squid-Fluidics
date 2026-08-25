@@ -58,10 +58,12 @@ class TestAspirate:
 
 
 class TestAbort:
-    def test_stops_a_running_pump_and_cancels_the_run(self, pump):
+    def test_abort_only_cancels_even_with_the_drain_running(self, pump):
+        """No I/O on the cancelling thread: the drain is switched off by the
+        operation unwinding and by DeviceSet.make_safe, not here."""
         pump.start(0.3)
         pump.abort()
-        assert power_commands(pump)[-1] == 0
+        assert power_commands(pump) == [0.3 * MCU_CONSTANTS.TTP_MAX_PW]
         assert pump.run_control.cancelled
 
     def test_an_idle_pump_only_cancels(self, pump):

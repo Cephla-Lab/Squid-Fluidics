@@ -36,3 +36,22 @@ def test_a_publish_on_the_controller_lands_in_the_recording(qapp):
     finally:
         widget.deleteLater()
         controller.close()
+
+
+def test_the_output_button_follows_the_driver_on_each_reading(qapp):
+    """make_safe switches the TEC off from the worker thread after an abort;
+    the tab must show what the driver knows, not what was last clicked."""
+    controller = TCMControllerSimulation(channels=1)
+    widget = gui.TemperatureControlWidget(controller)
+    try:
+        controller._terminate_polling = True
+        channel = widget.plot_widgets[0]
+        controller.set_output_enabled(1, True)
+        controller._publish()
+        assert channel.output_btn.isChecked()
+        controller.set_output_enabled(1, False)
+        controller._publish()
+        assert not channel.output_btn.isChecked()
+    finally:
+        widget.deleteLater()
+        controller.close()

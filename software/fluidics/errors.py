@@ -63,6 +63,16 @@ class RunControl:
         self._lock = threading.Lock()
         self._tripped = threading.Event()
         self._cause = None
+        self._wakers = []
+
+    def add_waker(self, waker):
+        """Register a callable that cancel() invokes once the cause is set.
+
+        For a device whose wait blocks on an event of its own -- the syringe
+        pump wakes on one event for both a flow-fault stop and a cancel.
+        Wakers must be trivial and must not fail: set an event, nothing more.
+        """
+        self._wakers.append(waker)
 
     def cancel(self, cause=None):
         """Trip the signal with `cause` (default: the operator aborted).
@@ -79,7 +89,9 @@ class RunControl:
                 return False
             self._cause = cause
             self._tripped.set()
-            return True
+        for waker in self._wakers:
+            waker()
+        return True
 
     def reset(self):
         with self._lock:

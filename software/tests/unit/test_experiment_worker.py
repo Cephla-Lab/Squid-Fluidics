@@ -7,11 +7,12 @@ planned cancellation redesign can rewrite the internals against these tests
 instead of rewriting the tests.
 """
 
+import threading
 from types import SimpleNamespace
 
 import pytest
 
-from fluidics.errors import AbortRequested
+from fluidics.errors import AbortRequested, RunControl
 from fluidics.experiment_worker import ExperimentWorker
 
 from ..worker_helpers import record_run
@@ -142,3 +143,71 @@ class TestRunNarrative:
         assert len(errors) == 1
         assert "pump went away" in errors[0].getMessage()
         assert "Run finished." in caplog.text
+
+
+class TestTheSharedSignal:
+    """The worker waits and checks on the run's RunControl -- the same object
+    the devices share -- so one cancel reaches the operation, the incubation
+    wait, and the check between sequences alike."""
+
+    def test_abort_cancels_the_shared_signal(self):
+        control = RunControl()
+        worker = ExperimentWorker(RecordingOps(), [FLOW], CONFIG, run_control=control)
+        worker.abort()
+        assert isinstance(control.cause, AbortRequested)
+
+    def test_a_cancel_during_incubation_reports_aborted_after_making_safe(self):
+        control = RunControl()
+        original_wait = control.wait
+
+        def cancel_during(seconds):
+            control.cancel()
+            return original_wait(seconds)
+
+        control.wait = cancel_during
+        events = record_run(RecordingOps(), [dict(FLOW, incubation_time=30)],
+                            CONFIG, run_control=control)
+        assert ("progress", 1, "Incubating") in events
+        assert ("progress", 1, "Completed") not in events
+        errors = [e[1] for e in events if e[0] == "error"]
+        assert len(errors) == 1 and "aborted" in errors[0]
+        assert events.index(("make_safe",)) < events.index(("error", errors[0]))
+        assert events[-1] == ("finished",)
+
+    def test_a_cancel_between_sequences_stops_the_run(self):
+        control = RunControl()
+
+        class CancelAfterFirst(RecordingOps):
+            def process_sequence(self, seq):
+                super().process_sequence(seq)
+                if len(self.processed) == 1:
+                    control.cancel()
+
+        ops = CancelAfterFirst()
+        events = record_run(ops, [dict(FLOW), dict(FLOW)], CONFIG, run_control=control)
+        assert len(ops.processed) == 1
+        assert ("progress", 2, "Started") not in events
+        assert ("make_safe",) in events
+
+    def test_make_safe_runs_on_the_thread_that_ran_the_operations(self):
+        """The rig's I/O happens where the run's I/O always happened, not on
+        the Qt thread or in a signal handler."""
+        control = RunControl()
+        threads = {}
+
+        class CancellingOps(RecordingOps):
+            def process_sequence(self, seq):
+                threads["ops"] = threading.get_ident()
+                control.cancel()
+
+        worker = ExperimentWorker(CancellingOps(), [FLOW], CONFIG, callbacks={
+            "make_safe": lambda: threads.setdefault("make_safe", threading.get_ident()),
+        }, run_control=control)
+        worker.run()
+        assert threads["make_safe"] == threads["ops"]
+
+    def test_make_safe_is_not_called_on_success_or_on_a_failed_step(self):
+        assert ("make_safe",) not in record_run(RecordingOps(), [FLOW], CONFIG)
+        failed = record_run(RecordingOps(raise_on={0: ValueError("bad step")}),
+                            [FLOW], CONFIG)
+        assert ("make_safe",) not in failed

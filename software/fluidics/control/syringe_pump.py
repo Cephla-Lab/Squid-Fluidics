@@ -13,14 +13,17 @@ class Interruptible:
 
     Two ways to interrupt, differing only in whether they latch:
 
-      abort()  the operator cancelled. Trips the run's RunControl, so the
-               waiting thread wakes and raises AbortRequested out of the
-               device call -- the operation unwinds instead of returning as
-               if it had finished. Latches until reset_abort().
+      abort()  the operator cancelled. Cancels the run and touches no
+               hardware on the caller's thread: the thread inside
+               wait_for_stop wakes, halts the plunger on the thread that
+               owns the port, and raises AbortRequested out of the device
+               call -- the operation unwinds instead of returning as if it
+               had finished. Latches until reset_abort().
       stop()   a fault the caller is about to raise on -- a flow fault, say.
-               Does not latch and does not cancel the run: the run is being
-               failed by whoever called it, and a cancel here would report a
-               hardware problem as a user action.
+               Halts the plunger from the caller's thread, does not latch and
+               does not cancel the run: the run is being failed by whoever
+               called it, and a cancel here would report a hardware problem
+               as a user action.
 
     Shared rather than written twice because the simulation is where these
     semantics get tested -- the real pump needs hardware. Two copies would put
@@ -35,6 +38,9 @@ class Interruptible:
         self.is_busy = False
         self._interrupt = threading.Event()
         self.run_control = run_control if run_control is not None else RunControl()
+        # One event wakes the wait for either reason; a cancel reaches it
+        # through the waker.
+        self.run_control.add_waker(self._interrupt.set)
 
     @property
     def is_aborted(self):
@@ -55,12 +61,7 @@ class Interruptible:
     # --- interruption ---
 
     def abort(self):
-        # Halt, then cancel, then wake: the waiter reads the cause the moment
-        # it wakes, and must not resume into a serial round trip while
-        # terminateCmd is still in flight on the same port.
-        self._terminate()
         self.run_control.cancel()
-        self._interrupt.set()
 
     def reset_abort(self):
         self.run_control.reset()
@@ -98,6 +99,12 @@ class Interruptible:
         while not interrupted and not self._move_finished():
             interrupted = self._interrupt.wait(0.5)
         self.is_busy = False
+        if self.run_control.cancelled:
+            # Halt here, on the thread that owns the move, then unwind. This
+            # also closes the window between _arm() and dispatch: a cancel
+            # landing there wakes this wait at once and halts the move it
+            # could not prevent.
+            self._terminate()
         self.run_control.check()
 
 
