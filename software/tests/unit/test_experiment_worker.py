@@ -216,11 +216,25 @@ class TestTheSharedSignal:
         assert events.index(("make_safe",)) < events.index(errors[0])
 
     def test_a_fault_outside_the_sequence_loop_makes_the_rig_safe_too(self):
-        """A malformed sequence dict raises where no tag exists yet. The run
-        has still ended, so the rig is still quieted."""
-        events = record_run(RecordingOps(), [{"repeat": 1}], CONFIG)
+        """The outer except catches faults raised where no sequence tag exists
+        yet -- before any operation, so nothing has moved. The run has still
+        ended, so the rig is still quieted."""
+        class BreaksOnTheRunsOwnPass(list):
+            """Iterates cleanly for the estimate in __init__, then raises on
+            the run's pass. A malformed dict cannot serve here: it raises in
+            get_time_to_finish, before run() exists."""
+
+            passes = 0
+
+            def __iter__(self):
+                self.passes += 1
+                if self.passes > 1:
+                    raise RuntimeError("sequence list went bad")
+                return super().__iter__()
+
+        events = record_run(RecordingOps(), BreaksOnTheRunsOwnPass([FLOW]), CONFIG)
         assert ("make_safe",) in events
-        assert any(e[0] == "error" for e in events)
+        assert any(e[0] == "error" and "went bad" in e[1] for e in events)
 
     def test_finished_is_set_last(self):
         """After on_finished: whoever waits on it may tear the devices down."""
