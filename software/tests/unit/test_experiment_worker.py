@@ -11,7 +11,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from fluidics.experiment_worker import AbortRequested, ExperimentWorker
+from fluidics.errors import AbortRequested
+from fluidics.experiment_worker import ExperimentWorker
 
 from ..worker_helpers import record_run
 

@@ -6,34 +6,25 @@ suite avoids -- the autouse _fast_clock fixture patches both time.sleep and
 threading.Event.wait, and the point being tested (that a long wait wakes early)
 is exactly what those patches would paper over. Under the fake clock the old
 time.sleep(t) also "returns instantly", so a timing test written against it
-would pass on the broken code. The real_clock fixture undoes both.
+would pass on the broken code. The real_clock fixture (tests/conftest.py)
+undoes both.
 """
 
+import logging
 import threading
 import time
 
 import pytest
 
 from fluidics.control.syringe_pump import SyringePump, SyringePumpSimulation
+from fluidics.errors import AbortRequested, RunControl
 
 from .pump_helpers import bare_pump
 
 
-# Captured at import, before conftest's autouse fixture patches them.
-_pristine_wait = threading.Event.wait
-_pristine_sleep = time.sleep
-
-
-@pytest.fixture
-def real_clock(monkeypatch):
-    """Undo _fast_clock for one test, so elapsed wall time means something."""
-    monkeypatch.setattr(threading.Event, "wait", _pristine_wait)
-    monkeypatch.setattr("time.sleep", _pristine_sleep)
-
-
-def _pump():
+def _pump(**kwargs):
     return SyringePumpSimulation(sn=None, syringe_ul=5000,
-                                 speed_code_limit=10, waste_port=1)
+                                 speed_code_limit=10, waste_port=1, **kwargs)
 
 
 class FakeSyringe:
@@ -125,12 +116,13 @@ class TestInterruptWakesTheWait:
 
         assert elapsed < 1, f"took {elapsed:.1f}s; the wait was not interrupted"
 
-    def test_abort_wakes_a_long_wait_promptly(self, real_clock):
+    def test_abort_wakes_a_long_wait_promptly_and_raises(self, real_clock):
         pump = _pump()
 
         started = time.monotonic()
         threading.Timer(0.05, pump.abort).start()
-        pump.wait_for_stop(3)
+        with pytest.raises(AbortRequested):
+            pump.wait_for_stop(3)
         elapsed = time.monotonic() - started
 
         assert elapsed < 1, f"took {elapsed:.1f}s; the wait was not interrupted"
@@ -170,10 +162,13 @@ class TestStopDoesNotLatch:
         pump.stop()
         assert _ran_the_chain(pump)
 
-    def test_a_later_execute_returns_immediately_after_abort(self):
+    def test_a_later_execute_raises_after_abort(self):
+        """Raises rather than returns: a silent no-op is how an aborted
+        operation used to report success."""
         pump = _pump()
         pump.abort()
-        assert not _ran_the_chain(pump)
+        with pytest.raises(AbortRequested):
+            pump.execute()
 
     def test_reset_abort_clears_the_interrupt(self):
         """Otherwise the next wait returns instantly on a stale event."""
@@ -189,11 +184,6 @@ class TestSimulationHonoursInterruption:
     bug survived 230 passing tests.
     """
 
-    def test_execute_respects_a_prior_abort(self):
-        pump = _pump()
-        pump.abort()
-        assert not _ran_the_chain(pump)
-
     def test_execute_clears_a_stale_interrupt(self):
         """stop() leaves the event set. If execute did not clear it, the next
         chain's wait would return instantly on the stale event and the caller
@@ -202,3 +192,77 @@ class TestSimulationHonoursInterruption:
         pump.stop()
         pump.execute()
         assert not pump._interrupt.is_set()
+
+
+class TestTheSharedRunControl:
+    """abort() speaks through the run's RunControl, the object every waiting
+    device of the run shares; stop() deliberately does not."""
+
+    def test_abort_cancels_the_run_control_the_pump_was_built_with(self):
+        control = RunControl()
+        pump = _pump(run_control=control)
+        pump.abort()
+        assert isinstance(control.cause, AbortRequested)
+
+    def test_reset_abort_resets_it(self):
+        pump = _pump()
+        pump.abort()
+        pump.reset_abort()
+        assert not pump.run_control.cancelled
+
+    def test_stop_does_not_cancel_the_run(self):
+        pump = _pump()
+        pump.stop()
+        assert not pump.run_control.cancelled
+
+    def test_a_pump_built_alone_gets_its_own(self):
+        assert _pump().run_control is not _pump().run_control
+
+    def test_abort_halts_then_cancels_then_wakes(self):
+        """The whole ordering abort() promises, on the real pump's hooks: the
+        plunger is halted before the waiter can resume into a serial round
+        trip, and the cause is set before it wakes -- a waiter that wakes and
+        finds no cause returns as if the move had finished."""
+        pump = _real_pump()
+        order = []
+        pump.syringe.terminateCmd = lambda: order.append("terminate")
+        pump.run_control.cancel = lambda cause=None: order.append("cancel")
+        pump._interrupt.set = lambda: order.append("wake")
+        pump.abort()
+        assert order == ["terminate", "cancel", "wake"]
+
+
+class TestTheCancelPathOnTheRealPump:
+    def test_a_cancelled_run_never_dispatches_a_chain(self):
+        """The entry check exists for the real pump: _arm() clears the wake
+        event first, so without it an execute() after an abort would send the
+        chain to the Tecan and then wait out the whole move before raising."""
+        pump = _real_pump()
+        dispatched = []
+        pump.syringe.executeChain = lambda minimal_reset=True: dispatched.append(True) or 0
+        pump.abort()
+        with pytest.raises(AbortRequested):
+            pump.execute()
+        assert dispatched == []
+
+    def test_an_unreadable_position_does_not_replace_the_cancellation(self, caplog, during_move):
+        """After terminateCmd the plunger is still decelerating and the
+        position read can fail. A driver error surfacing here would show the
+        operator a pump fault instead of their own abort."""
+        pump = _real_pump(ready=False)
+        pump.syringe.executeChain = lambda minimal_reset=True: 0
+        pump.chained_volume = 5
+        reads = []
+
+        def unreadable():
+            reads.append(True)
+            raise RuntimeError("no reply while decelerating")
+
+        pump.get_plunger_position = unreadable
+        during_move(pump, pump.abort)
+        with caplog.at_level(logging.WARNING, logger="fluidics"):
+            with pytest.raises(AbortRequested):
+                pump.execute()
+        assert reads == [True]
+        assert pump.chained_volume == 0
+        assert "unreadable" in caplog.text

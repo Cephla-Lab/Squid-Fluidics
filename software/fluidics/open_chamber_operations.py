@@ -1,6 +1,6 @@
 import logging
 from time import sleep
-from .experiment_worker import AbortRequested, OperationError
+from .errors import Cancelled, OperationError
 from . import sequence_utils
 
 _logger = logging.getLogger(__name__)
@@ -62,14 +62,6 @@ class OpenChamberOperations():
         else:
             raise ValueError(f"Unknown sequence type: {seq_type}")
 
-    def _empty_syringe_pump_on_full(self, volume):
-        if self.sp.get_current_volume() + self.sp.get_chained_volume() + volume > 0.95 * self.syringe_volume_ul:
-            try:
-                self.sp.dispense_to_waste()
-                self.sp.execute()
-            except Exception as e:
-                raise OperationError(f"Failed to empty syringe pump: {str(e)}")
-
     def clear_and_add_reagent(self, port, flow_rate, volume, fill_tubing_with_port):
         """
         Clear previous liquid in tubings by 1) dispensing sv_to_sp into waste and 2) dispensing sp_to_oc into sample and aspirate,
@@ -122,6 +114,8 @@ class OpenChamberOperations():
             if self.sp.is_aborted:
                 return
             self.sp.execute()
+        except Cancelled:
+            raise
         except Exception as e:
             raise OperationError(f"Error in clear_and_add_reagent from port: {port}: {str(e)}")
 
@@ -185,6 +179,8 @@ class OpenChamberOperations():
                 return
             self.dp.aspirate(10)
             self.sp.execute()
+        except Cancelled:
+            raise
         except Exception as e:
             raise OperationError(f"Error in add_reagent from port: {port}: {str(e)}")
 
@@ -226,6 +222,8 @@ class OpenChamberOperations():
                     return
                 self._execute_under_drain()
             sleep(1)
+        except Cancelled:
+            raise
         except Exception as e:
             raise OperationError(f"Error in wash_with_constant_flow from port: {port}: {str(e)}")
 
@@ -280,6 +278,8 @@ class OpenChamberOperations():
                 return
             if clean_up:
                 self.dp.aspirate(20)
+        except Cancelled:
+            raise
         except Exception as e:
             raise OperationError(f"Error in priming_or_clean_up: {str(e)}")
 

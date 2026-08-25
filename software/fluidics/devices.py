@@ -23,6 +23,7 @@ from .control.flow_sensor import start_flow_sensors
 from .control.selector_valve import SelectorValveSystem
 from .control.syringe_pump import SyringePump, SyringePumpSimulation
 from .control.temperature_controller import TCMController, TCMControllerSimulation
+from .errors import RunControl
 from .merfish_operations import MERFISHOperations
 from .open_chamber_operations import OpenChamberOperations
 
@@ -68,12 +69,14 @@ class DeviceSet:
     Attributes are what the entry points already call them: controller,
     syringe_pump, selector_valves, disc_pump (None outside Open Chamber),
     temperature_controller (None when absent or failed), flow_sensors (possibly
-    empty). Built by build_devices(); nothing else should construct one.
+    empty), and run_control -- the one cancellation signal every waiting
+    device shares. Built by build_devices(); nothing else should construct one.
     """
 
     def __init__(self, config, controller, syringe_pump, selector_valves,
-                 disc_pump, temperature_controller, flow_sensors):
+                 disc_pump, temperature_controller, flow_sensors, run_control):
         self.config = config
+        self.run_control = run_control
         self.controller = controller
         self.syringe_pump = syringe_pump
         self.selector_valves = selector_valves
@@ -159,12 +162,15 @@ def build_devices(config, simulation=False, on_issue=_print_issue):
     pump_cls = SyringePumpSimulation if simulation else SyringePump
     tc_cls = TCMControllerSimulation if simulation else TCMController
 
+    # One cancellation signal for the whole run -- see RunControl.
+    run_control = RunControl()
     controller = controller_cls(config.microcontroller.serial_number)
     syringe_pump = pump_cls(
         sn=config.syringe_pump.serial_number,
         syringe_ul=config.syringe_pump.volume_ul,
         speed_code_limit=config.syringe_pump.speed_code_limit,
-        waste_port=config.syringe_pump.waste_port)
+        waste_port=config.syringe_pump.waste_port,
+        run_control=run_control)
 
     temperature_controller = None
     if config.temperature_controller is not None:
@@ -200,7 +206,7 @@ def build_devices(config, simulation=False, on_issue=_print_issue):
             on_issue(ISSUE_FLOW_SENSORS, f"Failed to initialize flow sensors: {e}")
 
         selector_valves = SelectorValveSystem(controller, config)
-        disc_pump = (DiscPump(controller)
+        disc_pump = (DiscPump(controller, run_control)
                      if config.application == "Open Chamber" else None)
     except Exception:
         # A dead controller or a stuck valve is not survivable, but the pieces
@@ -219,7 +225,8 @@ def build_devices(config, simulation=False, on_issue=_print_issue):
         raise
 
     return DeviceSet(config, controller, syringe_pump, selector_valves,
-                     disc_pump, temperature_controller, flow_sensors)
+                     disc_pump, temperature_controller, flow_sensors,
+                     run_control)
 
 
 def build_operations(config, devices, on_warning=None):

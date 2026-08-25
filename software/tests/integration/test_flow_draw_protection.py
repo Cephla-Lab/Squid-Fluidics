@@ -16,7 +16,7 @@ import logging
 
 import pytest
 
-from fluidics.experiment_worker import OperationError
+from fluidics.errors import OperationError
 from fluidics.flow_monitor import FlowFault
 from fluidics.merfish_operations import MERFISHOperations
 

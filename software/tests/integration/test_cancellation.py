@@ -1,5 +1,5 @@
 # tests/integration/test_cancellation.py
-"""The cancellation contract the abort redesign will deliver -- written first.
+"""The cancellation contract the abort redesign delivers, written first.
 
 Today an aborted operation returns silently (`if self.sp.is_aborted: return`,
 at dozens of sites), so the worker cannot tell "finished" from "stopped
@@ -7,36 +7,61 @@ halfway" and learns of the abort only through its own separate event. The
 design (AI-docs: 2026-08-14-abort-cancellation-design) replaces that with one
 signal and an unwinding raise from inside the device call.
 
-These tests encode that behaviour now. They are xfail(strict=True): they
-document what is missing, and the moment the redesign makes them pass they
-fail as XPASS, forcing the markers off in the same change. The last test is
-not xfail -- it pins behaviour that already holds and must survive the
-redesign: a flow fault reaches the operator as a fault, never as an abort.
+The tests still marked xfail(strict=True) document what is missing; the moment
+a change makes one pass it fails as XPASS, forcing the marker off in the same
+change. The rest pin what already holds and must survive the redesign.
 """
 
 import pytest
 
-from fluidics.experiment_worker import AbortRequested
+from fluidics.errors import AbortRequested
 from fluidics.flow_monitor import FlowFault
+from fluidics.sequences import APPLICATION_SEQUENCES
 
 from ..worker_helpers import record_run
 
-# One representative fluidic step per operations stack. Both stacks share the
-# pump's cancellation path and both wrap operation exceptions, so the contract
-# is checked against each.
-SEQS = {
-    "flow_cell": {"type": "flow_reagent", "fluidic_port": 1, "flow_rate": 500,
-                  "volume": 500},
-    "open_chamber": {"type": "add_reagent", "fluidic_port": 3,
-                     "flow_rate": 1000, "volume": 1000},
+# Every fluidic step type on each operations stack: both stacks share the
+# pump's cancellation path, and every one of their exception wrappers must let
+# a cancellation through.
+FLUIDIC_STEPS = {
+    "flow_cell": [
+        {"type": "flow_reagent", "fluidic_port": 1, "flow_rate": 500, "volume": 500},
+        # More than the half-full 5000 uL fixture syringe holds, so the draw
+        # first empties it to waste -- the one nested wrapper, which a cancel
+        # unwinds through twice.
+        {"name": "flow_reagent-full-syringe", "type": "flow_reagent",
+         "fluidic_port": 1, "flow_rate": 500, "volume": 3000},
+        {"type": "priming", "fluidic_port": 1, "flow_rate": 500, "volume": 500},
+        {"type": "clean_up", "fluidic_port": 1, "flow_rate": 500, "volume": 500},
+    ],
+    "open_chamber": [
+        {"type": "add_reagent", "fluidic_port": 3, "flow_rate": 1000, "volume": 1000},
+        {"type": "clear_and_add_reagent", "fluidic_port": 3, "flow_rate": 1000, "volume": 1000},
+        {"type": "wash_constant_flow", "fluidic_port": 6, "flow_rate": 1000, "volume": 1000},
+        {"type": "priming", "fluidic_port": 10, "flow_rate": 1000, "volume": 1000},
+        {"type": "clean_up", "fluidic_port": 10, "flow_rate": 1000, "volume": 1000},
+    ],
 }
+# One representative step per stack, for the tests that need only one.
+SEQS = {app: steps[0] for app, steps in FLUIDIC_STEPS.items()}
 
 # Restricted to how today's gap actually fails -- "DID NOT RAISE" and a failed
 # assertion -- so a fixture error or an unexpected exception from an operation
 # is a real failure, not the expected one.
 NOT_YET = pytest.mark.xfail(
     strict=True, raises=(AssertionError, pytest.fail.Exception),
-    reason="operations still return silently on abort; the redesign raises")
+    reason="operations still return silently on a prior abort; the redesign raises")
+
+
+APPLICATION_NAMES = {"flow_cell": "Flow Cell", "open_chamber": "Open Chamber"}
+
+
+@pytest.mark.parametrize("app", list(FLUIDIC_STEPS))
+def test_the_step_table_covers_every_fluidic_type_of_the_application(app):
+    """A fluidic type added to the application without a row here would be
+    a wrapper nobody polices."""
+    covered = {seq["type"] for seq in FLUIDIC_STEPS[app]}
+    assert covered == set(APPLICATION_SEQUENCES[APPLICATION_NAMES[app]]) - {"set_temperature"}
 
 
 @pytest.fixture(params=list(SEQS))
@@ -52,12 +77,15 @@ def errors_in(events):
             for message in rest]
 
 
-@NOT_YET
-def test_an_abort_during_a_move_unwinds_by_raising(stack, during_move):
-    """The operator presses Abort while the plunger is moving. The wait wakes
-    (that part works today); the operation must then raise, not carry on to
-    its next step or return as if it had finished."""
-    ops, sp, seq, _ = stack
+@pytest.mark.parametrize(
+    "app, seq",
+    [(app, seq) for app, steps in FLUIDIC_STEPS.items() for seq in steps],
+    ids=lambda value: value.get("name", value["type"]) if isinstance(value, dict) else value)
+def test_an_abort_during_a_move_unwinds_by_raising(app, seq, request, during_move):
+    """The operator presses Abort while the plunger is moving. The wait wakes,
+    the device raises, and every wrapper on the way out lets it through -- the
+    operation must not carry on to its next step or return as if finished."""
+    ops, sp = request.getfixturevalue(f"{app}_rig")
     during_move(sp, sp.abort)
     with pytest.raises(AbortRequested):
         ops.process_sequence(seq)

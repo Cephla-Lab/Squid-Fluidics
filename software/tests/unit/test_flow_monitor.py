@@ -146,7 +146,7 @@ class TestFaultContents:
 
     def test_fault_is_an_operation_error(self):
         """So the worker reports it through the existing on_error path."""
-        from fluidics.experiment_worker import OperationError
+        from fluidics.errors import OperationError
         m = make(ramp_up=0.0)
         assert isinstance(feed(m, [0.0] * 3), OperationError)
 

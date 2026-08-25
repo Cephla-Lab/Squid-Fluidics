@@ -67,7 +67,9 @@ def flow_cell_hardware(flow_cell_config):
 def open_chamber_hardware(open_chamber_config):
     """Return (config, syringe_pump, selector_valves, disc_pump, temperature_controller) for open chamber."""
     fc, sp, sv = _make_sim_hardware(open_chamber_config)
-    dp = DiscPump(fc)
+    # The rig's two waiting devices share one signal, as build_devices wires
+    # them; on separate ones an abort would never cross from pump to drain.
+    dp = DiscPump(fc, sp.run_control)
     tc = TCMControllerSimulation(channels=2)
     return open_chamber_config, sp, sv, dp, tc
 
@@ -84,26 +86,6 @@ def open_chamber_rig(open_chamber_hardware):
     """(OpenChamberOperations, syringe_pump) over the open chamber fixture config."""
     config, sp, sv, dp, tc = open_chamber_hardware
     return OpenChamberOperations(config, sp, sv, dp, tc), sp
-
-
-@pytest.fixture
-def during_move():
-    """Hook a side effect into the pump's wait_for_stop -- inside the move.
-
-    Not around execute(): execute() clears the interrupt on entry, so an abort
-    or a sensor reading delivered before it would have its stop() wiped by the
-    very call it was meant to interrupt.
-    """
-    def _hook(sp, side_effect):
-        original_wait = sp.wait_for_stop
-
-        def wait_for_stop(t=0):
-            side_effect()
-            return original_wait(t)
-
-        sp.wait_for_stop = wait_for_stop
-
-    return _hook
 
 
 @pytest.fixture

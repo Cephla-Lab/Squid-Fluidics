@@ -1,7 +1,7 @@
 # tests/integration/test_merfish_operations.py
 import pytest
 
-from fluidics.experiment_worker import OperationError
+from fluidics.errors import OperationError
 from fluidics.merfish_operations import MERFISHOperations
 
 

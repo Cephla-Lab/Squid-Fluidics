@@ -1,6 +1,11 @@
 import logging
 import threading
 
+from .errors import AbortRequested
+# Re-exported: defined here before fluidics.errors existed, and scripts
+# outside this package may still import it from here.
+from .errors import OperationError  # noqa: F401
+
 _logger = logging.getLogger(__name__)
 
 
@@ -111,9 +116,3 @@ class ExperimentWorker:
         finally:
             _logger.info("Run finished.")
             self._call_callback('on_finished')
-
-class AbortRequested(Exception):
-    pass
-
-class OperationError(Exception):
-    pass

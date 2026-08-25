@@ -27,6 +27,43 @@ def fixtures_dir():
     return FIXTURES_DIR
 
 
+# Captured at import, before _fast_clock patches them.
+_pristine_wait = threading.Event.wait
+_pristine_sleep = _time.sleep
+
+
+@pytest.fixture
+def real_clock(monkeypatch):
+    """Undo _fast_clock for one test, so elapsed wall time means something.
+
+    For the few tests whose point is that a long wait wakes early: under the
+    fake clock every wait "returns instantly", so a timing test written
+    against it would pass on the broken code too.
+    """
+    monkeypatch.setattr(threading.Event, "wait", _pristine_wait)
+    monkeypatch.setattr("time.sleep", _pristine_sleep)
+
+
+@pytest.fixture
+def during_move():
+    """Hook a side effect into a pump's wait_for_stop -- inside the move.
+
+    Not around execute(): execute() clears the interrupt on entry, so an abort
+    or a sensor reading delivered before it would have its stop() wiped by the
+    very call it was meant to interrupt.
+    """
+    def _hook(sp, side_effect):
+        original_wait = sp.wait_for_stop
+
+        def wait_for_stop(t=0):
+            side_effect()
+            return original_wait(t)
+
+        sp.wait_for_stop = wait_for_stop
+
+    return _hook
+
+
 @pytest.fixture(autouse=True)
 def _fast_clock(monkeypatch):
     """Patch time.sleep, time.time, and Event.wait so tests run instantly.

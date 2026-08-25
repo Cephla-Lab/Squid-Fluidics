@@ -3,7 +3,7 @@ import logging
 
 from time import sleep, time
 
-from .experiment_worker import OperationError
+from .errors import OperationError
 
 _logger = logging.getLogger(__name__)
 

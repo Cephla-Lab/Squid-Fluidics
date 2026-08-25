@@ -1,7 +1,7 @@
 import pytest
 
 from fluidics.control.temperature_controller import TCMControllerSimulation
-from fluidics.experiment_worker import OperationError
+from fluidics.errors import OperationError
 from fluidics.sequence_utils import set_temperature
 
 
