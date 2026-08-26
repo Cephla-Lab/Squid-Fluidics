@@ -195,9 +195,12 @@ class RunControl:
         self.check()
         if self._paused:
             return 0.0
-        started = time.time()
+        # Monotonic: an NTP step or an operator setting the clock back would
+        # otherwise make this look like no time had passed, and delay() would
+        # wait the whole interval again.
+        started = time.monotonic()
         self._changed.wait(seconds)
-        spent = min(seconds, max(0.0, time.time() - started))
+        spent = min(seconds, max(0.0, time.monotonic() - started))
         self.check()
         return spent
 

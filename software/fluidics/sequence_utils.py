@@ -1,7 +1,6 @@
 """Shared sequence helpers used by both flow cell and open chamber operations."""
 import logging
 
-from time import time
 
 from .errors import OperationError
 
@@ -25,15 +24,18 @@ def set_temperature(tc, target, run_control):
     for channel in range(1, tc.channels + 1):
         tc.set_target_temperature(channel, target)
 
-    start_time = time()
+    # Running seconds, not wall clock: each delay() returns after one second
+    # of running time, so counting them *is* the clock -- and a pause stops it.
+    # Comparing wall clock here would bring a run back from a ten-minute hold
+    # straight into "failed to stabilize".
+    running_seconds = 0
     while True:
-        # Running time: a pause stops the stabilization clock too, so a run
-        # held for ten minutes does not time out waiting for temperature.
         run_control.delay(1)
+        running_seconds += 1
         actuals = [tc.get_actual_temperature(c) for c in range(1, tc.channels + 1)]
         if all(abs(t - target) <= tc.tolerance_celsius for t in actuals):
             return
-        if time() - start_time > tc.stabilization_timeout_seconds:
+        if running_seconds > tc.stabilization_timeout_seconds:
             raise OperationError(
                 f"Temperature failed to stabilize within "
                 f"{tc.stabilization_timeout_seconds}s "

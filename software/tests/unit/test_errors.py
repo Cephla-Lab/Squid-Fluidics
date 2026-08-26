@@ -153,6 +153,14 @@ class TestPause:
         control = RunControl()
         assert control.run_for(0.05) == pytest.approx(0.05, abs=0.03)
 
+    def test_run_for_measures_with_the_monotonic_clock(self, real_clock, monkeypatch):
+        """An NTP correction, or an operator setting the clock back, must not
+        make a wait look like it took no time -- delay() would then spend the
+        whole interval again, and an incubation would start over."""
+        control = RunControl()
+        monkeypatch.setattr("time.time", lambda: 0.0)     # a wall clock going nowhere
+        assert control.run_for(0.05) == pytest.approx(0.05, abs=0.03)
+
     def test_delay_does_not_count_paused_time(self, real_clock):
         """The point of pause: an incubation held for a coffee break resumes
         with its remaining time, it does not expire during the break."""

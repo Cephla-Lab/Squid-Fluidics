@@ -31,6 +31,7 @@ def fixtures_dir():
 _pristine_wait = threading.Event.wait
 _pristine_sleep = _time.sleep
 _pristine_time = _time.time
+_pristine_monotonic = _time.monotonic
 
 
 @pytest.fixture
@@ -43,9 +44,10 @@ def real_clock(monkeypatch):
     """
     monkeypatch.setattr(threading.Event, "wait", _pristine_wait)
     monkeypatch.setattr("time.sleep", _pristine_sleep)
-    # time.time too, or code that measures how long a wait took (RunControl
+    # Both clocks too, or code that measures how long a wait took (RunControl
     # .run_for) reads a frozen clock, concludes no time passed, and loops.
     monkeypatch.setattr("time.time", _pristine_time)
+    monkeypatch.setattr("time.monotonic", _pristine_monotonic)
 
 
 @pytest.fixture
@@ -178,9 +180,12 @@ def _fast_clock(monkeypatch):
         fake_time[0] += timeout
         return self.is_set()
 
-    # Patch the time module itself
+    # Patch the time module itself. monotonic moves with the same fake clock:
+    # durations are measured off it (RunControl.run_for), so a test that
+    # advances one clock and reads the other would see no time pass at all.
     monkeypatch.setattr("time.sleep", fake_sleep)
     monkeypatch.setattr("time.time", fake_time_fn)
+    monkeypatch.setattr("time.monotonic", fake_time_fn)
 
     # Patch modules that use 'from time import sleep' or 'from time import time'
     # The operations' settle waits and sequence_utils' stabilization wait go
