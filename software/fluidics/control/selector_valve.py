@@ -23,10 +23,12 @@ class SelectorValve():
 
     def open(self, port, run_control=None):
         # Checked here rather than once per cascade: a cancel landing between
-        # two moves would otherwise still send this one. Homing at
-        # construction passes no signal -- there is no run yet.
+        # two moves would otherwise still send this one. Cancel only -- the
+        # pause gate is one level up, in open_port: parking mid-cascade would
+        # leave the path half-routed with current_port still naming the old
+        # one. Homing at construction passes no signal, there being no run.
         if run_control is not None:
-            run_control.checkpoint()
+            run_control.check()
         _logger.debug("Valve %s: open port %s", self.id, port)
         self.fc.send_command(CMD_SET.SET_ROTARY_VALVE, self.id, port)
         self.fc.wait_for_completion(run_control=run_control)
@@ -65,6 +67,9 @@ class SelectorValveSystem():
         return name_mapping.get('port_' + str(port_index))
 
     def open_port(self, port_index):
+        # The operator-meaningful boundary: a paused run holds before the
+        # cascade starts, so it never rests with the path half-routed.
+        self.run_control.checkpoint()
         if not 1 <= port_index <= self.available_port_number:
             # This used to be a silent return, which left whatever port was
             # last open selected -- the draw then pulled the wrong reagent

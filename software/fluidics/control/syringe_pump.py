@@ -220,8 +220,6 @@ class SyringePump(SpeedCodes, Interruptible):
 
     def execute(self):
         # wait_for_stop is the only waiting path.
-        # The gate: a paused run holds here, before the chain is
-        # dispatched, so the move in flight was allowed to finish.
         self.run_control.checkpoint()
         self.is_busy = True
         with self._serial_lock:
@@ -369,8 +367,6 @@ class SyringePumpSimulation(SpeedCodes, Interruptible):
         self._chain = []
 
     def execute(self):
-        # The gate: a paused run holds here, before the chain is
-        # dispatched, so the move in flight was allowed to finish.
         self.run_control.checkpoint()
         self.is_busy = True
         try:

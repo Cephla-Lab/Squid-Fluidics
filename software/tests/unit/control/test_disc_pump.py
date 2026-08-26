@@ -1,8 +1,6 @@
 # tests/unit/control/test_disc_pump.py
 """The disc pump's timed aspiration against the run's cancellation signal."""
 
-import threading
-import time
 
 import pytest
 
@@ -57,7 +55,12 @@ class TestAspirate:
 
         control.run_for = run_for
         original_checkpoint = control.checkpoint
-        control.checkpoint = lambda: (control.resume(), original_checkpoint())[1]
+
+        def checkpoint():
+            control.resume()          # the operator, once it has switched off
+            original_checkpoint()
+
+        control.checkpoint = checkpoint
 
         pump.aspirate(20)
         assert spent == [20, 15]      # the remainder, not the whole twenty
@@ -90,8 +93,7 @@ class TestStartAndStop:
             pump.start(0.3)
         assert power_commands(pump) == []
 
-    def test_start_holds_while_the_run_is_paused(
-            self, pump, real_clock, holds_while_paused):
+    def test_start_holds_while_the_run_is_paused(self, pump, holds_while_paused):
         holds_while_paused(pump.run_control, lambda: pump.start(0.3))
         assert power_commands(pump) == [0.3 * MCU_CONSTANTS.TTP_MAX_PW]
 

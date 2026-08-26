@@ -124,7 +124,7 @@ class TestPause:
         assert not control.paused
         control.checkpoint()
 
-    def test_checkpoint_holds_until_resume(self, real_clock, holds_while_paused):
+    def test_checkpoint_holds_until_resume(self, holds_while_paused):
         control = RunControl()
         holds_while_paused(control, control.checkpoint)
 
@@ -149,27 +149,25 @@ class TestPause:
         control.pause()
         assert control.run_for(30) == 0.0
 
-    def test_run_for_reports_the_time_it_spent(self, real_clock):
-        control = RunControl()
-        assert control.run_for(0.05) == pytest.approx(0.05, abs=0.03)
-
-    def test_run_for_measures_with_the_monotonic_clock(self, real_clock, monkeypatch):
-        """An NTP correction, or an operator setting the clock back, must not
-        make a wait look like it took no time -- delay() would then spend the
-        whole interval again, and an incubation would start over."""
+    def test_run_for_reports_the_time_it_spent_off_the_monotonic_clock(
+            self, real_clock, monkeypatch):
+        """The wall clock is frozen here: an NTP correction, or an operator
+        setting the clock back, must not make a wait look like it took no time
+        -- delay() would then spend the whole interval again, and an
+        incubation would start over."""
         control = RunControl()
         monkeypatch.setattr("time.time", lambda: 0.0)     # a wall clock going nowhere
-        assert control.run_for(0.05) == pytest.approx(0.05, abs=0.03)
+        assert control.run_for(0.03) == pytest.approx(0.03, abs=0.02)
 
     def test_delay_does_not_count_paused_time(self, real_clock):
         """The point of pause: an incubation held for a coffee break resumes
         with its remaining time, it does not expire during the break."""
         control = RunControl()
         control.pause()
-        threading.Timer(0.15, control.resume).start()
+        threading.Timer(0.05, control.resume).start()
         started = time.monotonic()
-        control.delay(0.05)
-        assert time.monotonic() - started >= 0.19
+        control.delay(0.02)
+        assert time.monotonic() - started >= 0.06
 
     def test_delay_raises_when_the_run_is_cancelled(self, real_clock):
         control = RunControl()
@@ -185,3 +183,64 @@ class TestPause:
         started = time.monotonic()
         assert control.wait(0.05) is False
         assert time.monotonic() - started >= 0.04
+
+
+class TestNoHold:
+    """A region the run must not be parked inside: the caller has already
+    committed the hardware to something -- a drain pulling with no inflow, an
+    armed DrawGuard whose sensors would read the stopped flow as a fault."""
+
+    def test_a_gate_inside_the_region_does_not_hold(self):
+        control = RunControl()
+        control.pause()
+        with control.no_hold():
+            control.checkpoint()      # would block forever outside the region
+        assert control.paused, "the pause is still pending, to take hold later"
+
+    def test_a_cancel_inside_the_region_still_raises(self):
+        """Stopping is what an abort is for; only holding is deferred."""
+        control = RunControl()
+        control.cancel()
+        with control.no_hold():
+            with pytest.raises(AbortRequested):
+                control.checkpoint()
+
+    def test_a_run_level_wait_inside_the_region_still_spends_its_time(self, real_clock):
+        """run_for returns early on a pause so delay() can stop the clock --
+        inside the region that would spin, since the gate does not hold."""
+        control = RunControl()
+        control.pause()
+        with control.no_hold():
+            assert control.run_for(0.02) == pytest.approx(0.02, abs=0.02)
+
+    def test_the_region_ends_and_the_gate_holds_again(self, holds_while_paused):
+        control = RunControl()
+        with control.no_hold():
+            pass
+        holds_while_paused(control, control.checkpoint)
+
+
+class TestHolding:
+    """"Pause requested" and "the run has come to rest" are different moments:
+    a move in flight keeps going until it reaches a gate. The GUI tells the
+    operator which, so RunControl has to say."""
+
+    def test_nothing_is_holding_on_a_running_control(self):
+        assert RunControl().holding == 0
+
+    def test_a_pause_alone_is_not_yet_a_hold(self):
+        control = RunControl()
+        control.pause()
+        assert control.paused and control.holding == 0
+
+    def test_a_thread_parked_at_the_gate_counts(self, real_clock, run_in_background):
+        control = RunControl()
+        control.pause()
+        finished, _ = run_in_background(control.checkpoint)
+        deadline = time.monotonic() + 2
+        while control.holding == 0 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert control.holding == 1
+        control.resume()
+        assert finished.wait(2)
+        assert control.holding == 0

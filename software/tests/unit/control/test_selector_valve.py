@@ -1,6 +1,4 @@
 # tests/unit/control/test_selector_valve.py
-import threading
-import time
 
 import pytest
 
@@ -175,8 +173,7 @@ class TestACancelledRunMovesNoValve:
 
 
 class TestAPausedRunMovesNoValve:
-    def test_the_move_waits_for_the_resume(self, fixtures_dir, real_clock,
-                                            holds_while_paused):
+    def test_the_move_waits_for_the_resume(self, fixtures_dir, holds_while_paused):
         """The valve in flight finishes; the next one holds at the gate."""
         control = RunControl()
         system = _make_valve_system(fixtures_dir / "flow_cell_config.yaml", control)

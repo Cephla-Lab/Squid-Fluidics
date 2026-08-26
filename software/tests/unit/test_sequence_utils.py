@@ -56,28 +56,49 @@ class TestSetTemperature:
     def test_a_pause_does_not_use_up_the_stabilization_timeout(self, control):
         """A run held for an hour must come back with its timeout intact.
 
-        The pause happens for real here, and the wall clock moves during it --
-        which is what an earlier version got wrong: it spent the wait in
-        running time but still compared wall clock against the deadline, so
-        the first check after a long hold reported "failed to stabilize".
+        The pause is real and the wall clock moves during it -- which is what
+        an earlier version got wrong: it spent the wait in running time but
+        still compared wall clock against the deadline, so the first check
+        after a long hold reported "failed to stabilize".
         """
         tc = _StuckController(channels=1, stabilization_timeout_seconds=5)
         reads = []
         actual = tc.get_actual_temperature
+        tc.get_actual_temperature = lambda channel: (reads.append(channel),
+                                                     actual(channel))[1]
+        original_delay = control.delay
+
+        def delay_then_hold(seconds):
+            original_delay(seconds)
+            if len(reads) == 1:          # the operator pauses after one look
+                control.pause()
+                time.sleep(3600)         # an hour of wall clock, none of it running
+                control.resume()
+
+        control.delay = delay_then_hold
+        with pytest.raises(OperationError, match="failed to stabilize"):
+            set_temperature(tc, 50.0, control)
+        # Five running seconds of trying, not one cut short by the hold.
+        assert len(reads) > 5, reads
+
+    def test_slow_reads_count_against_the_timeout(self, control):
+        """A channel that has stopped answering costs half a second a read at
+        the serial timeout. Charging only the delay would let a 4 s timeout
+        run for 8 s -- and for 12 s on a four-channel controller."""
+        tc = _StuckController(channels=2, stabilization_timeout_seconds=4)
+        reads = []
 
         def get_actual_temperature(channel):
             reads.append(channel)
-            if len(reads) == 1:
-                control.pause()
-                time.sleep(3600)      # an hour of wall clock, none of it running
-                control.resume()
-            return actual(channel)
+            time.sleep(0.5)              # what a silent channel costs
+            return 0.0
 
         tc.get_actual_temperature = get_actual_temperature
         with pytest.raises(OperationError, match="failed to stabilize"):
             set_temperature(tc, 50.0, control)
-        # Five running seconds of trying, not one aborted by the hold.
-        assert len(reads) > 5, reads
+        # One second of delay plus one of reads per iteration: it gives up on
+        # the third, not the fifth.
+        assert len(reads) == 6, reads
 
     def test_a_cancelled_run_raises_before_it_writes_a_target(self, control):
         """Not a silent return, and not after setting a target on a run that

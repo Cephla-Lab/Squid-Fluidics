@@ -29,8 +29,7 @@ class DiscPump():
         """
         remaining = time_s
         while remaining > 0:
-            self.run_control.checkpoint()
-            self.start(1.0)
+            self.start(1.0)          # gates: a paused run holds before it powers
             try:
                 remaining -= self.run_control.run_for(remaining)
             finally:

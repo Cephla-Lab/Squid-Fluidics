@@ -12,6 +12,12 @@ from fluidics.merfish_operations import MERFISHOperations
 from fluidics.open_chamber_operations import OpenChamberOperations
 
 
+# A step that moves liquid on each application, against the fixture configs.
+# Shared by the modules that need one without caring which it is.
+FLOW_CELL_STEP = {"type": "flow_reagent", "fluidic_port": 1,
+                  "flow_rate": 500, "volume": 500}
+
+
 @pytest.fixture
 def built():
     """build_devices that closes what it built when the test ends.

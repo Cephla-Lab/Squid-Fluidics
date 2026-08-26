@@ -216,8 +216,7 @@ class TestPauseHoldsTheNextChain:
     """A paused run holds before a chain is dispatched, so the move already in
     flight finishes -- the pause takes hold at the chain boundary."""
 
-    def test_execute_holds_while_paused_and_runs_on_resume(
-            self, real_clock, holds_while_paused):
+    def test_execute_holds_while_paused_and_runs_on_resume(self, holds_while_paused):
         pump = _pump()
         dispatched = []
         pump.wait_for_stop = lambda t=0: dispatched.append(t)
@@ -233,8 +232,10 @@ class TestPauseHoldsTheNextChain:
         pump.wait_for_stop(0.05)
         assert time.monotonic() - started >= 0.04
 
-    def test_an_abort_while_held_unwinds(self):
-        """No resume needed: the cancel opens the gate on its way past."""
+    def test_a_cancel_beats_a_pending_pause(self):
+        """The cancel clears the pause on its way past, so the gate raises
+        rather than holding. (A thread already parked at the gate is woken by
+        the same act -- pinned in test_errors and the pause integration test.)"""
         pump = _pump()
         pump.run_control.pause()
         pump.run_control.cancel()

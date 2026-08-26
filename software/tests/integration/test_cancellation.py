@@ -15,6 +15,7 @@ from fluidics.errors import AbortRequested
 from fluidics.flow_monitor import FlowFault
 from fluidics.sequences import APPLICATION_SEQUENCES
 
+from .conftest import FLOW_CELL_STEP
 from ..worker_helpers import errors_in, record_run
 
 # Every fluidic step type on each operations stack: both stacks share the
@@ -22,7 +23,7 @@ from ..worker_helpers import errors_in, record_run
 # a cancellation through.
 FLUIDIC_STEPS = {
     "flow_cell": [
-        {"type": "flow_reagent", "fluidic_port": 1, "flow_rate": 500, "volume": 500},
+        FLOW_CELL_STEP,
         # More than the half-full 5000 uL fixture syringe holds, so the draw
         # first empties it to waste -- the one nested wrapper, which a cancel
         # unwinds through twice.

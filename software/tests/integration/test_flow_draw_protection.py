@@ -218,3 +218,25 @@ class TestWarningsAreReportable:
         config, sp, sv = flow_cell_hardware
         assert (MERFISHOperations(config, sp, sv).on_warning
                 == logging.getLogger("fluidics.merfish_operations").warning)
+
+
+def test_a_pause_inside_a_guarded_draw_does_not_park_the_run(
+        ops_and_sensor, real_clock, run_in_background):
+    """The guard arms the sensors and the chain's gate follows. Parking there
+    would leave the sensors watching a stopped pump: a `stop` sensor would see
+    no flow, decide the draw had failed, and cancel the run with a diagnosis
+    nobody caused."""
+    ops, sensor, sp = ops_and_sensor
+    ops.sv.fc.COMMAND_SECONDS = 0
+    sp.wait_for_stop = lambda t=0: sensor.play()
+    original = sp.execute
+
+    def execute():
+        ops.run_control.pause()        # armed guard, chain not yet dispatched
+        original()
+
+    sp.execute = execute
+    finished, error = run_in_background(lambda: ops.process_sequence(SEQ))
+    assert finished.wait(2), "the run parked inside an armed guard"
+    assert not error, f"a paused draw was failed: {error}"
+    assert sensor.faults == [], "a pause was reported as a flow fault"

@@ -90,13 +90,12 @@ class ExperimentWorker:
         holds the run at the gate, it is simply not narrated. Whoever asked
         for the pause already knows they asked.
         """
-        if not self.run_control.paused:
-            self.run_control.check()
-            return
-        _logger.info("%s: paused", tag)
-        self._call_callback('update_progress', index, sequence_number, "Paused")
+        if self.run_control.paused:
+            _logger.info("%s: paused", tag)
+            self._call_callback('update_progress', index, sequence_number, "Paused")
+        # Unconditional: a pause arriving after that read still holds here,
+        # at the boundary, rather than inside the sequence about to start.
         self.run_control.checkpoint()
-        _logger.info("%s: resumed", tag)
 
     def _end_early(self, message):
         """Quiet the rig, then report why it stopped.
