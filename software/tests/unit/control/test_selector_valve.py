@@ -123,10 +123,8 @@ class TestOpenPort:
 class TestACancelledRunMovesNoValve:
     """Port addressing walks the cascade valve by valve, so a cancel can land
     between two moves. Each move checks the run's signal before it sends, and
-    every wait on the way through takes it -- on hardware the firmware retries
-    a rotary move around a 2 s poll, so waiting one out would hold the abort
-    for seconds.
-    """
+    every wait on the way through takes it (see wait_for_completion for why
+    waiting one out is expensive)."""
 
     @pytest.fixture
     def system_and_commands(self, fixtures_dir):
@@ -143,9 +141,8 @@ class TestACancelledRunMovesNoValve:
                 sent.append(args)
             return original(command, *args)
 
+        # Every valve holds this same controller, so one patch covers them all.
         system.fc.send_command = send_command
-        for valve in system.valves:
-            valve.fc = system.fc
         return system, control, sent
 
     def test_a_cancelled_run_sends_no_command_at_all(self, system_and_commands):

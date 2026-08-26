@@ -29,8 +29,6 @@ class SelectorValve():
             run_control.check()
         _logger.debug("Valve %s: open port %s", self.id, port)
         self.fc.send_command(CMD_SET.SET_ROTARY_VALVE, self.id, port)
-        # Interruptible on the run's path: a move the firmware retries around
-        # its 2 s poll would otherwise hold an abort for seconds.
         self.fc.wait_for_completion(run_control=run_control)
         current_position = self.get_current_position()
         if current_position != port:
@@ -67,9 +65,6 @@ class SelectorValveSystem():
         return name_mapping.get('port_' + str(port_index))
 
     def open_port(self, port_index):
-        # No motion on a cancelled run -- every valve.open below checks the
-        # signal before it sends, so a cancel landing anywhere in the cascade
-        # stops it there.
         if not 1 <= port_index <= self.available_port_number:
             # This used to be a silent return, which left whatever port was
             # last open selected -- the draw then pulled the wrong reagent
@@ -90,8 +85,9 @@ class SelectorValveSystem():
                 return
 
         # If we get here, it's in the last valve
+        # No trailing wait: open() has already waited for this move and read
+        # the position back.
         self.valves[-1].open(port_index - ports_processed, self.run_control)
-        self.fc.wait_for_completion(run_control=self.run_control)
         self.current_port = port_index
         return
 
