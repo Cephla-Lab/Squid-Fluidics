@@ -1001,23 +1001,25 @@ class FluidControllerSimulation(PacketSubscribers):
     def close(self):
         pass
 
+    # About what a real command takes on the wire. Spent in the wait, not in
+    # the send, so the simulation blocks where the real controller does.
+    COMMAND_SECONDS = 1
+
     def send_command(self, command, *args):
-        sleep(1)
         if command == CMD_SET.SET_ROTARY_VALVE:
             self.data['selector_valves_pos'][args[0]] = args[1]
-        return
 
     def send_command_blocking(self, command, *args, timeout=30, run_control=None):
-        sleep(2)
-        if command == CMD_SET.SET_ROTARY_VALVE:
-            self.data['selector_valves_pos'][args[0]] = args[1]
-        return
+        self.send_command(command, *args)
+        return self.wait_for_completion(timeout=timeout, run_control=run_control)
 
     def wait_for_completion(self, timeout=30, run_control=None):
-        # Nothing to wait for, but a cancelled run still raises where the real
-        # controller's poll would: the simulation must not let an operation
-        # carry on past a point the hardware would have refused.
-        if run_control is not None:
+        """Where a simulated command spends its time, as on hardware -- so a
+        cancelled run raises here, where the real controller's poll would,
+        rather than after a sleep nothing can interrupt."""
+        if run_control is None:
+            sleep(self.COMMAND_SECONDS)
+        elif run_control.wait(self.COMMAND_SECONDS):
             run_control.check()
 
     def get_mcu_status(self):

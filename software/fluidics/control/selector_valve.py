@@ -22,11 +22,15 @@ class SelectorValve():
         _logger.info("Selector valve id = %s initialized.", valve_id)
 
     def open(self, port, run_control=None):
+        # Checked here rather than once per cascade: a cancel landing between
+        # two moves would otherwise still send this one. Homing at
+        # construction passes no signal -- there is no run yet.
+        if run_control is not None:
+            run_control.check()
         _logger.debug("Valve %s: open port %s", self.id, port)
         self.fc.send_command(CMD_SET.SET_ROTARY_VALVE, self.id, port)
         # Interruptible on the run's path: a move the firmware retries around
-        # its 2 s poll would otherwise hold an abort for seconds. Homing at
-        # construction passes nothing -- there is no run yet.
+        # its 2 s poll would otherwise hold an abort for seconds.
         self.fc.wait_for_completion(run_control=run_control)
         current_position = self.get_current_position()
         if current_position != port:
@@ -63,11 +67,9 @@ class SelectorValveSystem():
         return name_mapping.get('port_' + str(port_index))
 
     def open_port(self, port_index):
-        # No motion on a cancelled run: this is the last driver call that
-        # started one without checking, and the operations sit between valve
-        # moves and pump chains often enough that a cancel would otherwise
-        # rotate a valve on its way out.
-        self.run_control.check()
+        # No motion on a cancelled run -- every valve.open below checks the
+        # signal before it sends, so a cancel landing anywhere in the cascade
+        # stops it there.
         if not 1 <= port_index <= self.available_port_number:
             # This used to be a silent return, which left whatever port was
             # last open selected -- the draw then pulled the wrong reagent

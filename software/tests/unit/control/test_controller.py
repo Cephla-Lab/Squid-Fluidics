@@ -88,7 +88,7 @@ class TestRawToPsi:
         assert result == pytest.approx(0.0, abs=0.01)
 
 
-from fluidics.control.controller import FluidController
+from fluidics.control.controller import FluidController, FluidControllerSimulation
 from fluidics.control._def import COMMAND_STATUS
 
 
@@ -781,3 +781,30 @@ class TestPublishStatusSetsRecordedData:
         fc._publish_status(parsed)
 
         assert fc.recorded_data == parsed
+
+
+class TestTheSimulationRefusesWhereTheRealControllerWould:
+    """The simulation spends a command's time in wait_for_completion, as the
+    real controller does, and raises there on a cancelled run. Pinned directly
+    rather than through a caller: every caller now checks the signal itself
+    before sending, so nothing else would notice if the simulation stopped
+    refusing -- and a simulated operation would carry on past a point the
+    hardware would have refused."""
+
+    def test_a_cancelled_run_raises_out_of_the_wait(self):
+        fc = FluidControllerSimulation(serial_number="test")
+        control = RunControl()
+        control.cancel()
+        with pytest.raises(AbortRequested):
+            fc.wait_for_completion(run_control=control)
+
+    def test_send_command_blocking_waits_through_the_same_path(self):
+        fc = FluidControllerSimulation(serial_number="test")
+        control = RunControl()
+        control.cancel()
+        with pytest.raises(AbortRequested):
+            fc.send_command_blocking(CMD_SET.CLEAR, run_control=control)
+
+    def test_an_uncancelled_run_waits_and_returns(self):
+        fc = FluidControllerSimulation(serial_number="test")
+        fc.wait_for_completion(run_control=RunControl())
