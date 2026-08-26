@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from tests.conftest import SETTLE
+from ..conftest import SETTLE
 from fluidics.errors import (AbortRequested, Cancelled, FluidicsError,
                              OperationError, RunControl, SafetyFault)
 
@@ -251,10 +251,12 @@ class TestWhenHeld:
 
         finished, error = run_in_background(gate)
         deadline = time.monotonic() + 2
-        while events != ["hold"] and time.monotonic() < deadline:
+        # Wait for the park itself, not for the hook: on_hold() runs before the
+        # park is counted, so seeing the hook does not yet mean at_rest.
+        while not control.at_rest and time.monotonic() < deadline:
             time.sleep(0.005)
+        assert control.at_rest, "the run never parked"
         assert events == ["hold"], events
-        assert control.at_rest, "the hold hook ran but the park was not counted"
         control.resume()
         assert finished.wait(2)
         assert events == ["hold", "release"] and not error
