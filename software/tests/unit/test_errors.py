@@ -87,3 +87,93 @@ class TestRunControl:
         threading.Timer(0.05, control.cancel).start()
         assert control.wait(3) is True
         assert time.monotonic() - started < 1
+
+
+class TestPause:
+    """The gate half. Cancel latches and raises; pause holds and never does.
+    They share an object because every wait must answer to both -- an Abort
+    pressed while paused has to unwind rather than deadlock.
+    """
+
+    def test_a_fresh_control_is_running(self):
+        control = RunControl()
+        assert not control.paused
+        control.checkpoint()          # returns at once
+
+    def test_pause_then_resume(self):
+        control = RunControl()
+        assert control.pause() is True
+        assert control.paused
+        assert control.pause() is False        # already paused
+        assert control.resume() is True
+        assert not control.paused
+        assert control.resume() is False       # already running
+
+    def test_a_cancelled_run_cannot_be_paused(self):
+        """The gate must never close on a thread that is unwinding."""
+        control = RunControl()
+        control.cancel()
+        assert control.pause() is False
+        assert not control.paused
+
+    def test_reset_clears_pause_too(self):
+        """A run never starts already stopped."""
+        control = RunControl()
+        control.pause()
+        control.reset()
+        assert not control.paused
+        control.checkpoint()
+
+    def test_checkpoint_holds_until_resume(self, real_clock, holds_while_paused):
+        control = RunControl()
+        holds_while_paused(control, control.checkpoint)
+
+    def test_a_cancel_opens_the_gate_and_raises(self, real_clock):
+        """Abort while paused: the operator must not have to resume first."""
+        control = RunControl()
+        control.pause()
+        threading.Timer(0.05, control.cancel).start()
+        with pytest.raises(AbortRequested):
+            control.checkpoint()
+        assert not control.paused
+
+    def test_a_cancelled_run_never_holds_at_the_gate(self):
+        control = RunControl()
+        control.pause()
+        control.cancel()
+        with pytest.raises(AbortRequested):
+            control.checkpoint()      # would deadlock if the gate stayed shut
+
+    def test_run_for_returns_early_when_the_run_is_paused(self, real_clock):
+        control = RunControl()
+        control.pause()
+        assert control.run_for(30) == 0.0
+
+    def test_run_for_reports_the_time_it_spent(self, real_clock):
+        control = RunControl()
+        assert control.run_for(0.05) == pytest.approx(0.05, abs=0.03)
+
+    def test_delay_does_not_count_paused_time(self, real_clock):
+        """The point of pause: an incubation held for a coffee break resumes
+        with its remaining time, it does not expire during the break."""
+        control = RunControl()
+        control.pause()
+        threading.Timer(0.15, control.resume).start()
+        started = time.monotonic()
+        control.delay(0.05)
+        assert time.monotonic() - started >= 0.19
+
+    def test_delay_raises_when_the_run_is_cancelled(self, real_clock):
+        control = RunControl()
+        threading.Timer(0.05, control.cancel).start()
+        with pytest.raises(AbortRequested):
+            control.delay(30)
+
+    def test_wait_ignores_pause(self, real_clock):
+        """Hardware polls must not stop: a command already in flight has to be
+        waited out whether or not the operator has paused."""
+        control = RunControl()
+        control.pause()
+        started = time.monotonic()
+        assert control.wait(0.05) is False
+        assert time.monotonic() - started >= 0.04

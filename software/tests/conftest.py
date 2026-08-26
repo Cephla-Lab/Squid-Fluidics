@@ -30,6 +30,7 @@ def fixtures_dir():
 # Captured at import, before _fast_clock patches them.
 _pristine_wait = threading.Event.wait
 _pristine_sleep = _time.sleep
+_pristine_time = _time.time
 
 
 @pytest.fixture
@@ -42,6 +43,9 @@ def real_clock(monkeypatch):
     """
     monkeypatch.setattr(threading.Event, "wait", _pristine_wait)
     monkeypatch.setattr("time.sleep", _pristine_sleep)
+    # time.time too, or code that measures how long a wait took (RunControl
+    # .run_for) reads a frozen clock, concludes no time passed, and loops.
+    monkeypatch.setattr("time.time", _pristine_time)
 
 
 @pytest.fixture
@@ -92,17 +96,47 @@ def dispenses(chain):
 
 
 @pytest.fixture
+def holds_while_paused():
+    """Assert a call blocks while the run is paused and completes on resume.
+
+    Needs the real clock: the point is that time passes and the call does not
+    return. Ask for `real_clock` alongside it.
+    """
+    def _check(control, call, settle=0.05):
+        control.pause()
+        finished = threading.Event()
+
+        def run():
+            call()
+            finished.set()
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        assert not finished.wait(settle), "the call ran on through the pause"
+        control.resume()
+        assert finished.wait(2), "the call did not finish after the resume"
+        thread.join(2)
+
+    return _check
+
+
+@pytest.fixture
 def cancel_during_wait():
     """Cancel a RunControl from inside its own wait -- the shape of an abort
-    landing mid-incubation or mid-aspiration."""
+    landing mid-incubation or mid-aspiration.
+
+    Both kinds are wrapped: the cancellation-only wait hardware polls sit in,
+    and run_for, the running-time one behind delay() and the drain pump.
+    """
     def _hook(control):
-        original_wait = control.wait
+        for name in ("wait", "run_for"):
+            original = getattr(control, name)
 
-        def wait(timeout):
-            control.cancel()
-            return original_wait(timeout)
+            def wrapped(timeout, original=original):
+                control.cancel()
+                return original(timeout)
 
-        control.wait = wait
+            setattr(control, name, wrapped)
 
     return _hook
 

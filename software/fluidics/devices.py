@@ -101,6 +101,21 @@ class DeviceSet:
         anything else uses the devices (the GUI's manual tab)."""
         self.run_control.reset()
 
+    def pause(self):
+        """Hold the run at the next gate: the move in flight finishes, and
+        nothing new starts until resume(). No device I/O on this thread --
+        each device holds itself, on the thread that owns it."""
+        if self.run_control.pause():
+            _logger.info("Pause requested; the run will hold after the move in flight.")
+            return True
+        return False
+
+    def resume(self):
+        if self.run_control.resume():
+            _logger.info("Resumed.")
+            return True
+        return False
+
     def make_safe(self):
         """Leave nothing running once a run has ended early -- abort or failure
         alike; the failure is the unattended case. Halts the syringe pump

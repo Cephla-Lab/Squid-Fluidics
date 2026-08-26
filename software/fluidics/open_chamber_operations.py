@@ -179,7 +179,7 @@ class OpenChamberOperations():
                 self._execute_under_drain()
             # On the run's signal, so a cancel landing in this settle wait
             # raises out of the operation instead of returning normally.
-            self.run_control.sleep(1)
+            self.run_control.delay(1)
         except Cancelled:
             raise
         except Exception as e:

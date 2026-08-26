@@ -210,3 +210,33 @@ class TestTheCancelPathOnTheRealPump:
         assert reads == [True]
         assert pump.chained_volume == 0
         assert "unreadable" in caplog.text
+
+
+class TestPauseHoldsTheNextChain:
+    """A paused run holds before a chain is dispatched, so the move already in
+    flight finishes -- the pause takes hold at the chain boundary."""
+
+    def test_execute_holds_while_paused_and_runs_on_resume(
+            self, real_clock, holds_while_paused):
+        pump = _pump()
+        dispatched = []
+        pump.wait_for_stop = lambda t=0: dispatched.append(t)
+        holds_while_paused(pump.run_control, pump.execute)
+        assert dispatched, "the chain never ran after the resume"
+
+    def test_a_move_in_flight_is_not_held(self, real_clock):
+        """wait_for_stop answers to cancellation only: a plunger that is
+        already moving must be waited out, not abandoned mid-stroke."""
+        pump = _pump()
+        pump.run_control.pause()
+        started = time.monotonic()
+        pump.wait_for_stop(0.05)
+        assert time.monotonic() - started >= 0.04
+
+    def test_an_abort_while_held_unwinds(self):
+        """No resume needed: the cancel opens the gate on its way past."""
+        pump = _pump()
+        pump.run_control.pause()
+        pump.run_control.cancel()
+        with pytest.raises(AbortRequested):
+            pump.execute()

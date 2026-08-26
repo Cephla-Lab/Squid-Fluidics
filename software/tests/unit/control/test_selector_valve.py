@@ -1,4 +1,7 @@
 # tests/unit/control/test_selector_valve.py
+import threading
+import time
+
 import pytest
 
 from fluidics.control._def import CMD_SET
@@ -169,3 +172,16 @@ class TestACancelledRunMovesNoValve:
         with pytest.raises(AbortRequested):
             system.open_port(28)
         assert len(sent) == 1, "a cancelled run moved another valve"
+
+
+class TestAPausedRunMovesNoValve:
+    def test_the_move_waits_for_the_resume(self, fixtures_dir, real_clock,
+                                            holds_while_paused):
+        """The valve in flight finishes; the next one holds at the gate."""
+        control = RunControl()
+        system = _make_valve_system(fixtures_dir / "flow_cell_config.yaml", control)
+        # Under the real clock the simulated move would take its full second;
+        # what this pins is the gate, not the move.
+        system.fc.COMMAND_SECONDS = 0
+        holds_while_paused(control, lambda: system.open_port(1))
+        assert system.current_port == 1

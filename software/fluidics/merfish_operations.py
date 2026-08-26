@@ -135,7 +135,7 @@ class MERFISHOperations():
                     # So we wait a second here for the flow to stabilize -- on
                     # the run's signal, so a cancel raises out of it rather
                     # than being noticed a second later.
-                    self.run_control.sleep(1)
+                    self.run_control.delay(1)
 
             self.sv.open_port(port)
             self.sp.extract(self.extract_port, volume, speed_code)

@@ -20,14 +20,16 @@ def set_temperature(tc, target, run_control):
         _logger.warning("No temperature controller found. Skipping temperature control sequence.")
         return
 
-    # A run that is over sets no new target.
-    run_control.check()
+    # A run that is over sets no new target, and a paused one waits here.
+    run_control.checkpoint()
     for channel in range(1, tc.channels + 1):
         tc.set_target_temperature(channel, target)
 
     start_time = time()
     while True:
-        run_control.sleep(1)
+        # Running time: a pause stops the stabilization clock too, so a run
+        # held for ten minutes does not time out waiting for temperature.
+        run_control.delay(1)
         actuals = [tc.get_actual_temperature(c) for c in range(1, tc.channels + 1)]
         if all(abs(t - target) <= tc.tolerance_celsius for t in actuals):
             return

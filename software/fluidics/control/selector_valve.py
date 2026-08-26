@@ -26,7 +26,7 @@ class SelectorValve():
         # two moves would otherwise still send this one. Homing at
         # construction passes no signal -- there is no run yet.
         if run_control is not None:
-            run_control.check()
+            run_control.checkpoint()
         _logger.debug("Valve %s: open port %s", self.id, port)
         self.fc.send_command(CMD_SET.SET_ROTARY_VALVE, self.id, port)
         self.fc.wait_for_completion(run_control=run_control)

@@ -1,3 +1,5 @@
+import time
+
 import pytest
 
 from fluidics.control.temperature_controller import TCMControllerSimulation
@@ -50,6 +52,22 @@ class TestSetTemperature:
         tc = _StuckController(channels=1, stabilization_timeout_seconds=5)
         with pytest.raises(OperationError, match="failed to stabilize"):
             set_temperature(tc, 50.0, control)
+
+    def test_the_stabilization_clock_is_running_time(self, control):
+        """A run held for ten minutes must not time out waiting for the
+        chamber to reach temperature: the wait is spent in running time, so a
+        pause stops this clock the way it stops an incubation."""
+        tc = _StuckController(channels=1, stabilization_timeout_seconds=5)
+        spent = []
+
+        def delay(seconds):
+            spent.append(seconds)
+            time.sleep(seconds)        # the fake clock advances; a pause would not
+
+        control.delay = delay
+        with pytest.raises(OperationError, match="failed to stabilize"):
+            set_temperature(tc, 50.0, control)
+        assert spent and set(spent) == {1}, spent
 
     def test_a_cancelled_run_raises_before_it_writes_a_target(self, control):
         """Not a silent return, and not after setting a target on a run that
