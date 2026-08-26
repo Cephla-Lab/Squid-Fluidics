@@ -463,6 +463,11 @@ class SyringePumpSimulation(SpeedCodes, Interruptible):
         self.plunger_pos = self._held_ul / self.volume
         return self.plunger_pos
 
+    def get_current_volume(self):
+        # The held volume itself, not volume * (held / volume): the round trip
+        # turns 2800 into 2800.0000000000005 and a test's == into approx.
+        return self._held_ul
+
     def _estimate(self, op):
         return self.ESTIMATE_SECONDS
 
