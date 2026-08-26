@@ -220,6 +220,66 @@ class TestNoHold:
         holds_while_paused(control, control.checkpoint)
 
 
+class TestAtRest:
+    """"Asked to pause" and "actually stopped" are different moments, and the
+    GUI shows the difference. Composed here so everything reporting a pause
+    agrees."""
+
+    def test_a_running_control_is_not_at_rest(self):
+        assert not RunControl().at_rest
+
+    def test_a_gate_the_run_walks_through_is_never_counted(self):
+        """The gate is passed on every chain, valve move and drain start. If
+        each pass counted, another thread sampling `holding` mid-pass would
+        see a run going full tilt as a stopped one -- and the GUI would tell
+        the operator no liquid was moving.
+
+        Sampled from inside the gate, because that is the only place the
+        difference shows: a pass that counts increments and decrements within
+        the one call.
+        """
+        control = RunControl()
+        inside = []
+        waiting = control._running.wait
+
+        def wait(*args):
+            inside.append(control.holding)
+            return waiting(*args)
+
+        control._running.wait = wait
+        control.checkpoint()
+        assert inside == [0], "a gate the run walked straight through was counted"
+        assert control.holding == 0 and not control.at_rest
+
+    def test_a_pause_alone_is_not_yet_at_rest(self):
+        """The move in flight keeps going until it reaches a gate."""
+        control = RunControl()
+        control.pause()
+        assert control.paused and not control.at_rest
+
+    def test_a_parked_thread_is_at_rest(self, real_clock, run_in_background):
+        control = RunControl()
+        control.pause()
+        finished, _ = run_in_background(control.checkpoint)
+        deadline = time.monotonic() + 2
+        while not control.at_rest and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert control.at_rest
+        control.resume()
+        assert finished.wait(2)
+        assert not control.at_rest
+
+    def test_a_resumed_run_is_not_at_rest_even_before_the_thread_wakes(self):
+        """at_rest is paused *and* parked, so the moment the operator resumes
+        the run counts as going again -- the label must not keep saying
+        "paused" while a thread is on its way out of the gate."""
+        control = RunControl()
+        control.pause()
+        control._holding = 1          # a thread still inside the gate
+        control.resume()
+        assert not control.at_rest
+
+
 class TestHolding:
     """"Pause requested" and "the run has come to rest" are different moments:
     a move in flight keeps going until it reaches a gate. The GUI tells the

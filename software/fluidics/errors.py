@@ -171,11 +171,27 @@ class RunControl:
     def holding(self):
         """How many threads are parked at a gate right now.
 
-        The difference between "pause requested" and "the run has stopped":
-        a move in flight keeps running until it reaches a gate, so the two
-        are not the same moment, and the operator wants to be told which.
+        Only threads that actually stopped: a gate the run walks straight
+        through does not count, or a running run would read as a stopped one.
+        Anything else that learns to hold a run -- a driver that parks a move
+        rather than finishing it -- has to be counted here too, or `at_rest`
+        will say the run is still moving when it is not.
         """
         return self._holding
+
+    @property
+    def at_rest(self):
+        """Whether the run has actually come to a stop, as against having been
+        asked to.
+
+        The two are different moments -- a move in flight keeps going until it
+        reaches a gate -- and the operator is owed the difference: "pausing"
+        means liquid may still be moving. Composed here rather than by each
+        caller so that everything reporting a pause agrees, and so a cancel
+        (which clears the pause) cannot leave a caller reading "stopped" off a
+        thread that is on its way out of the gate.
+        """
+        return self._paused and self._holding > 0
 
     @contextlib.contextmanager
     def no_hold(self):
@@ -233,13 +249,19 @@ class RunControl:
         checks -- see there.
         """
         if not self._deferring:
-            with self._lock:
-                self._holding += 1
+            # Counted only if this thread is actually going to stop. Counting
+            # every pass would make a running run look stopped to anyone
+            # reading `holding`, one gate at a time.
+            parked = not self._running.is_set()
+            if parked:
+                with self._lock:
+                    self._holding += 1
             try:
                 self._running.wait()
             finally:
-                with self._lock:
-                    self._holding -= 1
+                if parked:
+                    with self._lock:
+                        self._holding -= 1
         self.check()
 
     def run_for(self, seconds):
