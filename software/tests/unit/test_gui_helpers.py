@@ -468,6 +468,7 @@ class TestPauseControls:
         stub = self._fields(**kwargs)
         stub._pauseState = lambda: gui.SequencesWidget._pauseState(stub)
         stub.updateTimeRemaining = lambda: gui.SequencesWidget.updateTimeRemaining(stub)
+        stub._showTimeRemaining = lambda: gui.SequencesWidget._showTimeRemaining(stub)
         return stub
 
     def test_the_first_press_pauses_and_offers_a_resume(self):
@@ -519,6 +520,16 @@ class TestPauseControls:
         stub.timer = SimpleNamespace(stop=lambda: stopped.append(True))
         gui.SequencesWidget.updateTimeRemaining(stub)
         assert stopped == []
+
+    def test_a_press_costs_the_estimate_nothing(self):
+        """The press refreshes the label; going through the one-second tick to
+        do that would charge a second of the run for every click."""
+        shown = []
+        stub = self.stub(elapsed=10)
+        stub.timeLabel = SimpleNamespace(setText=shown.append)
+        gui.SequencesWidget.pauseSequences(stub)
+        assert stub.elapsed_time == 10
+        assert shown == ["00:01:30 remaining (pausing\u2026)"], shown
 
     def test_a_press_before_the_estimate_arrives_does_not_raise(self):
         """The worker posts the estimate to the event queue, so an operator

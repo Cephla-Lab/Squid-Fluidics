@@ -481,38 +481,49 @@ class SequencesWidget(QWidget):
         self.worker_thread.start()
 
     def updateTimeRemaining(self):
-        """Update the time remaining display and progress bar.
+        """The one-second tick: spend a second, then redraw.
 
         A held run spends no time: the countdown stops with it, the way the
         incubation clock does, or ten minutes of coffee would come off the
         estimate. A pause that has been asked for but not yet reached is
         different -- the move in flight is still running, and still counts.
         """
-        state = self._pauseState()
         if self.total_time is None:
             # The estimate is posted to this thread's event queue, so it can
             # still be pending when the operator presses Pause: the button
             # already says what happened, and the next tick writes the label.
             return
+        state = self._pauseState()
         if state != " (paused)":
             self.elapsed_time += 1  # Add one second
+        self._showTimeRemaining()
+
+        # Only when the run is going: while it is held, or holding, the tick
+        # is what keeps the label honest about which.
+        if self.total_time - self.elapsed_time <= 0 and not state:
+            self.timer.stop()
+
+    def _showTimeRemaining(self):
+        """Draw the label and the bar from the elapsed time as it stands.
+
+        Separate from the tick because it advances the clock: refreshing the
+        label on a Pause click through the tick would charge the estimate a
+        second for every press.
+        """
+        if self.total_time is None:
+            return
         remaining = max(0, self.total_time - self.elapsed_time)
 
         # Update time label
         hours = int(remaining // 3600)
         minutes = int((remaining % 3600) // 60)
         seconds = int(remaining % 60)
-        self.timeLabel.setText(
-            f"{hours:02d}:{minutes:02d}:{seconds:02d} remaining{state}")
-            
+        self.timeLabel.setText(f"{hours:02d}:{minutes:02d}:{seconds:02d} "
+                               f"remaining{self._pauseState()}")
+
         # Update progress bar percentage
         progress = min(100, int((self.elapsed_time / max(self.total_time, 1)) * 100))
         self.progressBar.setValue(progress)
-            
-        # Only when the run is going: while it is held, or holding, the tick
-        # is what keeps the label honest about which.
-        if remaining <= 0 and not state:
-            self.timer.stop()
 
     def event(self, event):
         if event.type() == WorkerEvent.EVENT_TYPE:
@@ -556,8 +567,10 @@ class SequencesWidget(QWidget):
         else:
             self.devices.pause()
             self.pauseButton.setText("Resume")
-        # The label would otherwise wait for the next tick to say anything.
-        self.updateTimeRemaining()
+        # The label would otherwise wait for the next tick to say anything --
+        # and going through the tick would spend a second of the estimate on
+        # every press.
+        self._showTimeRemaining()
 
     def _handle_progress(self, index, sequence_num, status):
         self.sequenceLabel.setText(f"{sequence_num}/{self.total_sequences} sequences")
