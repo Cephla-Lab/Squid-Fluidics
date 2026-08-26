@@ -101,6 +101,16 @@ class DeviceSet:
         anything else uses the devices (the GUI's manual tab)."""
         self.run_control.reset()
 
+    def pause(self):
+        """Hold the run at the next gate: the move in flight finishes, and
+        nothing new starts until resume(). No device I/O on this thread --
+        each device holds itself, on the thread that owns it. RunControl
+        narrates the transition, so a caller reaching past this still logs."""
+        return self.run_control.pause()
+
+    def resume(self):
+        return self.run_control.resume()
+
     def make_safe(self):
         """Leave nothing running once a run has ended early -- abort or failure
         alike; the failure is the unattended case. Halts the syringe pump
@@ -145,8 +155,9 @@ class DeviceSet:
             empty_syringe = self.config.application == "Flow Cell"
 
         # One call per step, so a failure skips nothing but itself: one dead
-        # sensor must not strand its siblings. The cancellation is cleared
-        # before the park-to-waste close, which is a move of its own.
+        # sensor must not strand its siblings. The reset comes before the
+        # park-to-waste close, which is a move of its own: that move passes a
+        # gate, so on a paused session it would hold here forever.
         steps = []
         if self.temperature_controller is not None:
             steps.append(self.temperature_controller.close)

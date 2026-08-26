@@ -79,7 +79,23 @@ class ExperimentWorker:
         return total_time, total_sequences
 
     def wait_for_incubation(self, time_minutes):
-        self.run_control.sleep(time_minutes * 60)
+        # Running time: a pause stops the incubation clock and the remainder
+        # resumes with it, which is most of what pause is for.
+        self.run_control.delay(time_minutes * 60)
+
+    def _hold_if_paused(self, index, sequence_number, tag):
+        """Park between sequences while the run is paused, saying so.
+
+        Reporting is best-effort: a pause arriving just after the check still
+        holds the run at the gate, it is simply not narrated. Whoever asked
+        for the pause already knows they asked.
+        """
+        if self.run_control.paused:
+            _logger.info("%s: paused", tag)
+            self._call_callback('update_progress', index, sequence_number, "Paused")
+        # Unconditional: a pause arriving after that read still holds here,
+        # at the boundary, rather than inside the sequence about to start.
+        self.run_control.checkpoint()
 
     def _end_early(self, message):
         """Quiet the rig, then report why it stopped.
@@ -108,9 +124,10 @@ class ExperimentWorker:
                     current_sequence += 1
                     tag = f"Sequence {current_sequence}/{self.n_sequences} ({label})"
                     # A cancel that landed between sequences must not start
-                    # the next one. Inside one, the device that was waiting
-                    # raises the cause itself.
-                    self.run_control.check()
+                    # the next one, and a pause holds here -- the sequence
+                    # before it finished, this one has not begun. Inside a
+                    # sequence, the device that was waiting answers for both.
+                    self._hold_if_paused(index, current_sequence, tag)
                     _logger.info("%s: started", tag)
                     self._call_callback('update_progress', index, current_sequence, "Started")
                     self.experiment_ops.process_sequence(seq)

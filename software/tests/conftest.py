@@ -30,6 +30,8 @@ def fixtures_dir():
 # Captured at import, before _fast_clock patches them.
 _pristine_wait = threading.Event.wait
 _pristine_sleep = _time.sleep
+_pristine_time = _time.time
+_pristine_monotonic = _time.monotonic
 
 
 @pytest.fixture
@@ -42,6 +44,10 @@ def real_clock(monkeypatch):
     """
     monkeypatch.setattr(threading.Event, "wait", _pristine_wait)
     monkeypatch.setattr("time.sleep", _pristine_sleep)
+    # Both clocks too, or code that measures how long a wait took (RunControl
+    # .run_for) reads a frozen clock, concludes no time passed, and loops.
+    monkeypatch.setattr("time.time", _pristine_time)
+    monkeypatch.setattr("time.monotonic", _pristine_monotonic)
 
 
 @pytest.fixture
@@ -91,25 +97,87 @@ def dispenses(chain):
     return any(op[0] == "dispense" for op in chain)
 
 
+# Long enough to outlast thread start-up, short enough not to pad the suite:
+# the gates under test resolve in sub-microseconds, so this only has to be
+# unambiguously longer than "immediately".
+SETTLE = 0.02
+
+
+@pytest.fixture
+def run_in_background():
+    """Run `call` on a daemon thread. Returns (finished, error): an Event set
+    when it returns or raises, and a list that will hold the exception.
+
+    Recorded rather than swallowed -- a call that raises would otherwise look
+    like a call that never finished.
+    """
+    def _run(call):
+        finished = threading.Event()
+        error = []
+
+        def run():
+            try:
+                call()
+            except BaseException as e:
+                error.append(e)
+            finally:
+                finished.set()
+
+        threading.Thread(target=run, daemon=True).start()
+        return finished, error
+
+    return _run
+
+
+@pytest.fixture
+def holds_while_paused(real_clock, run_in_background):
+    """Assert a call blocks while the run is paused and completes on resume.
+
+    Real clock by construction: the point is that time passes and the call
+    does not return. `while_held` runs once the call is confirmed parked.
+    """
+    def _check(control, call, while_held=None):
+        control.pause()
+        finished, error = run_in_background(call)
+        assert not finished.wait(SETTLE), f"the call ran on through the pause: {error}"
+        if while_held is not None:
+            while_held()
+        control.resume()
+        assert finished.wait(2), "the call did not finish after the resume"
+        assert not error, error
+
+    return _check
+
+
 @pytest.fixture
 def cancel_during_wait():
     """Cancel a RunControl from inside its own wait -- the shape of an abort
-    landing mid-incubation or mid-aspiration."""
+    landing mid-incubation or mid-aspiration.
+
+    Both kinds are wrapped: the cancellation-only wait hardware polls sit in,
+    and run_for, the running-time one behind delay() and the drain pump.
+    """
     def _hook(control):
-        original_wait = control.wait
+        original_wait, original_run_for = control.wait, control.run_for
 
         def wait(timeout):
             control.cancel()
             return original_wait(timeout)
 
+        def run_for(seconds):
+            control.cancel()
+            return original_run_for(seconds)
+
         control.wait = wait
+        control.run_for = run_for
 
     return _hook
 
 
 @pytest.fixture(autouse=True)
 def _fast_clock(monkeypatch):
-    """Patch time.sleep, time.time, and Event.wait so tests run instantly.
+    """Patch time.sleep, time.time, time.monotonic and Event.wait so tests
+    run instantly.
 
     sleep() advances the fake clock instead of blocking.
     time() returns the fake clock value, so timeouts expire immediately.
@@ -144,17 +212,19 @@ def _fast_clock(monkeypatch):
         fake_time[0] += timeout
         return self.is_set()
 
-    # Patch the time module itself
+    # Patch the time module itself. monotonic moves with the same fake clock:
+    # durations are measured off it (RunControl.run_for), so a test that
+    # advances one clock and reads the other would see no time pass at all.
     monkeypatch.setattr("time.sleep", fake_sleep)
     monkeypatch.setattr("time.time", fake_time_fn)
+    monkeypatch.setattr("time.monotonic", fake_time_fn)
 
     # Patch modules that use 'from time import sleep' or 'from time import time'
-    # The operations' settle waits and sequence_utils' stabilization wait go
-    # through RunControl.sleep -> Event.wait, patched below; none of those
-    # modules holds a sleep of its own any more.
+    # No module-level patches for the operations or sequence_utils: their
+    # waits go through RunControl (Event.wait, patched below) and they read
+    # the clock through the time module, patched above.
     monkeypatch.setattr("fluidics.control.controller.sleep", fake_sleep)
     monkeypatch.setattr("fluidics.control.controller.time", fake_time_fn)
-    monkeypatch.setattr("fluidics.sequence_utils.time", fake_time_fn, raising=False)
 
     # Patch threading.Event.wait (used by DiscPump.aspirate)
     monkeypatch.setattr(threading.Event, "wait", fake_event_wait)

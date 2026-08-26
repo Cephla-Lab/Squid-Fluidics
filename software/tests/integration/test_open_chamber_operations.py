@@ -1,4 +1,6 @@
 # tests/integration/test_open_chamber_operations.py
+import time
+
 import pytest
 
 from fluidics.errors import AbortRequested
@@ -224,3 +226,54 @@ def test_an_abort_on_the_pump_reaches_the_drain_pump(open_chamber_rig):
     sp.run_control.cancel()
     with pytest.raises(AbortRequested):
         ops.dp.aspirate(20)
+
+
+class TestPauseAndTheDrainPump:
+    """_execute_under_drain powers the drain, then dispatches the chain --
+    whose own gate sits in between. A pause landing there must not park the
+    run: the drain would pull with no inflow for the length of the hold."""
+
+    @pytest.fixture
+    def instant(self, open_chamber_rig):
+        ops, sp = open_chamber_rig
+        ops.sv.fc.COMMAND_SECONDS = 0
+        sp.wait_for_stop = lambda t=0: None
+        return ops, sp
+
+    def test_a_pause_inside_the_region_waits_until_the_drain_is_off(
+            self, instant, real_clock, run_in_background):
+        ops, sp = instant
+        powered = []
+        original = ops.dp._set_power
+
+        def _set_power(power):
+            powered.append(power)
+            if len(powered) == 1:
+                ops.run_control.pause()    # drain on, chain not yet dispatched
+            original(power)
+
+        ops.dp._set_power = _set_power
+        finished, error = run_in_background(lambda: ops.process_sequence(
+            {"type": "wash_constant_flow", "fluidic_port": 6,
+                                  "flow_rate": 1000, "volume": 1000}))
+        # It parks later, at the settle wait -- but not with the drain pulling.
+        deadline = time.monotonic() + 2
+        while 0 not in powered and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert 0 in powered, "the run parked with the drain still pulling"
+        ops.run_control.resume()
+        assert finished.wait(2)
+        assert not error, error
+
+    def test_a_pause_before_the_region_parks_before_the_drain_powers(
+            self, instant, holds_while_paused):
+        ops, sp = instant
+        powered = []
+        ops.dp._set_power = lambda power: powered.append(power)
+        sp.reset_chain()
+
+        def nothing_is_powered():
+            assert powered == [], "the drain powered before the gate"
+
+        holds_while_paused(ops.run_control, ops._execute_under_drain,
+                           while_held=nothing_is_powered)

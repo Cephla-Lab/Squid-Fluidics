@@ -40,10 +40,15 @@ class MERFISHOperations():
         available codes, so a sequence asking for 480 uL/min gets 500, and
         measuring against 480 would bias the whole band by the rounding.
         """
+        # A pause parks here, before the sensors are armed. Not inside: the
+        # sensor publishes on every MCU packet whether the pump is moving or
+        # not, so a parked run would read as no flow and a `stop` sensor would
+        # cancel it with a fault nobody caused.
+        self.run_control.checkpoint()
         with DrawGuard(self.flow_sensors,
                        expected_ul_min=self.sp.get_flow_rate(speed_code),
                        run_control=self.run_control,
-                       log=self.on_warning):
+                       log=self.on_warning), self.run_control.no_hold():
             self.sp.execute()
 
     def process_sequence(self, sequence):
@@ -135,7 +140,7 @@ class MERFISHOperations():
                     # So we wait a second here for the flow to stabilize -- on
                     # the run's signal, so a cancel raises out of it rather
                     # than being noticed a second later.
-                    self.run_control.sleep(1)
+                    self.run_control.delay(1)
 
             self.sv.open_port(port)
             self.sp.extract(self.extract_port, volume, speed_code)

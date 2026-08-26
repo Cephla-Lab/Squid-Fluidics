@@ -260,3 +260,57 @@ class TestTheSharedSignal:
         worker.run()
         assert seen == [False]
         assert worker.finished.is_set()
+
+
+class TestPause:
+    """The worker holds between sequences and stops the incubation clock."""
+
+    def test_incubation_is_spent_in_running_time(self):
+        """So a pause stops the clock -- that behaviour is pinned on delay()
+        itself; this pins that the incubation goes through it."""
+        control = RunControl()
+        asked = []
+        control.delay = lambda seconds: asked.append(seconds)
+        ExperimentWorker(RecordingOps(), [FLOW], CONFIG,
+                         run_control=control).wait_for_incubation(30)
+        assert asked == [1800]
+
+    def test_it_holds_between_sequences_and_says_so(self):
+        control = RunControl()
+        events = []
+
+        class PauseAfterFirst(RecordingOps):
+            def process_sequence(self, seq):
+                super().process_sequence(seq)
+                if len(self.processed) == 1:
+                    control.pause()
+
+        def on_progress(index, num, status):
+            events.append((num, status))
+            if status == "Paused":
+                control.resume()      # the operator, once the run has parked
+
+        ops = PauseAfterFirst()
+        worker = ExperimentWorker(ops, [dict(FLOW), dict(FLOW)], CONFIG, callbacks={
+            "update_progress": on_progress,
+        }, run_control=control)
+        worker.run()
+        assert (2, "Paused") in events, events
+        assert events.index((2, "Paused")) < events.index((2, "Started"))
+        assert len(ops.processed) == 2, "the run did not carry on after the resume"
+
+    def test_a_cancel_beats_a_pending_pause(self):
+        """Pause then Abort: the run reports aborted rather than waiting for a
+        resume that is never coming."""
+        control = RunControl()
+
+        class PauseThenAbort(RecordingOps):
+            def process_sequence(self, seq):
+                super().process_sequence(seq)
+                control.pause()
+                control.cancel()      # Abort, while the run is held
+
+        ops = PauseThenAbort()
+        _, events = run_worker([dict(FLOW), dict(FLOW)], ops=ops, run_control=control)
+        assert len(ops.processed) == 1
+        assert any("aborted" in message for message in errors_in(events))

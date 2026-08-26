@@ -1,6 +1,7 @@
 # tests/unit/control/test_disc_pump.py
 """The disc pump's timed aspiration against the run's cancellation signal."""
 
+
 import pytest
 
 from fluidics.control._def import CMD_SET, MCU_CONSTANTS
@@ -33,11 +34,38 @@ def power_commands(pump):
 
 class TestAspirate:
     def test_full_power_for_the_duration_then_off(self, pump):
-        waited = []
-        pump.run_control.wait = lambda seconds: waited.append(seconds) or False
+        spent = []
+        pump.run_control.run_for = lambda seconds: spent.append(seconds) or seconds
         pump.aspirate(20)
-        assert waited == [20]
+        assert spent == [20]
         assert power_commands(pump) == [MCU_CONSTANTS.TTP_MAX_PW, 0]
+
+    def test_a_pause_switches_the_pump_off_and_the_remainder_resumes_with_it(self, pump):
+        """Twenty seconds of aspiration held for a coffee break must not drain
+        the chamber for the length of the break."""
+        control = pump.run_control
+        spent = []
+
+        def run_for(seconds):
+            spent.append(seconds)
+            if len(spent) == 1:
+                control.pause()       # five seconds in, the operator pauses
+                return 5
+            return seconds
+
+        control.run_for = run_for
+        original_checkpoint = control.checkpoint
+
+        def checkpoint():
+            control.resume()          # the operator, once it has switched off
+            original_checkpoint()
+
+        control.checkpoint = checkpoint
+
+        pump.aspirate(20)
+        assert spent == [20, 15]      # the remainder, not the whole twenty
+        assert power_commands(pump) == [MCU_CONSTANTS.TTP_MAX_PW, 0,
+                                        MCU_CONSTANTS.TTP_MAX_PW, 0]
 
     def test_a_cancel_before_it_starts_raises_without_touching_the_pump(self, pump):
         """A pre-tripped signal used to produce a full-power pulse followed at
@@ -64,6 +92,10 @@ class TestStartAndStop:
         with pytest.raises(AbortRequested):
             pump.start(0.3)
         assert power_commands(pump) == []
+
+    def test_start_holds_while_the_run_is_paused(self, pump, holds_while_paused):
+        holds_while_paused(pump.run_control, lambda: pump.start(0.3))
+        assert power_commands(pump) == [0.3 * MCU_CONSTANTS.TTP_MAX_PW]
 
     def test_stop_still_works_on_a_cancelled_run(self, pump):
         """It runs on the unwind path -- the drain's own finally -- and from
