@@ -41,13 +41,14 @@ class MERFISHOperations():
         measuring against 480 would bias the whole band by the rounding.
         """
         # A pause already pending parks here, before the sensors are armed;
-        # one that lands mid-draw stops the pump inside, and the guard knows
-        # to stand down for it (see DrawGuard).
+        # one that lands mid-draw stops the pump inside, and the guard stands
+        # down on the pump's own word for as long as it is not moving.
         self.run_control.checkpoint()
         with DrawGuard(self.flow_sensors,
                        expected_ul_min=self.sp.get_flow_rate(speed_code),
                        run_control=self.run_control,
-                       log=self.on_warning):
+                       log=self.on_warning,
+                       moving=lambda: self.sp.moving):
             self.sp.execute()
 
     def process_sequence(self, sequence):

@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from ..conftest import SETTLE
+from ..conftest import SETTLE, wait_until
 from fluidics.errors import (AbortRequested, Cancelled, FluidicsError,
                              OperationError, RunControl, SafetyFault)
 
@@ -225,14 +225,15 @@ class TestWhenHeld:
         events = []
         region = control.when_held(lambda: events.append("hold"),
                                    lambda: events.append("release"))
-        return control, events, region
-
-    def test_the_hooks_run_around_a_park(self, holds_while_paused):
-        control, events, region = self._hooked()
 
         def gate():
             with region:
                 control.checkpoint()
+
+        return control, events, region, gate
+
+    def test_the_hooks_run_around_a_park(self, holds_while_paused):
+        control, events, region, gate = self._hooked()
 
         def held_so_far():
             assert events == ["hold"]
@@ -240,78 +241,52 @@ class TestWhenHeld:
         holds_while_paused(control, gate, while_held=held_so_far)
         assert events == ["hold", "release"]
 
-    def test_the_hold_hook_runs_before_the_park_and_the_release_after(
-            self, real_clock, run_in_background):
-        control, events, region = self._hooked()
+    def test_the_hold_hook_runs_before_the_park_and_the_release_after(self, parks):
+        control, events, region, gate = self._hooked()
         control.pause()
-
-        def gate():
-            with region:
-                control.checkpoint()
-
-        finished, error = run_in_background(gate)
-        deadline = time.monotonic() + 2
-        # Wait for the park itself, not for the hook: on_hold() runs before the
-        # park is counted, so seeing the hook does not yet mean at_rest.
-        while not control.at_rest and time.monotonic() < deadline:
-            time.sleep(0.005)
-        assert control.at_rest, "the run never parked"
+        finished, error = parks(control, gate)
         assert events == ["hold"], events
         control.resume()
-        assert finished.wait(2)
-        assert events == ["hold", "release"] and not error
+        assert finished.wait(2) and not error, error
+        assert events == ["hold", "release"]
 
     def test_a_gate_the_run_walks_through_runs_no_hooks(self):
-        control, events, region = self._hooked()
-        with region:
-            control.checkpoint()
+        control, events, region, gate = self._hooked()
+        gate()
         assert events == []
 
-    def test_a_cancel_while_parked_skips_the_release(self, real_clock,
-                                                    run_in_background):
+    def test_a_cancel_while_parked_skips_the_release(self, parks):
         """The drain must not come back on for a run that is unwinding."""
-        control, events, region = self._hooked()
+        control, events, region, gate = self._hooked()
         control.pause()
-
-        def gate():
-            with region:
-                control.checkpoint()
-
-        finished, error = run_in_background(gate)
-        deadline = time.monotonic() + 2
-        while events != ["hold"] and time.monotonic() < deadline:
-            time.sleep(0.005)
+        finished, error = parks(control, gate)
         control.cancel()
         assert finished.wait(2)
         assert events == ["hold"]
         assert isinstance(error[0], AbortRequested)
 
-    def test_the_region_ends_and_the_hooks_stop(self, real_clock,
-                                                run_in_background):
-        control, events, region = self._hooked()
+    def test_the_region_ends_and_the_hooks_stop(self, parks):
+        control, events, region, gate = self._hooked()
         with region:
             pass
         control.pause()
-        finished, _ = run_in_background(control.checkpoint)
-        assert not finished.wait(SETTLE)
+        finished, _ = parks(control, control.checkpoint)
         control.resume()
         assert finished.wait(2)
         assert events == []
 
-    def test_the_hooks_are_per_thread(self, real_clock, run_in_background):
+    def test_the_hooks_are_per_thread(self, parks):
         """Another thread's gate parks too, but it is not inside the region
         and must not switch this thread's hardware."""
-        control, events, region = self._hooked()
+        control, events, region, gate = self._hooked()
         control.pause()
         with region:
-            finished, _ = run_in_background(control.checkpoint)
-            assert not finished.wait(SETTLE)
+            finished, _ = parks(control, control.checkpoint)
             control.resume()
             assert finished.wait(2)
         assert events == []
 
-    def test_nested_regions_release_innermost_first(self, real_clock,
-                                                    run_in_background):
+    def test_nested_regions_release_innermost_first(self, parks):
         control = RunControl()
         events = []
         outer = control.when_held(lambda: events.append("hold outer"),
@@ -324,14 +299,38 @@ class TestWhenHeld:
             with outer, inner:
                 control.checkpoint()
 
-        finished, error = run_in_background(gate)
-        deadline = time.monotonic() + 2
-        while len(events) < 2 and time.monotonic() < deadline:
-            time.sleep(0.005)
+        finished, error = parks(control, gate)
         control.resume()
         assert finished.wait(2) and not error
         assert events == ["hold outer", "hold inner",
                           "release inner", "release outer"]
+
+    def test_a_hook_that_gates_does_not_fire_the_hooks_again(self, parks):
+        """The drain's on_release is dp.start(), itself gated. A pause landing
+        inside it must park once, plainly -- not nest a second hold, with a
+        second on_hold and on_release, inside the first."""
+        control = RunControl()
+        events = []
+
+        def on_release():
+            events.append("release")
+            control.pause()          # a second pause lands inside the hook
+            control.checkpoint()     # the hook's own gated call
+
+        region = control.when_held(lambda: events.append("hold"), on_release)
+
+        def gate():
+            with region:
+                control.checkpoint()
+
+        control.pause()
+        finished, error = parks(control, gate)
+        control.resume()
+        assert wait_until(lambda: control.at_rest), "the hook's gate did not park"
+        assert events == ["hold", "release"], "the hooks fired again for the inner park"
+        control.resume()
+        assert finished.wait(2) and not error, error
+        assert events == ["hold", "release"]
 
 
 class TestAtRest:

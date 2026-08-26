@@ -16,15 +16,9 @@ import time
 
 import pytest
 
-from fluidics.control.syringe_pump import SyringePumpSimulation
 from fluidics.errors import AbortRequested, RunControl, SafetyFault
 
-from .pump_helpers import ScriptedSyringe, bare_pump, halt_on_cancel
-
-
-def _pump(**kwargs):
-    return SyringePumpSimulation(sn=None, syringe_ul=5000,
-                                 speed_code_limit=10, waste_port=1, **kwargs)
+from .pump_helpers import ScriptedSyringe, bare_pump, halt_on_cancel, sim_pump as _pump
 
 
 def _real_pump(ready=True):

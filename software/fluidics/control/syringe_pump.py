@@ -4,7 +4,7 @@ import time
 
 import fluidics.control.tecancavro as tecancavro
 
-from ..errors import Cancelled, RunControl
+from ..errors import Cancelled, RunControl, SafetyFault
 from .discovery import find_serial_port
 
 _logger = logging.getLogger(__name__)
@@ -22,12 +22,8 @@ class Interruptible:
         ("dispense_to_waste", speed_code)
     and execute() runs them one at a time, each through the run's gate.
 
-    A cancel -- the operator pressed Abort, or draw protection raised a flow
-    fault -- wakes the thread inside wait_for_stop, which halts the plunger on
-    the thread that owns the port and raises the cause out of execute(), so
-    the operation unwinds instead of returning as if it had finished. The
-    cause latches until RunControl.reset().
-
+    A cancel wakes the thread inside wait_for_stop, which halts the plunger
+    on the thread that owns the port and raises the cause out of execute().
     A pause halts the op in flight the same way, then parks at the gate --
     counted in `holding`, so the GUI's *paused* means what it says -- and
     when the gate opens on a resume re-issues what the op had left. One op
@@ -38,12 +34,17 @@ class Interruptible:
     Shared rather than written twice because the simulation is where these
     semantics get tested -- the real pump needs hardware. Subclasses supply
     the hardware-shaped pieces: halt() and _move_finished() for the plunger,
-    _estimate(op) for what a queued op will take, and _dispatch() /
-    _halted() / _finished() for the three moments of running one.
+    _estimate(op) for what a queued op will take, and _start(op) /
+    _resume(op) to send an op and its remainder; _halted(op) and
+    _finished(op) are theirs to fill in if they keep records.
     """
 
     def _init_run_control(self, run_control=None):
         self.is_busy = False
+        # True from the moment a move is sent until it is halted or has
+        # finished. Cleared *before* a halt is sent, so anything judging the
+        # flow (the DrawGuard) stands down before it decays.
+        self.moving = False
         self.run_control = run_control if run_control is not None else RunControl()
         self._chain = []
 
@@ -76,12 +77,6 @@ class Interruptible:
         step with it."""
         return self._held_after(self._chain, 0)
 
-    def get_time_to_finish(self):
-        return sum(self._estimate(op) for op in self._chain)
-
-    def get_current_volume(self):
-        return self.volume * self.plunger_pos  # ul
-
     @staticmethod
     def _held_after(ops, held_ul):
         """Held volume after running `ops` from `held_ul`."""
@@ -106,6 +101,12 @@ class Interruptible:
         estimated duration does, so there is nothing further to wait for."""
         return True
 
+    def _halted(self, op):
+        """The op was halted for a pause and the plunger has stopped."""
+
+    def _finished(self, op):
+        """The op ran to its end."""
+
     # --- running ---
 
     def execute(self):
@@ -124,17 +125,19 @@ class Interruptible:
                 self._run_op(op)
         finally:
             self.is_busy = False
+            self.moving = False
 
     def _run_op(self, op):
         """Run one op to the end, however many pauses that takes."""
-        target = None
-        while True:
+        self.run_control.checkpoint()
+        estimate = self._start(op)
+        self.moving = True
+        while self.wait_for_stop(estimate):
+            self._halted(op)
             self.run_control.checkpoint()
-            estimate, target = self._dispatch(op, target)
-            if not self.wait_for_stop(estimate):
-                self._finished(op, target)
-                return
-            self._halted(op, target)
+            estimate = self._resume(op)
+            self.moving = True
+        self._finished(op)
 
     def wait_for_stop(self, t=0):
         """Block until the move finishes or the run stops. Returns False when
@@ -150,7 +153,8 @@ class Interruptible:
         """
         stopped = self.run_control.wait_interrupted(t)
         while not stopped and not self._move_finished():
-            stopped = self.run_control.wait_interrupted(0.5)
+            stopped = self.run_control.wait_interrupted(0.2)
+        self.moving = False
         if not stopped:
             return False
         # This also closes the window between the gate in execute() and the
@@ -292,6 +296,9 @@ class SyringePump(SpeedCodes, Interruptible):
         self.plunger_pos = position / self.range
         return self.plunger_pos
 
+    def get_current_volume(self):
+        return self.volume * self.plunger_pos  # ul
+
     def reset_chain(self):
         with self._serial_lock:
             self.syringe.resetChain()
@@ -300,9 +307,16 @@ class SyringePump(SpeedCodes, Interruptible):
     # --- the ops, in the driver's terms ---
 
     def _estimate(self, op):
-        """The driver's own time estimate for `op`: built on its chain for the
-        arithmetic and discarded, since ops are dispatched one at a time from
-        execute() rather than as the chain the driver was building."""
+        """The driver's own time estimate for `op`, built on its chain and
+        discarded, since ops are dispatched one at a time from execute().
+
+        resetChain() restores the driver's chain state from its last real
+        reading, so each op is timed from the plunger's current position
+        rather than from the end of the ops queued before it -- a dump queued
+        after an extract is timed as if from before the extract. Only the
+        manual tab's progress bar and the first wait's length read this;
+        _move_finished() is what ends a move.
+        """
         with self._serial_lock:
             self._build(op)
             t = self.syringe.exec_time
@@ -321,54 +335,51 @@ class SyringePump(SpeedCodes, Interruptible):
         else:
             self.syringe.dispenseToWaste(retain_port=False)
 
-    def _target(self, op, start):
-        """Where the plunger will be when `op` is done, in the driver's steps,
-        from a real reading of where it is now."""
-        kind = op[0]
-        if kind == "dispense_to_waste":
-            return 0
-        steps = self.syringe._ulToSteps(op[2])
-        return start + steps if kind == "extract" else start - steps
-
-    def _port(self, op):
-        return self.syringe.waste_port if op[0] == "dispense_to_waste" else op[1]
-
-    def _dispatch(self, op, target):
-        """Send `op` -- or, with `target` set, what is left of it after a
-        pause -- and return (estimate, target).
-
-        The remainder is an absolute move to the op's target rather than a
-        relative move worked out from a position read after the halt: the
-        target was fixed from a reading taken before the op started, so no
-        read on the decelerating pump is on the path that decides how much
-        liquid moves.
-        """
+    def _start(self, op):
+        """Send `op`, and remember where it will end in case it has to be
+        resumed. The target is the driver's own arithmetic: building the op
+        advances its chain state by exactly the steps the command carries,
+        from a reading of where the plunger is now."""
         with self._serial_lock:
             start = self.syringe.getPlungerPos()
-            # The driver's own bookkeeping starts from the truth too, so its
-            # time estimate for an absolute move does.
-            self.syringe.updateSimState()
-            if target is None:
-                target = self._target(op, start)
-                self._build(op)
-            else:
-                _logger.info("Resuming the move: %d steps to go.", abs(target - start))
-                self.syringe.setSpeed(op[-1])
-                self.syringe.changePort(self._port(op))
-                self.syringe.movePlungerAbs(target)
+            self.syringe.updateSimState()      # its bookkeeping starts from the truth
+            self._build(op)
+            self._op_target = self.syringe.sim_state["plunger_pos"]
+            self._op_port = self.syringe.sim_state["port"]
             t = self.syringe.executeChain(minimal_reset=True)
         self.plunger_pos = start / self.range
-        return t, target
+        return t
 
-    def _halted(self, op, target):
+    def _resume(self, op):
+        """Send what is left of `op`: an absolute move to its target, at its
+        speed, on its port. The target was fixed before the op started, so
+        no reading of the decelerating pump decides how much liquid moves."""
+        with self._serial_lock:
+            start = self.syringe.getPlungerPos()
+            self.syringe.updateSimState()
+            _logger.info("Resuming the move: %d steps to go.",
+                         abs(self._op_target - start))
+            self.syringe.setSpeed(op[-1])
+            self.syringe.changePort(self._op_port)
+            self.syringe.movePlungerAbs(self._op_target)
+            t = self.syringe.executeChain(minimal_reset=True)
+        self.plunger_pos = start / self.range
+        return t
+
+    def _halted(self, op):
         """The plunger has been told to stop for a pause: let it, then record
         where it stopped. The reading is bookkeeping and log -- the resume
         does not depend on it -- so a failed read is reported, not raised."""
         deadline = time.monotonic() + 5
         while not self._move_finished():
             if time.monotonic() > deadline:
-                raise RuntimeError("the plunger did not stop within 5 s of "
-                                   "being halted for the pause")
+                # The instrument's fault, not a pause: cancel the run with it
+                # so the gate opens and the worker reports the diagnosis.
+                # Raised as a plain error here it would leave the run parked
+                # behind a closed gate. First cause wins if one is set.
+                self.run_control.cancel(SafetyFault(
+                    "the plunger did not stop within 5 s of being halted for the pause"))
+                self.run_control.check()
             time.sleep(0.05)
         try:
             self.get_plunger_position()
@@ -377,10 +388,8 @@ class SyringePump(SpeedCodes, Interruptible):
                             "the remainder still runs on resume.", e)
             return
         steps = round(self.plunger_pos * self.range)
-        _logger.info("Paused mid-move at %d steps, %d to go.", steps, abs(target - steps))
-
-    def _finished(self, op, target):
-        pass
+        _logger.info("Paused mid-move at %d steps, %d to go.",
+                     steps, abs(self._op_target - steps))
 
     def execute(self):
         try:
@@ -422,18 +431,21 @@ class SyringePump(SpeedCodes, Interruptible):
 class SyringePumpSimulation(SpeedCodes, Interruptible):
     """Simulation counterpart that remembers what it was asked to do.
 
-    execute() replays the queued ops into `executed` -- one list per executed
-    chain -- while moving the held volume, so get_current_volume() and
-    get_chained_volume() do real accounting: the operations layer's overflow
-    and tubing arithmetic reads them, and a simulation that returned constants
-    (as this one used to) exempted all of that arithmetic from every test.
+    execute() replays the queued ops into `executed` while moving the held
+    volume, so get_current_volume() and get_chained_volume() do real
+    accounting: the operations layer's overflow and tubing arithmetic reads
+    them, and a simulation that returned constants (as this one used to)
+    exempted all of that arithmetic from every test.
 
-    A pause splits the op in flight where it lands -- the fraction of the
-    estimate that had elapsed -- and records both pieces in the same chain,
-    so a test can pin that a paused-and-resumed operation moves exactly the
-    liquid an uninterrupted one does. A dump is recorded once, on completion.
-    Under the suite's fake clock every wait "takes" its whole estimate, so a
-    pause there splits at the end; the split tests run on the real clock.
+    `executed` holds one list per execute() that moved something: a chain
+    parked and then aborted before its first op leaves none, and a chain a
+    cancel cut short keeps the pieces that ran. A pause splits the op in
+    flight where it lands -- the fraction of the estimate that had elapsed --
+    and records both pieces in the same chain, so a test can pin that a
+    paused-and-resumed operation moves exactly the liquid an uninterrupted
+    one does. A dump is recorded once, on completion. Under the suite's fake
+    clock every wait "takes" its whole estimate, so a pause there splits at
+    the end; the split tests run on the real clock.
 
     The plunger starts mid-stroke, as the old constant simulation reported,
     so existing tests keep the same headroom before an emptying dump.
@@ -464,9 +476,7 @@ class SyringePumpSimulation(SpeedCodes, Interruptible):
         return self.plunger_pos
 
     def get_current_volume(self):
-        # The held volume itself, not volume * (held / volume): the round trip
-        # turns 2800 into 2800.0000000000005 and a test's == into approx.
-        return self._held_ul
+        return self._held_ul      # the source of truth; plunger_pos is derived from it
 
     def _estimate(self, op):
         return self.ESTIMATE_SECONDS
@@ -474,47 +484,52 @@ class SyringePumpSimulation(SpeedCodes, Interruptible):
     def execute(self):
         self._current = []
         super().execute()
-        self.get_plunger_position()
 
     def _record(self, piece):
         if not self._current:
             self.executed.append(self._current)
         self._current.append(piece)
 
-    def _dispatch(self, op, target):
-        if target is None:
-            target = self._held_after([op], self._held_ul)
-            self._split = False
-            # Signed, and the op's own figure rather than target - held, so an
-            # uninterrupted op is recorded with exactly the volume queued.
-            if op[0] == "extract":
-                self._to_move = op[2]
-            elif op[0] == "dispense":
-                self._to_move = -op[2]
-            else:
-                self._to_move = -self._held_ul
-        self._dispatched_at = time.monotonic()
-        return self.ESTIMATE_SECONDS, target
+    def _start(self, op):
+        self._target_ul = self._held_after([op], self._held_ul)
+        # Signed, and the op's own figure rather than target - held, so an
+        # uninterrupted op is recorded with exactly the volume queued.
+        if op[0] == "extract":
+            self._to_move = op[2]
+        elif op[0] == "dispense":
+            self._to_move = -op[2]
+        else:
+            self._to_move = -self._held_ul
+        self._seconds_left = self.ESTIMATE_SECONDS
+        return self._resume(op)
 
-    def _halted(self, op, target):
-        fraction = min(1.0, (time.monotonic() - self._dispatched_at)
-                       / self.ESTIMATE_SECONDS)
+    def _resume(self, op):
+        self._dispatched_at = time.monotonic()
+        return self._seconds_left
+
+    def _halted(self, op):
+        """Split the op where the pause landed: the part that ran is the
+        fraction of the remaining estimate that had elapsed."""
+        if self._seconds_left:
+            fraction = min(1.0, (time.monotonic() - self._dispatched_at) / self._seconds_left)
+        else:
+            fraction = 1.0
         moved = fraction * self._to_move
         if moved and op[0] != "dispense_to_waste":
             self._record((op[0], op[1], abs(moved), op[3]))
-            self._split = True
         self._held_ul += moved
         self._to_move -= moved
+        self._seconds_left *= 1 - fraction
         self.get_plunger_position()
 
-    def _finished(self, op, target):
+    def _finished(self, op):
         if op[0] == "dispense_to_waste":
             self._record(op)
-        elif not (self._split and self._to_move == 0):
-            # A zero-volume op queued is recorded as such; a split op whose
-            # remainder was nothing (the pause landed as it ended) is not.
+        elif self._to_move or not op[2]:
+            # The remainder. A zero-volume op queued is recorded as such; a
+            # split op whose remainder was nothing is not.
             self._record((op[0], op[1], abs(self._to_move), op[3]))
-        self._held_ul = target
+        self._held_ul = self._target_ul
         self.get_plunger_position()
 
     def close(self, to_waste=False):

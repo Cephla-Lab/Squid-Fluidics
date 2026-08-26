@@ -1,11 +1,9 @@
 # tests/integration/test_open_chamber_operations.py
-import time
-
 import pytest
 
 from fluidics.errors import AbortRequested
 
-from ..conftest import dispenses
+from ..conftest import dispenses, moved_ul
 
 
 @pytest.fixture
@@ -237,10 +235,15 @@ class TestPauseAndTheDrainPump:
             "flow_rate": 1000, "volume": 1000}
 
     @pytest.fixture
-    def instant(self, open_chamber_rig):
+    def instant(self, open_chamber_rig, during_move):
+        """The rig with its durations switched off -- the wash's one-second
+        settle wait included -- and the drain's power recorded. Returns a
+        `pause_in_the_dispense` hook too: the pause lands inside the second
+        move under the drain, the dispense, after its extract."""
         ops, sp = open_chamber_rig
         ops.sv.fc.COMMAND_SECONDS = 0
         sp.ESTIMATE_SECONDS = 0.02
+        ops.run_control.delay = lambda seconds: None
         powered = []
         original = ops.dp._set_power
 
@@ -249,49 +252,31 @@ class TestPauseAndTheDrainPump:
             original(power)
 
         ops.dp._set_power = _set_power
-        return ops, sp, powered
-
-    def pause_in_the_dispense(self, ops, sp, powered):
-        """Pause from inside the dispense under the drain -- the second op of
-        the drained chain, after its extract."""
-        original = sp.wait_for_stop
         under_drain = []
 
-        def wait_for_stop(t=0):
+        def pause_in_the_dispense():
             if powered and powered[-1]:
-                under_drain.append(t)
+                under_drain.append(True)
                 if len(under_drain) == 2:
                     ops.run_control.pause()
-            return original(t)
 
-        sp.wait_for_stop = wait_for_stop
+        during_move(sp, pause_in_the_dispense)
+        return ops, sp, powered
 
-    def until_at_rest(self, control):
-        deadline = time.monotonic() + 2
-        while not control.at_rest and time.monotonic() < deadline:
-            time.sleep(0.002)
-        assert control.at_rest, "the run did not park"
-
-    def test_the_drain_follows_the_syringe_into_the_hold_and_out(
-            self, instant, real_clock, run_in_background):
+    def test_the_drain_follows_the_syringe_into_the_hold_and_out(self, instant, parks):
         ops, sp, powered = instant
-        self.pause_in_the_dispense(ops, sp, powered)
-        finished, error = run_in_background(lambda: ops.process_sequence(self.WASH))
-        self.until_at_rest(ops.run_control)
+        finished, error = parks(ops.run_control, lambda: ops.process_sequence(self.WASH))
         assert powered == [True, False], "the run parked with the drain still pulling"
         ops.run_control.resume()
         assert finished.wait(2) and not error, error
         assert powered == [True, False, True, False]
-        dispensed = sum(op[2] for op in sp.executed_ops if op[0] == "dispense")
-        assert dispensed == pytest.approx(1000), "the pause changed what was dispensed"
+        assert moved_ul(sp, "dispense") == pytest.approx(1000), \
+            "the pause changed what was dispensed"
 
-    def test_a_cancel_while_held_leaves_the_drain_off(
-            self, instant, real_clock, run_in_background):
+    def test_a_cancel_while_held_leaves_the_drain_off(self, instant, parks):
         """A run that is unwinding must not power the drain back up."""
         ops, sp, powered = instant
-        self.pause_in_the_dispense(ops, sp, powered)
-        finished, error = run_in_background(lambda: ops.process_sequence(self.WASH))
-        self.until_at_rest(ops.run_control)
+        finished, error = parks(ops.run_control, lambda: ops.process_sequence(self.WASH))
         ops.run_control.cancel()
         assert finished.wait(2)
         assert isinstance(error[0], AbortRequested), error

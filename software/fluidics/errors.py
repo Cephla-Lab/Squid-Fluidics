@@ -46,6 +46,15 @@ class SafetyFault(Cancelled):
     """The instrument stopped itself. A failure, reported with its cause."""
 
 
+class _ThreadState(threading.local):
+    """What one thread carries through the gates: the when_held regions it is
+    inside. Per thread because a region belongs to the thread that entered
+    it, and it is that thread's park the hooks are about."""
+
+    def __init__(self):
+        self.hooks = []
+
+
 class RunControl:
     """One run's control signal, shared by every device: cancel and pause.
 
@@ -99,9 +108,7 @@ class RunControl:
         self._cause = None
         self._paused = False
         self._holding = 0
-        # Per-thread: a region belongs to the thread that entered it, and it
-        # is that thread's park the hooks are about.
-        self._local = threading.local()
+        self._local = _ThreadState()
 
     def cancel(self, cause=None):
         """Trip the signal with `cause` (default: the operator aborted).
@@ -205,21 +212,18 @@ class RunControl:
         a cancel: a run that is unwinding must not power anything back up.
 
         Per thread, and the hooks belong to the thread that parks, so they
-        run where the hardware's port lives.
+        run where the hardware's port lives. A hook may itself pass a gate --
+        the drain's start() does -- and finds no hooks to fire again while it
+        runs: see checkpoint(). A hook that blocks delays the park; one that
+        raises ends the run's operation with the run still paused, so hooks
+        should be the same unchecked switch-off calls make_safe uses.
         """
-        hooks = self._hooks
+        hooks = self._local.hooks
         hooks.append((on_hold, on_release))
         try:
             yield
         finally:
             hooks.remove((on_hold, on_release))
-
-    @property
-    def _hooks(self):
-        hooks = getattr(self._local, "hooks", None)
-        if hooks is None:
-            hooks = self._local.hooks = []
-        return hooks
 
     @property
     def cancelled(self):
@@ -267,19 +271,25 @@ class RunControl:
         if self._running.is_set():
             self.check()
             return
-        hooks = self._hooks
-        for on_hold, _ in hooks:
-            on_hold()
-        with self._lock:
-            self._holding += 1
+        # The hooks run outside their own region: a hook that gates (the
+        # drain's start() does) must find no hooks to fire again, or a pause
+        # landing during on_release would nest a second hold inside the first.
+        hooks, self._local.hooks = self._local.hooks, []
         try:
-            self._running.wait()
-        finally:
+            for on_hold, _ in hooks:
+                on_hold()
             with self._lock:
-                self._holding -= 1
-        self.check()
-        for _, on_release in reversed(hooks):
-            on_release()
+                self._holding += 1
+            try:
+                self._running.wait()
+            finally:
+                with self._lock:
+                    self._holding -= 1
+            self.check()
+            for _, on_release in reversed(hooks):
+                on_release()
+        finally:
+            self._local.hooks = hooks
 
     def run_for(self, seconds):
         """Spend up to `seconds` of running time, returning early if the run
@@ -298,7 +308,7 @@ class RunControl:
         started = time.monotonic()
         # Wakes early if the run stops, so a pause does not sit through the
         # rest of an incubation before anyone notices.
-        self._interrupted.wait(seconds)
+        self.wait_interrupted(seconds)
         spent = min(seconds, time.monotonic() - started)
         self.check()
         return spent

@@ -13,7 +13,7 @@ parametrize below.
 import pytest
 
 
-from .pump_helpers import bare_pump, halt_on_cancel
+from .pump_helpers import ScriptedSyringe, bare_pump, halt_on_cancel
 
 
 class SpyLock:
@@ -31,10 +31,14 @@ class SpyLock:
         return False
 
 
-class AssertingSyringe:
-    """Fails the test if any driver call arrives outside the serial lock."""
+class AssertingSyringe(ScriptedSyringe):
+    """The scripted driver fake, failing the test if any call -- or a read of
+    its chain state -- arrives outside the serial lock. Every public entry
+    point is wrapped on the way out of attribute lookup, so a new driver call
+    the pump learns to make is checked without being listed here."""
 
     def __init__(self, lock):
+        super().__init__()
         self.lock = lock
         self.calls = []
 
@@ -42,57 +46,22 @@ class AssertingSyringe:
         assert self.lock.held, f"{name} reached the driver outside the serial lock"
         self.calls.append(name)
 
-    @property
-    def exec_time(self):
-        # Driver state, not just wire traffic: reads are part of the
-        # every-touch-under-the-lock invariant too.
-        self._entry("exec_time")
-        return 5
-
-    waste_port = 1
-
-    def getPlungerPos(self):
-        self._entry("getPlungerPos")
-        return 1500
-
-    def updateSimState(self):
-        self._entry("updateSimState")
-
-    def _ulToSteps(self, volume_ul):
-        self._entry("_ulToSteps")
-        return int(volume_ul * 3000 / 5000)
-
-    def setSpeed(self, code):
-        self._entry("setSpeed")
-
-    def changePort(self, port):
-        self._entry("changePort")
-
-    def movePlungerAbs(self, position):
-        self._entry("movePlungerAbs")
-
-    def resetChain(self, **kwargs):
-        self._entry("resetChain")
-
-    def extract(self, port, volume):
-        self._entry("extract")
-
-    def dispense(self, port, volume):
-        self._entry("dispense")
-
-    def dispenseToWaste(self, retain_port=False):
-        self._entry("dispenseToWaste")
-
-    def executeChain(self, minimal_reset=True):
-        self._entry("executeChain")
-        return 0
-
-    def _checkReady(self):
-        self._entry("_checkReady")
-        return True
-
-    def terminateCmd(self):
-        self._entry("terminateCmd")
+    def __getattribute__(self, name):
+        attr = object.__getattribute__(self, name)
+        if name.startswith("_") and name not in ("_checkReady", "_ulToSteps") \
+                or name in ("lock", "calls"):
+            return attr
+        if name in ("exec_time", "sim_state"):
+            # Driver state, not just wire traffic: reads are part of the
+            # every-touch-under-the-lock invariant too.
+            self._entry(name)
+            return attr
+        if callable(attr):
+            def under_lock(*args, **kwargs):
+                self._entry(name)
+                return attr(*args, **kwargs)
+            return under_lock
+        return attr
 
 
 def locked_pump():
@@ -114,8 +83,8 @@ class TestEveryRoundTripIsLocked:
                      id="dispense_to_waste"),
         pytest.param(lambda p: (p.extract(2, 100, 12), p.execute()),
                      "executeChain", id="execute"),
-        pytest.param(lambda p: (p.extract(2, 100, 12), p.get_time_to_finish()),
-                     "exec_time", id="time_to_finish"),
+        pytest.param(lambda p: (p.extract(2, 100, 12), p.execute()),
+                     "sim_state", id="resume_target_read"),
         pytest.param(lambda p: p._move_finished(), "_checkReady",
                      id="move_finished"),
         pytest.param(halt_on_cancel, "terminateCmd", id="halt_on_cancel"),

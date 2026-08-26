@@ -167,11 +167,15 @@ class DrawGuard:
     per-sensor record.
     """
 
-    def __init__(self, sensors, expected_ul_min, run_control, log=print):
+    def __init__(self, sensors, expected_ul_min, run_control, log=print,
+                 moving=None):
         self.sensors = sensors
         self.expected_ul_min = expected_ul_min
         self.run_control = run_control
         self.log = log
+        # The pump's own word on whether it is moving (Interruptible.moving).
+        # Without one the guard judges every sample, as it did before pause.
+        self.moving = moving if moving is not None else (lambda: True)
 
         self._handlers = []
         self._lock = threading.Lock()
@@ -231,12 +235,15 @@ class DrawGuard:
             if done:
                 return
 
-            # A paused run stops the pump on purpose, and the sensor keeps
-            # publishing whether it moves or not. `paused` is set before the
-            # pump even wakes to halt, so the flow's decay is never judged;
-            # and the plunger starts from rest again on resume, so the rule
-            # restarts with a fresh ramp-up window at the first sample after.
-            if self.run_control.paused:
+            # The pump stops on purpose for a pause, and the sensor keeps
+            # publishing whether it moves or not. The pump's own `moving` is
+            # the word to go by -- not the run's `paused`, which a quick
+            # Pause/Resume can raise and clear between two samples while the
+            # pump still halts and restarts on it. `moving` is cleared before
+            # the halt is sent, so the flow's decay is never judged; and the
+            # plunger starts from rest again afterwards, so the rule restarts
+            # with a fresh ramp-up window at the first sample of the new move.
+            if not self.moving():
                 standing_down = True
                 return
             if standing_down:
