@@ -209,6 +209,9 @@ class SequencesWidget(QWidget):
         self.selectNoneButton.clicked.connect(self.selectNone)
         self.runButton = QPushButton("Run Selected Sequences")
         self.runButton.clicked.connect(self.runSelectedSequences)
+        self.pauseButton = QPushButton("Pause")
+        self.pauseButton.clicked.connect(self.pauseSequences)
+        self.pauseButton.setEnabled(False)  # Initially disabled
         self.abortButton = QPushButton("Abort")
         self.abortButton.clicked.connect(self.abortSequences)
         self.abortButton.setEnabled(False)  # Initially disabled
@@ -220,6 +223,7 @@ class SequencesWidget(QWidget):
         buttonLayout.addWidget(self.selectAllButton)
         buttonLayout.addWidget(self.selectNoneButton)
         buttonLayout.addWidget(self.runButton)
+        buttonLayout.addWidget(self.pauseButton)
         buttonLayout.addWidget(self.abortButton)
 
         layout.addLayout(buttonLayout)
@@ -463,6 +467,8 @@ class SequencesWidget(QWidget):
         self.warningLabel.setVisible(False)
 
         self.runButton.setEnabled(False)
+        self.pauseButton.setEnabled(True)
+        self.pauseButton.setText("Pause")
         self.abortButton.setEnabled(True)
         self.sequence_running.emit(True)
 
@@ -475,21 +481,37 @@ class SequencesWidget(QWidget):
         self.worker_thread.start()
 
     def updateTimeRemaining(self):
-        """Update the time remaining display and progress bar"""
-        self.elapsed_time += 1  # Add one second
+        """Update the time remaining display and progress bar.
+
+        A held run spends no time: the countdown stops with it, the way the
+        incubation clock does, or ten minutes of coffee would come off the
+        estimate. A pause that has been asked for but not yet reached is
+        different -- the move in flight is still running, and still counts.
+        """
+        state = self._pauseState()
+        if self.total_time is None:
+            # The estimate is posted to this thread's event queue, so it can
+            # still be pending when the operator presses Pause: the button
+            # already says what happened, and the next tick writes the label.
+            return
+        if state != " (paused)":
+            self.elapsed_time += 1  # Add one second
         remaining = max(0, self.total_time - self.elapsed_time)
 
         # Update time label
         hours = int(remaining // 3600)
         minutes = int((remaining % 3600) // 60)
         seconds = int(remaining % 60)
-        self.timeLabel.setText(f"{hours:02d}:{minutes:02d}:{seconds:02d} remaining")
+        self.timeLabel.setText(
+            f"{hours:02d}:{minutes:02d}:{seconds:02d} remaining{state}")
             
         # Update progress bar percentage
         progress = min(100, int((self.elapsed_time / max(self.total_time, 1)) * 100))
         self.progressBar.setValue(progress)
             
-        if remaining <= 0:
+        # Only when the run is going: while it is held, or holding, the tick
+        # is what keeps the label honest about which.
+        if remaining <= 0 and not state:
             self.timer.stop()
 
     def event(self, event):
@@ -509,6 +531,33 @@ class SequencesWidget(QWidget):
 
     def _post_event(self, callback_name, *args):
         QCoreApplication.postEvent(self, WorkerEvent(callback_name, *args))
+
+    def _pauseState(self):
+        """The suffix the time label carries: which of the two pause moments
+        the run is in, if either.
+
+        `holding` is the run actually stopped at a gate; `paused` is only that
+        someone asked. They are not the same instant -- a move in flight keeps
+        going until it reaches a gate -- and the operator is owed the
+        difference: "pausing" means liquid may still be moving.
+        """
+        control = self.devices.run_control
+        if control.holding:
+            return " (paused)"
+        if control.paused:
+            return " (pausing\u2026)"
+        return ""
+
+    def pauseSequences(self):
+        """Hold the run after the move in flight, or let it go on."""
+        if self.devices.run_control.paused:
+            self.devices.resume()
+            self.pauseButton.setText("Pause")
+        else:
+            self.devices.pause()
+            self.pauseButton.setText("Resume")
+        # The label would otherwise wait for the next tick to say anything.
+        self.updateTimeRemaining()
 
     def _handle_progress(self, index, sequence_num, status):
         self.sequenceLabel.setText(f"{sequence_num}/{self.total_sequences} sequences")
@@ -532,6 +581,8 @@ class SequencesWidget(QWidget):
 
     def _handle_finished(self):
         self.runButton.setEnabled(True)
+        self.pauseButton.setEnabled(False)
+        self.pauseButton.setText("Pause")
         self.abortButton.setEnabled(False)
         self.progressBar.setValue(0)
         self.timeLabel.setText("00:00:00 remaining")
@@ -568,9 +619,12 @@ class SequencesWidget(QWidget):
 
     def abortSequences(self):
         if self.worker and self.experiment_ops:
-            # One signal, shared by the worker and every waiting device.
+            # One signal, shared by the worker and every waiting device. It
+            # also releases a held run, so Abort works while paused without
+            # the operator having to resume first.
             self.devices.abort()
             self.abortButton.setEnabled(False)
+            self.pauseButton.setEnabled(False)
 
 
 class ManualControlWidget(QWidget):

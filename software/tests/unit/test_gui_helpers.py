@@ -371,9 +371,24 @@ class TestAbortSequences:
             experiment_ops=object(),
             devices=SimpleNamespace(abort=lambda: aborted.append(True)),
             abortButton=SimpleNamespace(setEnabled=lambda enabled: None),
+            pauseButton=SimpleNamespace(setEnabled=lambda enabled: None),
         )
         gui.SequencesWidget.abortSequences(stub)
         assert aborted == [True]
+
+    def test_abort_takes_the_pause_button_away_too(self):
+        """The run is ending; there is nothing left to hold. The cancel also
+        releases a run already held, so Abort needs no resume first."""
+        enabled = []
+        stub = SimpleNamespace(
+            worker=SimpleNamespace(),
+            experiment_ops=object(),
+            devices=SimpleNamespace(abort=lambda: None),
+            abortButton=SimpleNamespace(setEnabled=lambda on: None),
+            pauseButton=SimpleNamespace(setEnabled=enabled.append),
+        )
+        gui.SequencesWidget.abortSequences(stub)
+        assert enabled == [False]
 
 
 class TestRunFinished:
@@ -403,3 +418,135 @@ class TestRunFinished:
         gui.SequencesWidget._handle_finished(stub)
         assert order == ["join", "reset", ("running", False)]
         assert stub.worker is None
+
+
+class TestPauseControls:
+    """The button and the label, called unbound against stubs -- constructing
+    SequencesWidget needs a QApplication.
+
+    The two pause moments are the point: `paused` is "someone asked",
+    `holding` is "the run has stopped at a gate". Between them a move is
+    still finishing, and the operator must be able to tell -- "pausing" means
+    liquid may still be moving.
+    """
+
+    class Button:
+        def __init__(self, text="Pause"):
+            self._text = text
+
+        def text(self):
+            return self._text
+
+        def setText(self, text):
+            self._text = text
+
+        def setEnabled(self, enabled):
+            self.enabled = enabled
+
+    def _fields(self, paused=False, holding=0, total_time=100, elapsed=0):
+        control = SimpleNamespace(paused=paused, holding=holding)
+        calls = []
+        return SimpleNamespace(
+            devices=SimpleNamespace(
+                run_control=control,
+                pause=lambda: (calls.append("pause"),
+                               setattr(control, "paused", True))[0],
+                resume=lambda: (calls.append("resume"),
+                                setattr(control, "paused", False))[0]),
+            pauseButton=self.Button(),
+            timeLabel=SimpleNamespace(setText=lambda text: None),
+            progressBar=SimpleNamespace(setValue=lambda value: None),
+            timer=SimpleNamespace(stop=lambda: None),
+            total_time=total_time,
+            elapsed_time=elapsed,
+            calls=calls,
+        )
+
+    def stub(self, **kwargs):
+        """The widget's own methods call back into self, so an unbound call
+        needs them on the stub too."""
+        stub = self._fields(**kwargs)
+        stub._pauseState = lambda: gui.SequencesWidget._pauseState(stub)
+        stub.updateTimeRemaining = lambda: gui.SequencesWidget.updateTimeRemaining(stub)
+        return stub
+
+    def test_the_first_press_pauses_and_offers_a_resume(self):
+        stub = self.stub()
+        gui.SequencesWidget.pauseSequences(stub)
+        assert stub.calls == ["pause"]
+        assert stub.pauseButton.text() == "Resume"
+
+    def test_the_next_press_resumes(self):
+        stub = self.stub(paused=True)
+        stub.pauseButton.setText("Resume")
+        gui.SequencesWidget.pauseSequences(stub)
+        assert stub.calls == ["resume"]
+        assert stub.pauseButton.text() == "Pause"
+
+    def test_a_requested_pause_reads_as_pausing(self):
+        """The move in flight is still going, and still counts against the
+        estimate."""
+        stub = self.stub(paused=True, holding=0)
+        assert gui.SequencesWidget._pauseState(stub) == " (pausing\u2026)"
+        gui.SequencesWidget.updateTimeRemaining(stub)
+        assert stub.elapsed_time == 1, "a run still moving must spend time"
+
+    def test_a_held_run_reads_as_paused_and_spends_no_time(self):
+        """Ten minutes of coffee must not come off the estimate."""
+        stub = self.stub(paused=True, holding=1)
+        assert gui.SequencesWidget._pauseState(stub) == " (paused)"
+        gui.SequencesWidget.updateTimeRemaining(stub)
+        assert stub.elapsed_time == 0
+
+    def test_a_running_run_says_nothing_and_spends_time(self):
+        stub = self.stub()
+        assert gui.SequencesWidget._pauseState(stub) == ""
+        gui.SequencesWidget.updateTimeRemaining(stub)
+        assert stub.elapsed_time == 1
+
+    def test_the_label_carries_the_state(self):
+        shown = []
+        stub = self.stub(paused=True, holding=1)
+        stub.timeLabel = SimpleNamespace(setText=shown.append)
+        gui.SequencesWidget.updateTimeRemaining(stub)
+        assert shown == ["00:01:40 remaining (paused)"]
+
+    def test_the_tick_keeps_coming_while_held_even_at_zero_remaining(self):
+        """Otherwise the label freezes on "pausing" and never says the run
+        has actually stopped."""
+        stopped = []
+        stub = self.stub(paused=True, holding=1, total_time=1, elapsed=99)
+        stub.timer = SimpleNamespace(stop=lambda: stopped.append(True))
+        gui.SequencesWidget.updateTimeRemaining(stub)
+        assert stopped == []
+
+    def test_a_press_before_the_estimate_arrives_does_not_raise(self):
+        """The worker posts the estimate to the event queue, so an operator
+        who presses Pause within the first second finds total_time unset. A
+        slot that raises there takes the whole GUI down with it."""
+        stub = self.stub(total_time=None)
+        gui.SequencesWidget.pauseSequences(stub)
+        assert stub.calls == ["pause"]
+        assert stub.pauseButton.text() == "Resume"
+
+    def test_a_finished_run_puts_the_button_back(self):
+        noop = lambda *args: None
+        stub = SimpleNamespace(
+            runButton=SimpleNamespace(setEnabled=noop),
+            pauseButton=self.Button("Resume"),
+            abortButton=SimpleNamespace(setEnabled=noop),
+            progressBar=SimpleNamespace(setValue=noop),
+            timeLabel=SimpleNamespace(setText=noop),
+            sequenceLabel=SimpleNamespace(setText=noop),
+            timer=SimpleNamespace(stop=noop),
+            highlightRow=noop,
+            worker=None,
+            devices=SimpleNamespace(reset=noop),
+            sequence_running=SimpleNamespace(emit=noop),
+        )
+        import pytest
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(gui.QMessageBox, "information", lambda *args: None)
+            gui.SequencesWidget._handle_finished(stub)
+        assert stub.pauseButton.text() == "Pause"
+        assert stub.pauseButton.enabled is False
