@@ -84,8 +84,8 @@ class RunControl:
                        measured in running time, so paused time does not
                        count against it.
 
-    And no_hold() marks a region the run must not be parked inside, for the
-    caller that has already powered something.
+    And when_held() marks a region with something powered in it, whose hooks
+    run around an actual park so that it can follow the run into the hold.
     """
 
     def __init__(self):
@@ -99,8 +99,8 @@ class RunControl:
         self._cause = None
         self._paused = False
         self._holding = 0
-        # Per-thread, because it is the run's own thread that declares a
-        # region indivisible; another thread's gate must still hold.
+        # Per-thread: a region belongs to the thread that entered it, and it
+        # is that thread's park the hooks are about.
         self._local = threading.local()
 
     def cancel(self, cause=None):
@@ -194,28 +194,32 @@ class RunControl:
         return self._paused and self._holding > 0
 
     @contextlib.contextmanager
-    def no_hold(self):
-        """Mark a region the run must not be parked inside.
+    def when_held(self, on_hold, on_release):
+        """Mark a region with something powered in it.
 
-        For a caller that has already committed the hardware to something: the
-        drain pump powered with no inflow would pull the chamber dry, and an
-        armed DrawGuard would read the stopped flow as a fault and cancel the
-        run with a diagnosis nobody caused. A pause asked for inside the
-        region takes hold at the next gate after it.
+        For the caller that has committed hardware around a gated call -- the
+        drain pump pulling under a dispense. When a gate inside the region
+        actually parks this thread, `on_hold` runs first (drain off) and
+        `on_release` runs once the gate opens on a resume (drain on). Neither
+        runs for a gate the run walks through, and `on_release` never runs for
+        a cancel: a run that is unwinding must not power anything back up.
 
-        Cancellation is untouched -- an abort still raises out of the gates in
-        here, because stopping is what an abort is for.
+        Per thread, and the hooks belong to the thread that parks, so they
+        run where the hardware's port lives.
         """
-        previous = getattr(self._local, "no_hold", False)
-        self._local.no_hold = True
+        hooks = self._hooks
+        hooks.append((on_hold, on_release))
         try:
             yield
         finally:
-            self._local.no_hold = previous
+            hooks.remove((on_hold, on_release))
 
     @property
-    def _deferring(self):
-        return getattr(self._local, "no_hold", False)
+    def _hooks(self):
+        hooks = getattr(self._local, "hooks", None)
+        if hooks is None:
+            hooks = self._local.hooks = []
+        return hooks
 
     @property
     def cancelled(self):
@@ -235,6 +239,15 @@ class RunControl:
         """Block up to `timeout` seconds. True if cancelled, False on timeout."""
         return self._tripped.wait(timeout)
 
+    def wait_interrupted(self, timeout):
+        """Block up to `timeout` seconds. True if the run stopped meanwhile --
+        paused or cancelled -- False on timeout.
+
+        For a device that can stop a move and finish it later; a device that
+        must wait its move out uses wait().
+        """
+        return self._interrupted.wait(timeout)
+
     def sleep(self, timeout):
         """wait(), then raise if the run was cancelled meanwhile."""
         self.wait(timeout)
@@ -244,25 +257,29 @@ class RunControl:
         """Block while the run is paused, then raise if it is cancelled.
 
         The gate every device passes before it starts something new, so a move
-        already in flight finishes and the next one waits here. An untimed
-        wait: cancel() and resume() both open it. Inside no_hold() it only
-        checks -- see there.
+        already in flight finishes and the next one waits here -- or, for a
+        device that stops its move on a pause, where it parks before finishing
+        it. An untimed wait: cancel() and resume() both open it.
         """
-        if not self._deferring:
-            # Counted only if this thread is actually going to stop. Counting
-            # every pass would make a running run look stopped to anyone
-            # reading `holding`, one gate at a time.
-            parked = not self._running.is_set()
-            if parked:
-                with self._lock:
-                    self._holding += 1
-            try:
-                self._running.wait()
-            finally:
-                if parked:
-                    with self._lock:
-                        self._holding -= 1
+        # Counted only if this thread is actually going to stop. Counting
+        # every pass would make a running run look stopped to anyone reading
+        # `holding`, one gate at a time.
+        if self._running.is_set():
+            self.check()
+            return
+        hooks = self._hooks
+        for on_hold, _ in hooks:
+            on_hold()
+        with self._lock:
+            self._holding += 1
+        try:
+            self._running.wait()
+        finally:
+            with self._lock:
+                self._holding -= 1
         self.check()
+        for _, on_release in reversed(hooks):
+            on_release()
 
     def run_for(self, seconds):
         """Spend up to `seconds` of running time, returning early if the run
@@ -273,7 +290,7 @@ class RunControl:
         back for the remainder.
         """
         self.check()
-        if self._paused and not self._deferring:
+        if self._paused:
             return 0.0
         # Monotonic: an NTP step or an operator setting the clock back would
         # otherwise make this look like no time had passed, and delay() would

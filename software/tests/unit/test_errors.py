@@ -6,6 +6,7 @@ import time
 
 import pytest
 
+from tests.conftest import SETTLE
 from fluidics.errors import (AbortRequested, Cancelled, FluidicsError,
                              OperationError, RunControl, SafetyFault)
 
@@ -185,39 +186,150 @@ class TestPause:
         assert time.monotonic() - started >= 0.04
 
 
-class TestNoHold:
-    """A region the run must not be parked inside: the caller has already
-    committed the hardware to something -- a drain pulling with no inflow, an
-    armed DrawGuard whose sensors would read the stopped flow as a fault."""
+class TestWaitInterrupted:
+    """The wait for a device that can stop a move and finish it later: it
+    wakes on a pause as well as a cancel, where wait() wakes on cancel only."""
 
-    def test_a_gate_inside_the_region_does_not_hold(self):
+    def test_a_pause_wakes_it(self, real_clock):
         control = RunControl()
         control.pause()
-        with control.no_hold():
-            control.checkpoint()      # would block forever outside the region
-        assert control.paused, "the pause is still pending, to take hold later"
+        started = time.monotonic()
+        assert control.wait_interrupted(2) is True
+        assert time.monotonic() - started < 0.5
 
-    def test_a_cancel_inside_the_region_still_raises(self):
-        """Stopping is what an abort is for; only holding is deferred."""
+    def test_a_cancel_wakes_it(self):
         control = RunControl()
         control.cancel()
-        with control.no_hold():
-            with pytest.raises(AbortRequested):
-                control.checkpoint()
+        assert control.wait_interrupted(2) is True
 
-    def test_a_run_level_wait_inside_the_region_still_spends_its_time(self, real_clock):
-        """run_for returns early on a pause so delay() can stop the clock --
-        inside the region that would spin, since the gate does not hold."""
+    def test_an_undisturbed_wait_runs_out(self, real_clock):
+        control = RunControl()
+        started = time.monotonic()
+        assert control.wait_interrupted(0.02) is False
+        assert time.monotonic() - started >= 0.015
+
+    def test_a_resumed_run_no_longer_wakes_it(self, real_clock):
         control = RunControl()
         control.pause()
-        with control.no_hold():
-            assert control.run_for(0.02) == pytest.approx(0.02, abs=0.02)
+        control.resume()
+        assert control.wait_interrupted(0.02) is False
 
-    def test_the_region_ends_and_the_gate_holds_again(self, holds_while_paused):
+
+class TestWhenHeld:
+    """A region whose hooks run around an actual park: for the caller that
+    has something powered while a gated call runs -- the drain under a
+    dispense -- so what is powered can follow the run into the hold and out."""
+
+    def _hooked(self):
         control = RunControl()
-        with control.no_hold():
+        events = []
+        region = control.when_held(lambda: events.append("hold"),
+                                   lambda: events.append("release"))
+        return control, events, region
+
+    def test_the_hooks_run_around_a_park(self, holds_while_paused):
+        control, events, region = self._hooked()
+
+        def gate():
+            with region:
+                control.checkpoint()
+
+        def held_so_far():
+            assert events == ["hold"]
+
+        holds_while_paused(control, gate, while_held=held_so_far)
+        assert events == ["hold", "release"]
+
+    def test_the_hold_hook_runs_before_the_park_and_the_release_after(
+            self, real_clock, run_in_background):
+        control, events, region = self._hooked()
+        control.pause()
+
+        def gate():
+            with region:
+                control.checkpoint()
+
+        finished, error = run_in_background(gate)
+        deadline = time.monotonic() + 2
+        while events != ["hold"] and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert events == ["hold"], events
+        assert control.at_rest, "the hold hook ran but the park was not counted"
+        control.resume()
+        assert finished.wait(2)
+        assert events == ["hold", "release"] and not error
+
+    def test_a_gate_the_run_walks_through_runs_no_hooks(self):
+        control, events, region = self._hooked()
+        with region:
+            control.checkpoint()
+        assert events == []
+
+    def test_a_cancel_while_parked_skips_the_release(self, real_clock,
+                                                    run_in_background):
+        """The drain must not come back on for a run that is unwinding."""
+        control, events, region = self._hooked()
+        control.pause()
+
+        def gate():
+            with region:
+                control.checkpoint()
+
+        finished, error = run_in_background(gate)
+        deadline = time.monotonic() + 2
+        while events != ["hold"] and time.monotonic() < deadline:
+            time.sleep(0.005)
+        control.cancel()
+        assert finished.wait(2)
+        assert events == ["hold"]
+        assert isinstance(error[0], AbortRequested)
+
+    def test_the_region_ends_and_the_hooks_stop(self, real_clock,
+                                                run_in_background):
+        control, events, region = self._hooked()
+        with region:
             pass
-        holds_while_paused(control, control.checkpoint)
+        control.pause()
+        finished, _ = run_in_background(control.checkpoint)
+        assert not finished.wait(SETTLE)
+        control.resume()
+        assert finished.wait(2)
+        assert events == []
+
+    def test_the_hooks_are_per_thread(self, real_clock, run_in_background):
+        """Another thread's gate parks too, but it is not inside the region
+        and must not switch this thread's hardware."""
+        control, events, region = self._hooked()
+        control.pause()
+        with region:
+            finished, _ = run_in_background(control.checkpoint)
+            assert not finished.wait(SETTLE)
+            control.resume()
+            assert finished.wait(2)
+        assert events == []
+
+    def test_nested_regions_release_innermost_first(self, real_clock,
+                                                    run_in_background):
+        control = RunControl()
+        events = []
+        outer = control.when_held(lambda: events.append("hold outer"),
+                                  lambda: events.append("release outer"))
+        inner = control.when_held(lambda: events.append("hold inner"),
+                                  lambda: events.append("release inner"))
+        control.pause()
+
+        def gate():
+            with outer, inner:
+                control.checkpoint()
+
+        finished, error = run_in_background(gate)
+        deadline = time.monotonic() + 2
+        while len(events) < 2 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        control.resume()
+        assert finished.wait(2) and not error
+        assert events == ["hold outer", "hold inner",
+                          "release inner", "release outer"]
 
 
 class TestAtRest:
@@ -248,7 +360,8 @@ class TestAtRest:
 
         control._running.wait = wait
         control.checkpoint()
-        assert inside == [0], "a gate the run walked straight through was counted"
+        assert all(seen == 0 for seen in inside), \
+            "a gate the run walked straight through was counted"
         assert control.holding == 0 and not control.at_rest
 
     def test_a_pause_alone_is_not_yet_at_rest(self):

@@ -219,9 +219,10 @@ class DrawGuard:
         """One closure per sensor, holding its own rule and mode."""
         stop = (mode == "stop")
         done = False
+        standing_down = False
 
         def handle(flow, timestamp):
-            nonlocal done
+            nonlocal done, standing_down
             # The rule keeps faulting on every sample once it has tripped, and
             # this handler has nothing more to say after the first: warn has
             # logged, and stop has either claimed the draw or lost it. Bailing
@@ -229,6 +230,18 @@ class DrawGuard:
             # reader thread's per-packet work flat for the rest of the draw.
             if done:
                 return
+
+            # A paused run stops the pump on purpose, and the sensor keeps
+            # publishing whether it moves or not. `paused` is set before the
+            # pump even wakes to halt, so the flow's decay is never judged;
+            # and the plunger starts from rest again on resume, so the rule
+            # restarts with a fresh ramp-up window at the first sample after.
+            if self.run_control.paused:
+                standing_down = True
+                return
+            if standing_down:
+                standing_down = False
+                rule.start(timestamp)
 
             fault = rule.sample(flow, timestamp)
             if fault is None:

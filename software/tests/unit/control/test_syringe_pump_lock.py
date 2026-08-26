@@ -49,17 +49,29 @@ class AssertingSyringe:
         self._entry("exec_time")
         return 5
 
+    waste_port = 1
+
     def getPlungerPos(self):
         self._entry("getPlungerPos")
         return 1500
 
+    def updateSimState(self):
+        self._entry("updateSimState")
+
+    def _ulToSteps(self, volume_ul):
+        self._entry("_ulToSteps")
+        return int(volume_ul * 3000 / 5000)
+
     def setSpeed(self, code):
         self._entry("setSpeed")
 
-    def delayExec(self, ms):
-        self._entry("delayExec")
+    def changePort(self, port):
+        self._entry("changePort")
 
-    def resetChain(self):
+    def movePlungerAbs(self, position):
+        self._entry("movePlungerAbs")
+
+    def resetChain(self, **kwargs):
         self._entry("resetChain")
 
     def extract(self, port, volume):
@@ -85,8 +97,7 @@ class AssertingSyringe:
 
 def locked_pump():
     lock = SpyLock()
-    return bare_pump(AssertingSyringe(lock), lock=lock, volume=5000,
-                     speed_code_limit=10, range=3000, chained_volume=0)
+    return bare_pump(AssertingSyringe(lock), lock=lock)
 
 
 class TestEveryRoundTripIsLocked:
@@ -96,16 +107,15 @@ class TestEveryRoundTripIsLocked:
     @pytest.mark.parametrize("drive,expected", [
         pytest.param(lambda p: p.get_plunger_position(), "getPlungerPos",
                      id="plunger_pos"),
-        pytest.param(lambda p: p.set_speed(10), "setSpeed", id="set_speed"),
-        pytest.param(lambda p: p.set_wait(1), "delayExec", id="set_wait"),
         pytest.param(lambda p: p.reset_chain(), "resetChain", id="reset_chain"),
         pytest.param(lambda p: p.extract(2, 100, 12), "extract", id="extract"),
         pytest.param(lambda p: p.dispense(3, 100, 12), "dispense", id="dispense"),
         pytest.param(lambda p: p.dispense_to_waste(), "dispenseToWaste",
                      id="dispense_to_waste"),
-        pytest.param(lambda p: p.execute(), "executeChain", id="execute"),
-        pytest.param(lambda p: p.get_time_to_finish(), "exec_time",
-                     id="time_to_finish"),
+        pytest.param(lambda p: (p.extract(2, 100, 12), p.execute()),
+                     "executeChain", id="execute"),
+        pytest.param(lambda p: (p.extract(2, 100, 12), p.get_time_to_finish()),
+                     "exec_time", id="time_to_finish"),
         pytest.param(lambda p: p._move_finished(), "_checkReady",
                      id="move_finished"),
         pytest.param(halt_on_cancel, "terminateCmd", id="halt_on_cancel"),
@@ -127,5 +137,6 @@ class TestTheLockNeverSpansAMove:
         held_during_wait = []
         pump.wait_for_stop = lambda t=0: held_during_wait.append(
             pump._serial_lock.held)
+        pump.extract(2, 100, 12)
         pump.execute()
         assert held_during_wait == [0]

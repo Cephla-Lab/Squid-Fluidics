@@ -19,7 +19,7 @@ import pytest
 from fluidics.control.syringe_pump import SyringePumpSimulation
 from fluidics.errors import AbortRequested, RunControl, SafetyFault
 
-from .pump_helpers import bare_pump, halt_on_cancel
+from .pump_helpers import ScriptedSyringe, bare_pump, halt_on_cancel
 
 
 def _pump(**kwargs):
@@ -27,29 +27,15 @@ def _pump(**kwargs):
                                  speed_code_limit=10, waste_port=1, **kwargs)
 
 
-class FakeSyringe:
-    """The two calls Interruptible makes into the Tecan driver."""
-
-    def __init__(self, ready=True):
-        self.terminated = 0
-        self.ready = ready
-
-    def terminateCmd(self):
-        self.terminated += 1
-
-    def _checkReady(self):
-        return self.ready
-
-
 def _real_pump(ready=True):
     """A real SyringePump around a driver fake -- see pump_helpers.
 
     The interrupt logic lives in Interruptible, shared with the simulation, so
-    the only thing left to check on this side is that the two hooks are wired
-    to the driver. Without this the shipped path had no test at all -- which is
+    the only thing left to check on this side is that the hooks are wired to
+    the driver. Without this the shipped path had no test at all -- which is
     how the sleep-through-abort bug survived.
     """
-    return bare_pump(FakeSyringe(ready=ready))
+    return bare_pump(ScriptedSyringe(ready=ready))
 
 
 class TestTheRealPumpsHooks:
@@ -67,8 +53,7 @@ class TestTheRealPumpsHooks:
 
     def test_the_wait_ends_when_the_driver_reports_ready(self):
         pump = _real_pump(ready=True)
-        pump.wait_for_stop(0)
-        assert pump.is_busy is False
+        assert pump.wait_for_stop(0) is False, "reported as cut short"
 
     def test_the_wait_keeps_polling_while_the_driver_is_not_ready(self, real_clock):
         """_checkReady, not the estimate, is what ends the move."""
@@ -130,6 +115,7 @@ class TestTheSignal:
         # False either way by the time execute returns.
         awaited = []
         pump.wait_for_stop = lambda t=0: awaited.append(t)
+        pump.extract(2, 100, 10)
         pump.execute()
         assert awaited == [5]
 
@@ -159,7 +145,7 @@ class TestTheCancelPathOnTheRealPump:
         _arm() and dispatch -- a cancel landing there returns from the wait at
         once and halts the move it could not prevent."""
         pump = _real_pump(ready=False)
-        pump.syringe.executeChain = lambda minimal_reset=True: 0
+        pump.extract(2, 100, 10)
         during_move(pump, pump.run_control.cancel)
         with pytest.raises(AbortRequested):
             pump.execute()
@@ -182,20 +168,18 @@ class TestTheCancelPathOnTheRealPump:
         """Without the entry check an execute() after a cancel would send the
         chain to the Tecan and wait out the whole move before raising."""
         pump = _real_pump()
-        dispatched = []
-        pump.syringe.executeChain = lambda minimal_reset=True: dispatched.append(True) or 0
+        pump.extract(2, 100, 10)
         pump.run_control.cancel()
         with pytest.raises(AbortRequested):
             pump.execute()
-        assert dispatched == []
+        assert pump.syringe.dispatched == []
 
     def test_an_unreadable_position_does_not_replace_the_cancellation(self, caplog, during_move):
         """After terminateCmd the plunger is still decelerating and the
         position read can fail. A driver error surfacing here would show the
         operator a pump fault instead of their own abort."""
         pump = _real_pump(ready=False)
-        pump.syringe.executeChain = lambda minimal_reset=True: 0
-        pump.chained_volume = 5
+        pump.extract(2, 5, 10)
         reads = []
 
         def unreadable():
@@ -208,29 +192,21 @@ class TestTheCancelPathOnTheRealPump:
             with pytest.raises(AbortRequested):
                 pump.execute()
         assert reads == [True]
-        assert pump.chained_volume == 0
+        assert pump.get_chained_volume() == 0
         assert "unreadable" in caplog.text
 
 
 class TestPauseHoldsTheNextChain:
-    """A paused run holds before a chain is dispatched, so the move already in
-    flight finishes -- the pause takes hold at the chain boundary."""
+    """A run paused before a chain is dispatched holds at the gate; the move
+    in flight is the pause tests' business (test_syringe_pump_pause)."""
 
     def test_execute_holds_while_paused_and_runs_on_resume(self, holds_while_paused):
         pump = _pump()
         dispatched = []
         pump.wait_for_stop = lambda t=0: dispatched.append(t)
+        pump.extract(2, 100, 10)
         holds_while_paused(pump.run_control, pump.execute)
         assert dispatched, "the chain never ran after the resume"
-
-    def test_a_move_in_flight_is_not_held(self, real_clock):
-        """wait_for_stop answers to cancellation only: a plunger that is
-        already moving must be waited out, not abandoned mid-stroke."""
-        pump = _pump()
-        pump.run_control.pause()
-        started = time.monotonic()
-        pump.wait_for_stop(0.05)
-        assert time.monotonic() - started >= 0.04
 
     def test_a_cancel_beats_a_pending_pause(self):
         """The cancel clears the pause on its way past, so the gate raises
