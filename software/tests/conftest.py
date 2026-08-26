@@ -58,11 +58,16 @@ def during_move():
     _arm() before any chain is dispatched, a different path from the mid-move
     one these tests model.
     """
-    def _hook(sp, side_effect):
+    def _hook(sp, side_effect, nth=None):
+        """Fire on every call, or only on the nth -- a pause that must land
+        once, inside the first move, and not again on the resumed remainder."""
         original_wait = sp.wait_for_stop
+        calls = []
 
         def wait_for_stop(t=0):
-            side_effect()
+            calls.append(t)
+            if nth is None or len(calls) == nth:
+                side_effect()
             return original_wait(t)
 
         sp.wait_for_stop = wait_for_stop
@@ -95,6 +100,24 @@ def dispenses(chain):
     """Whether a chain pushes liquid out -- the last chain of a fluidic
     operation, as opposed to a draw or a dump to waste."""
     return any(op[0] == "dispense" for op in chain)
+
+
+def moved_ul(sp, kind):
+    """Total volume the simulated pump has moved in ops of `kind`, across
+    every executed chain -- the figure a paused-and-resumed operation has to
+    match against an uninterrupted one."""
+    return sum(op[2] for op in sp.executed_ops if op[0] == kind)
+
+
+def wait_until(predicate, timeout=2, step=0.002):
+    """Poll `predicate` on the real clock. True once it holds, False if
+    `timeout` seconds pass first."""
+    deadline = _time.monotonic() + timeout
+    while not predicate():
+        if _time.monotonic() > deadline:
+            return False
+        _time.sleep(step)
+    return True
 
 
 # Long enough to outlast thread start-up, short enough not to pad the suite:
@@ -147,6 +170,24 @@ def holds_while_paused(real_clock, run_in_background):
         assert not error, error
 
     return _check
+
+
+@pytest.fixture
+def parks(real_clock, run_in_background):
+    """Run `call` in the background and wait until the run has come to rest at
+    a gate -- the shape of a pause landing inside a move. Returns (finished,
+    error) for the test to resume or cancel into; `finished.wait(2) and not
+    error` is then the usual close.
+
+    Real clock by construction, like holds_while_paused: the point is that
+    the call has not returned.
+    """
+    def _park(control, call):
+        finished, error = run_in_background(call)
+        assert wait_until(lambda: control.at_rest), f"the run never parked: {error}"
+        return finished, error
+
+    return _park
 
 
 @pytest.fixture

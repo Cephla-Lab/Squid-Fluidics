@@ -10,15 +10,17 @@ readings arrive on hardware: the sequence thread waits there while the reader
 thread delivers packets.
 """
 
-import time
-
 import logging
+import threading
+import time
 
 import pytest
 
 from fluidics.errors import Cancelled
 from fluidics.flow_monitor import FlowFault
 from fluidics.merfish_operations import MERFISHOperations
+
+from ..conftest import moved_ul
 
 
 class ScriptedSensor:
@@ -220,23 +222,94 @@ class TestWarningsAreReportable:
                 == logging.getLogger("fluidics.merfish_operations").warning)
 
 
-def test_a_pause_inside_a_guarded_draw_does_not_park_the_run(
-        ops_and_sensor, real_clock, run_in_background):
-    """The guard arms the sensors and the chain's gate follows. Parking there
-    would leave the sensors watching a stopped pump: a `stop` sensor would see
-    no flow, decide the draw had failed, and cancel the run with a diagnosis
-    nobody caused."""
-    ops, sensor, sp = ops_and_sensor
-    ops.sv.fc.COMMAND_SECONDS = 0
-    sp.wait_for_stop = lambda t=0: sensor.play()
-    original = sp.execute
+class TestPauseUnderTheGuard:
+    """A pause stops the pump inside an armed guard. The sensor keeps
+    publishing whether the plunger moves or not, so without the guard standing
+    down a `stop` sensor would read the stopped flow as a failed draw and
+    cancel the run with a diagnosis nobody caused."""
 
-    def execute():
-        ops.run_control.pause()        # armed guard, chain not yet dispatched
-        original()
+    def test_a_pause_mid_draw_parks_the_run_and_faults_nothing(
+            self, ops_and_sensor, parks):
+        ops, sensor, sp = ops_and_sensor
+        ops.sv.fc.COMMAND_SECONDS = 0
+        sp.ESTIMATE_SECONDS = 0.05
+        sensor.ramp_up_seconds = 0.05
+        original = sp.wait_for_stop        # already plays the sensor first
+        calls = []
 
-    sp.execute = execute
-    finished, error = run_in_background(lambda: ops.process_sequence(SEQ))
-    assert finished.wait(2), "the run parked inside an armed guard"
-    assert not error, f"a paused draw was failed: {error}"
-    assert sensor.faults == [], "a pause was reported as a flow fault"
+        def wait_for_stop(t=0):
+            calls.append(t)
+            if len(calls) == 1:
+                ops.run_control.pause()
+                stopped = original(t)      # wakes, halts: the flow decays
+                sensor.flow = 0.0
+                sensor.play()              # a stopped pump, as the sensor sees it
+                return stopped
+            # The plunger starts from rest again: flow builds up. These would
+            # fault a rule still counting from the draw's original start,
+            # whose ramp-up window has long expired.
+            sensor.play(samples=3, step=0.01)
+            sensor.flow = 500.0
+            return original(t)
+
+        sp.wait_for_stop = wait_for_stop
+        finished, error = parks(ops.run_control, lambda: ops.process_sequence(SEQ))
+        assert sensor.faults == [], "the stopped pump was reported as a flow fault"
+        time.sleep(0.06)                   # the original ramp-up window expires
+        ops.run_control.resume()
+        assert finished.wait(2), "the draw did not finish after the resume"
+        assert not error, f"a paused draw was failed: {error}"
+        assert sensor.faults == []
+        assert moved_ul(sp, "extract") == pytest.approx(500)
+
+    def test_a_pause_retracted_before_the_pump_reacted_faults_nothing(
+            self, ops_and_sensor, real_clock):
+        """Pause, then Resume a moment later, while the pump is inside its
+        wait. A notified wait returns True even once the flag is cleared
+        again, so the pump wakes, halts and re-dispatches all the same -- but
+        the run's `paused` was raised and cleared between two samples, and
+        the sensor never saw it. The guard has to go by the pump's own
+        `moving`, or the dip while the plunger restarts would be judged as a
+        failed draw."""
+        ops, sensor, sp = ops_and_sensor
+        ops.sv.fc.COMMAND_SECONDS = 0
+        sp.ESTIMATE_SECONDS = 0.05
+        sensor.ramp_up_seconds = 0.05
+        original = sp.wait_for_stop
+        calls = []
+
+        def pause_and_retract():
+            ops.run_control.pause()
+            ops.run_control.resume()
+
+        def wait_for_stop(t=0):
+            calls.append(t)
+            if len(calls) == 1:
+                threading.Timer(0.01, pause_and_retract).start()
+                stopped = original(t)          # woken all the same: halts
+                assert stopped, "the pump slept through the pause"
+                sensor.flow = 0.0
+                sensor.play()                  # the plunger has stopped
+                sensor.flow = 500.0
+                return stopped
+            return original(t)
+
+        sp.wait_for_stop = wait_for_stop
+        ops.process_sequence(SEQ)
+        assert sensor.faults == [], "a retracted pause was reported as a flow fault"
+        assert len(calls) == 2, "the remainder was not re-issued"
+        assert moved_ul(sp, "extract") == pytest.approx(500)
+
+    def test_a_pause_already_pending_parks_before_the_sensors_arm(
+            self, ops_and_sensor, holds_while_paused):
+        """No reason to arm a guard around a pump that is not going to move."""
+        ops, sensor, sp = ops_and_sensor
+        ops.sv.fc.COMMAND_SECONDS = 0
+        sp.ESTIMATE_SECONDS = 0
+
+        def nothing_armed():
+            assert sensor.subscribers == [], "the guard armed on a parked run"
+
+        holds_while_paused(ops.run_control, lambda: ops.process_sequence(SEQ),
+                           while_held=nothing_armed)
+        assert sensor.guarded_draws == 1

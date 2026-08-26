@@ -4,7 +4,9 @@
 Real clock, because the property is that time passes and the operation does
 not proceed -- the fake clock's instant waits cannot show that. The
 simulation's own durations are switched off: what is under test is the gate,
-not how long a simulated valve or move takes.
+not how long a simulated valve or move takes. A pause landing *inside* a move
+is test_flow_draw_protection's TestPauseUnderTheGuard, which asserts the same
+end-to-end volume with the sensors watching.
 """
 
 import pytest

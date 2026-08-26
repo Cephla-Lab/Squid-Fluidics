@@ -167,11 +167,15 @@ class DrawGuard:
     per-sensor record.
     """
 
-    def __init__(self, sensors, expected_ul_min, run_control, log=print):
+    def __init__(self, sensors, expected_ul_min, run_control, log=print,
+                 moving=None):
         self.sensors = sensors
         self.expected_ul_min = expected_ul_min
         self.run_control = run_control
         self.log = log
+        # The pump's own word on whether it is moving (Interruptible.moving).
+        # Without one the guard judges every sample, as it did before pause.
+        self.moving = moving if moving is not None else (lambda: True)
 
         self._handlers = []
         self._lock = threading.Lock()
@@ -219,9 +223,10 @@ class DrawGuard:
         """One closure per sensor, holding its own rule and mode."""
         stop = (mode == "stop")
         done = False
+        standing_down = False
 
         def handle(flow, timestamp):
-            nonlocal done
+            nonlocal done, standing_down
             # The rule keeps faulting on every sample once it has tripped, and
             # this handler has nothing more to say after the first: warn has
             # logged, and stop has either claimed the draw or lost it. Bailing
@@ -229,6 +234,21 @@ class DrawGuard:
             # reader thread's per-packet work flat for the rest of the draw.
             if done:
                 return
+
+            # The pump stops on purpose for a pause, and the sensor keeps
+            # publishing whether it moves or not. The pump's own `moving` is
+            # the word to go by -- not the run's `paused`, which a quick
+            # Pause/Resume can raise and clear between two samples while the
+            # pump still halts and restarts on it. `moving` is cleared before
+            # the halt is sent, so the flow's decay is never judged; and the
+            # plunger starts from rest again afterwards, so the rule restarts
+            # with a fresh ramp-up window at the first sample of the new move.
+            if not self.moving():
+                standing_down = True
+                return
+            if standing_down:
+                standing_down = False
+                rule.start(timestamp)
 
             fault = rule.sample(flow, timestamp)
             if fault is None:

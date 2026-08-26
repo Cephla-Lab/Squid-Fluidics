@@ -1,77 +1,175 @@
 import logging
-import fluidics.control.tecancavro as tecancavro
 import threading
+import time
 
-from ..errors import Cancelled, RunControl
+import fluidics.control.tecancavro as tecancavro
+
+from ..errors import Cancelled, RunControl, SafetyFault
 from .discovery import find_serial_port
 
 _logger = logging.getLogger(__name__)
 
 
 class Interruptible:
-    """Halting a move that is already running, shared by both pump classes.
+    """Running a chain of moves under the run's RunControl, shared by both
+    pump classes.
 
-    A move is interrupted by a cancel on the run's RunControl -- the operator
-    pressed Abort, or draw protection raised a flow fault on it. Nothing
-    touches the hardware on the cancelling thread: the thread inside
-    wait_for_stop wakes, halts the plunger on the thread that owns the port,
-    and raises the cause out of the device call, so the operation unwinds
-    instead of returning as if it had finished. The cause latches until
-    RunControl.reset().
+    Moves are queued by extract() / dispense() / dispense_to_waste() as op
+    tuples, carrying the speed the pump will actually run (the shared
+    SpeedCodes.effective_speed_code, so the two classes cannot drift):
+        ("extract",  port, volume_ul, speed_code)
+        ("dispense", port, volume_ul, speed_code)
+        ("dispense_to_waste", speed_code)
+    and execute() runs them one at a time, each through the run's gate.
+
+    A cancel wakes the thread inside wait_for_stop, which halts the plunger
+    on the thread that owns the port and raises the cause out of execute().
+    A pause halts the op in flight the same way, then parks at the gate --
+    counted in `holding`, so the GUI's *paused* means what it says -- and
+    when the gate opens on a resume re-issues what the op had left. One op
+    at a time is what makes that simple: the interrupted op is the one that
+    was dispatched, and nothing has to be worked out from where the plunger
+    stopped. A cancel while parked raises before anything is re-issued.
 
     Shared rather than written twice because the simulation is where these
-    semantics get tested -- the real pump needs hardware. Two copies would put
-    the tested one and the shipped one out of reach of each other.
-
-    Subclasses supply the two hardware-shaped pieces: halt() to stop the
-    plunger, and _move_finished() to say whether it has stopped.
+    semantics get tested -- the real pump needs hardware. Subclasses supply
+    the hardware-shaped pieces: halt() and _move_finished() for the plunger,
+    _estimate(op) for what a queued op will take, and _start(op) /
+    _resume(op) to send an op and its remainder; _halted(op) and
+    _finished(op) are theirs to fill in if they keep records.
     """
 
     def _init_run_control(self, run_control=None):
         self.is_busy = False
+        # True from the moment a move is sent until it is halted or has
+        # finished. Cleared *before* a halt is sent, so anything judging the
+        # flow (the DrawGuard) stands down before it decays.
+        self.moving = False
         self.run_control = run_control if run_control is not None else RunControl()
+        self._chain = []
+
+    # --- queueing ---
+
+    def extract(self, port, volume, speed_code):
+        return self._queue(("extract", port, volume,
+                            self.effective_speed_code(speed_code)))
+
+    def dispense(self, port, volume, speed_code):
+        return self._queue(("dispense", port, volume,
+                            self.effective_speed_code(speed_code)))
+
+    def dispense_to_waste(self, speed_code=None):
+        return self._queue(("dispense_to_waste",
+                            self.effective_speed_code(speed_code)))
+
+    def _queue(self, op):
+        """Queue `op`; return the pump's time estimate for it, which the
+        manual tab's progress bar reads."""
+        self._chain.append(op)
+        return self._estimate(op)
+
+    def reset_chain(self):
+        self._chain = []
+
+    def get_chained_volume(self):
+        """What the queue would add to the held volume: the same fold as the
+        plunger's, seeded with zero, so there is no separate count to keep in
+        step with it."""
+        return self._held_after(self._chain, 0)
+
+    @staticmethod
+    def _held_after(ops, held_ul):
+        """Held volume after running `ops` from `held_ul`."""
+        for op in ops:
+            if op[0] == "extract":
+                held_ul += op[2]
+            elif op[0] == "dispense":
+                held_ul -= op[2]
+            else:  # dispense_to_waste empties whatever is held at that point
+                held_ul = 0
+        return held_ul
 
     # --- what a real pump does and a simulated one cannot ---
 
     def halt(self):
         """Stop the plunger, whatever it is doing. Nothing to stop in
-        simulation. Called by the thread inside wait_for_stop when the run is
-        cancelled, and by DeviceSet.make_safe once a run has ended early."""
+        simulation. Called by the thread inside wait_for_stop when the run
+        stops, and by DeviceSet.make_safe once a run has ended early."""
 
     def _move_finished(self):
         """Whether the move has ended. A simulated move ends when its
         estimated duration does, so there is nothing further to wait for."""
         return True
 
-    # --- interruption ---
+    def _halted(self, op):
+        """The op was halted for a pause and the plunger has stopped."""
+
+    def _finished(self, op):
+        """The op ran to its end."""
+
+    # --- running ---
+
+    def execute(self):
+        """Run the queued ops in order. Returns when the last has finished;
+        later than estimated if the run was paused on the way. Raises the
+        run's cause if it is cancelled, before or during."""
+        # Consumed either way, as the Tecan's chain is: a cancelled chain
+        # must not resurface as chained volume the next call reports.
+        chain, self._chain = self._chain, []
+        # The gate first, even for an empty chain: an execute() after a
+        # cancel raises rather than returning as if it had run.
+        self.run_control.checkpoint()
+        self.is_busy = True
+        try:
+            for op in chain:
+                self._run_op(op)
+        finally:
+            self.is_busy = False
+            self.moving = False
+
+    def _run_op(self, op):
+        """Run one op to the end, however many pauses that takes."""
+        self.run_control.checkpoint()
+        estimate = self._start(op)
+        self.moving = True
+        while self.wait_for_stop(estimate):
+            self._halted(op)
+            self.run_control.checkpoint()
+            estimate = self._resume(op)
+            self.moving = True
+        self._finished(op)
 
     def wait_for_stop(self, t=0):
-        """Block until the move finishes or the run is cancelled. On a cancel,
-        halt the plunger here -- on the thread that owns the move -- then
-        raise the cause.
+        """Block until the move finishes or the run stops. Returns False when
+        the move finished; True when a pause cut it short -- the plunger has
+        been halted, here, on the thread that owns the port, and the caller
+        finishes the move on resume. On a cancel, halt likewise, then raise
+        the cause.
 
-        t is the pump's estimate of how long the whole chain will take -- about
-        240 s for a 2000 uL draw at 500 uL/min -- so it only gates when we
-        start asking: _move_finished() is the authoritative end-of-move
-        signal, and waiting on the run's signal returns the moment it trips.
+        t is the pump's estimate of how long the move will take -- about 240 s
+        for a 2000 uL draw at 500 uL/min -- so it only gates when we start
+        asking: _move_finished() is the authoritative end-of-move signal, and
+        waiting on the run's signal returns the moment it stops.
         """
-        cancelled = self.run_control.wait(t)
-        while not cancelled and not self._move_finished():
-            cancelled = self.run_control.wait(0.5)
-        self.is_busy = False
-        if cancelled:
-            # This also closes the window between the check in execute() and
-            # dispatch: a cancel landing there returns from the wait at once
-            # and halts the move it could not prevent.
-            try:
-                self.halt()
-            except Exception as e:
-                # The cancellation still has to reach the worker -- its safety
-                # cleanup depends on it -- so the halt failure is reported
-                # here, loudly, rather than replacing the cause.
-                _logger.error("Halting the plunger after the cancel failed; the "
-                              "pump may still be moving: %s", e, exc_info=True)
+        stopped = self.run_control.wait_interrupted(t)
+        while not stopped and not self._move_finished():
+            stopped = self.run_control.wait_interrupted(0.2)
+        self.moving = False
+        if not stopped:
+            return False
+        # This also closes the window between the gate in execute() and the
+        # dispatch: a cancel landing there returns from the wait at once and
+        # halts the move it could not prevent.
+        try:
+            self.halt()
+        except Exception as e:
+            # The stop still has to reach the caller -- the worker's safety
+            # cleanup depends on a cancel getting through -- so the halt
+            # failure is reported here, loudly, rather than replacing it.
+            _logger.error("Halting the plunger failed; the pump may still be "
+                          "moving: %s", e, exc_info=True)
         self.run_control.check()
+        return True
 
 
 class SpeedCodes:
@@ -174,7 +272,6 @@ class SyringePump(SpeedCodes, Interruptible):
         self.volume = syringe_ul
         self.speed_code_limit = speed_code_limit
         self.range = 3000  # Property of the syringe pump
-        self.chained_volume = 0
 
         # Every touch of self.syringe -- a wire round trip or the driver's
         # chain-building state -- happens under this lock. The GUI's plunger
@@ -202,30 +299,101 @@ class SyringePump(SpeedCodes, Interruptible):
     def get_current_volume(self):
         return self.volume * self.plunger_pos  # ul
 
-    def get_chained_volume(self):
-        return self.chained_volume  # ul
-
-    def set_speed(self, speed_code):
-        with self._serial_lock:
-            self.syringe.setSpeed(speed_code)
-
-    def set_wait(self, time_s):
-        with self._serial_lock:
-            self.syringe.delayExec(time_s * 1000)
-
     def reset_chain(self):
         with self._serial_lock:
             self.syringe.resetChain()
-        self.chained_volume = 0
+        super().reset_chain()
+
+    # --- the ops, in the driver's terms ---
+
+    def _estimate(self, op):
+        """The driver's own time estimate for `op`, built on its chain and
+        discarded, since ops are dispatched one at a time from execute().
+
+        resetChain() restores the driver's chain state from its last real
+        reading, so each op is timed from the plunger's current position
+        rather than from the end of the ops queued before it -- a dump queued
+        after an extract is timed as if from before the extract. Only the
+        manual tab's progress bar and the first wait's length read this;
+        _move_finished() is what ends a move.
+        """
+        with self._serial_lock:
+            self._build(op)
+            t = self.syringe.exec_time
+            self.syringe.resetChain()
+        return t
+
+    def _build(self, op):
+        """Queue `op` on the driver's chain as the relative move it has always
+        been: the same bytes an unpaused run has always sent."""
+        kind, code = op[0], op[-1]
+        self.syringe.setSpeed(code)
+        if kind == "extract":
+            self.syringe.extract(op[1], op[2])
+        elif kind == "dispense":
+            self.syringe.dispense(op[1], op[2])
+        else:
+            self.syringe.dispenseToWaste(retain_port=False)
+
+    def _start(self, op):
+        """Send `op`, and remember where it will end in case it has to be
+        resumed. The target is the driver's own arithmetic: building the op
+        advances its chain state by exactly the steps the command carries,
+        from a reading of where the plunger is now."""
+        with self._serial_lock:
+            start = self.syringe.getPlungerPos()
+            self.syringe.updateSimState()      # its bookkeeping starts from the truth
+            self._build(op)
+            self._op_target = self.syringe.sim_state["plunger_pos"]
+            self._op_port = self.syringe.sim_state["port"]
+            t = self.syringe.executeChain(minimal_reset=True)
+        self.plunger_pos = start / self.range
+        return t
+
+    def _resume(self, op):
+        """Send what is left of `op`: an absolute move to its target, at its
+        speed, on its port. The target was fixed before the op started, so
+        no reading of the decelerating pump decides how much liquid moves."""
+        with self._serial_lock:
+            start = self.syringe.getPlungerPos()
+            self.syringe.updateSimState()
+            _logger.info("Resuming the move: %d steps to go.",
+                         abs(self._op_target - start))
+            self.syringe.setSpeed(op[-1])
+            self.syringe.changePort(self._op_port)
+            self.syringe.movePlungerAbs(self._op_target)
+            t = self.syringe.executeChain(minimal_reset=True)
+        self.plunger_pos = start / self.range
+        return t
+
+    def _halted(self, op):
+        """The plunger has been told to stop for a pause: let it, then record
+        where it stopped. The reading is bookkeeping and log -- the resume
+        does not depend on it -- so a failed read is reported, not raised."""
+        deadline = time.monotonic() + 5
+        while not self._move_finished():
+            if time.monotonic() > deadline:
+                # The instrument's fault, not a pause: cancel the run with it
+                # so the gate opens and the worker reports the diagnosis.
+                # Raised as a plain error here it would leave the run parked
+                # behind a closed gate. First cause wins if one is set.
+                self.run_control.cancel(SafetyFault(
+                    "the plunger did not stop within 5 s of being halted for the pause"))
+                self.run_control.check()
+            time.sleep(0.05)
+        try:
+            self.get_plunger_position()
+        except Exception as e:
+            _logger.warning("Plunger position unreadable after the halt (%s); "
+                            "the remainder still runs on resume.", e)
+            return
+        steps = round(self.plunger_pos * self.range)
+        _logger.info("Paused mid-move at %d steps, %d to go.",
+                     steps, abs(self._op_target - steps))
 
     def execute(self):
-        # wait_for_stop is the only waiting path.
-        self.run_control.checkpoint()
-        self.is_busy = True
-        with self._serial_lock:
-            t = self.syringe.executeChain(minimal_reset=True)
         try:
-            self.wait_for_stop(t)
+            super().execute()
         except Cancelled:
             # The position read keeps the volume bookkeeping honest for the
             # park-to-waste close, but the pump is still decelerating from
@@ -239,37 +407,7 @@ class SyringePump(SpeedCodes, Interruptible):
                                 "(%s); volume bookkeeping may be off until the "
                                 "next move.", e)
             raise
-        finally:
-            self.chained_volume = 0
         self.get_plunger_position()
-
-    def get_time_to_finish(self):
-        with self._serial_lock:
-            return self.syringe.exec_time
-
-    def dispense(self, port, volume, speed_code):
-        with self._serial_lock:
-            self.syringe.setSpeed(self.effective_speed_code(speed_code))
-            self.syringe.dispense(port, volume)
-            t = self.syringe.exec_time
-        self.chained_volume = self.chained_volume - volume
-        return t
-
-    def extract(self, port, volume, speed_code):
-        with self._serial_lock:
-            self.syringe.setSpeed(self.effective_speed_code(speed_code))
-            self.syringe.extract(port, volume)
-            t = self.syringe.exec_time
-        self.chained_volume = self.chained_volume + volume
-        return t
-
-    def dispense_to_waste(self, speed_code=None):
-        with self._serial_lock:
-            self.syringe.setSpeed(self.effective_speed_code(speed_code))
-            self.syringe.dispenseToWaste(retain_port=False)
-            t = self.syringe.exec_time
-        self.chained_volume = 0
-        return t
 
     def halt(self):
         # The lock only makes this queue behind an in-flight round trip -- or,
@@ -289,30 +427,31 @@ class SyringePump(SpeedCodes, Interruptible):
             self.execute()
         del self.com_link
 
+
 class SyringePumpSimulation(SpeedCodes, Interruptible):
     """Simulation counterpart that remembers what it was asked to do.
 
-    Chains are recorded the way the real pump runs them: extract / dispense /
-    dispense_to_waste queue op tuples, and execute() replays the queue into
-    `executed` (one list of ops per executed chain) while updating the held
-    volume. get_current_volume() and get_chained_volume() therefore do real
-    accounting -- the operations layer's overflow and tubing arithmetic reads
+    execute() replays the queued ops into `executed` while moving the held
+    volume, so get_current_volume() and get_chained_volume() do real
+    accounting: the operations layer's overflow and tubing arithmetic reads
     them, and a simulation that returned constants (as this one used to)
     exempted all of that arithmetic from every test.
 
-    Op tuples, carrying the speed the real pump would set (the shared
-    SpeedCodes.effective_speed_code, so the two cannot drift):
-        ("extract",  port, volume_ul, effective_speed_code)
-        ("dispense", port, volume_ul, effective_speed_code)
-        ("dispense_to_waste", effective_speed_code)
+    `executed` holds one list per execute() that moved something: a chain
+    parked and then aborted before its first op leaves none, and a chain a
+    cancel cut short keeps the pieces that ran. A pause splits the op in
+    flight where it lands -- the fraction of the estimate that had elapsed --
+    and records both pieces in the same chain, so a test can pin that a
+    paused-and-resumed operation moves exactly the liquid an uninterrupted
+    one does. A dump is recorded once, on completion. Under the suite's fake
+    clock every wait "takes" its whole estimate, so a pause there splits at
+    the end; the split tests run on the real clock.
 
     The plunger starts mid-stroke, as the old constant simulation reported,
     so existing tests keep the same headroom before an emptying dump.
-
-    An execute() that a cancel wakes early raises before folding the chain,
-    and the chain is consumed as the Tecan's is; the partial volume a real
-    pump reads back after the halt is not modeled.
     """
+
+    ESTIMATE_SECONDS = 5
 
     def __init__(self, sn, syringe_ul, speed_code_limit, waste_port, num_ports=4, slope=14,
                  run_control=None):
@@ -321,8 +460,8 @@ class SyringePumpSimulation(SpeedCodes, Interruptible):
         self.speed_code_limit = speed_code_limit
         self.range = 3000
         self._held_ul = 0.5 * syringe_ul
-        self._chain = []
         self.executed = []
+        self._current = []
         self._init_run_control(run_control)
         self.get_plunger_position()
         _logger.info("Simulated syringe pump.")
@@ -332,70 +471,66 @@ class SyringePumpSimulation(SpeedCodes, Interruptible):
         """Every executed op in order, chain boundaries flattened away."""
         return [op for chain in self.executed for op in chain]
 
-    @staticmethod
-    def _run(ops, held_ul):
-        """Held volume after running `ops` from `held_ul` -- the plunger's
-        arithmetic, written once: the queued-volume view is the same fold
-        seeded with zero, so there is no separate chained_volume to keep in
-        step with it."""
-        for op in ops:
-            if op[0] == "extract":
-                held_ul += op[2]
-            elif op[0] == "dispense":
-                held_ul -= op[2]
-            else:  # dispense_to_waste empties whatever is held at that point
-                held_ul = 0
-        return held_ul
-
     def get_plunger_position(self):
         self.plunger_pos = self._held_ul / self.volume
         return self.plunger_pos
 
     def get_current_volume(self):
-        return self.volume * self.plunger_pos
+        return self._held_ul      # the source of truth; plunger_pos is derived from it
 
-    def get_chained_volume(self):
-        return self._run(self._chain, 0)
-
-    def set_speed(self, speed_code):
-        pass
-
-    def set_wait(self, time_s):
-        pass
-
-    def reset_chain(self):
-        self._chain = []
+    def _estimate(self, op):
+        return self.ESTIMATE_SECONDS
 
     def execute(self):
-        self.run_control.checkpoint()
-        self.is_busy = True
-        try:
-            self.wait_for_stop(5)
-        finally:
-            # Consumed either way, as the Tecan's chain is: a cancelled chain
-            # must not resurface as chained volume the next call reports.
-            chain, self._chain = self._chain, []
-        self._held_ul = self._run(chain, self._held_ul)
-        self.executed.append(chain)
+        self._current = []
+        super().execute()
+
+    def _record(self, piece):
+        if not self._current:
+            self.executed.append(self._current)
+        self._current.append(piece)
+
+    def _start(self, op):
+        self._target_ul = self._held_after([op], self._held_ul)
+        # Signed, and the op's own figure rather than target - held, so an
+        # uninterrupted op is recorded with exactly the volume queued.
+        if op[0] == "extract":
+            self._to_move = op[2]
+        elif op[0] == "dispense":
+            self._to_move = -op[2]
+        else:
+            self._to_move = -self._held_ul
+        self._seconds_left = self.ESTIMATE_SECONDS
+        return self._resume(op)
+
+    def _resume(self, op):
+        self._dispatched_at = time.monotonic()
+        return self._seconds_left
+
+    def _halted(self, op):
+        """Split the op where the pause landed: the part that ran is the
+        fraction of the remaining estimate that had elapsed."""
+        if self._seconds_left:
+            fraction = min(1.0, (time.monotonic() - self._dispatched_at) / self._seconds_left)
+        else:
+            fraction = 1.0
+        moved = fraction * self._to_move
+        if moved and op[0] != "dispense_to_waste":
+            self._record((op[0], op[1], abs(moved), op[3]))
+        self._held_ul += moved
+        self._to_move -= moved
+        self._seconds_left *= 1 - fraction
         self.get_plunger_position()
 
-    def get_time_to_finish(self):
-        return 5
-
-    def dispense(self, port, volume, speed_code):
-        self._chain.append(("dispense", port, volume,
-                            self.effective_speed_code(speed_code)))
-        return 5
-
-    def extract(self, port, volume, speed_code):
-        self._chain.append(("extract", port, volume,
-                            self.effective_speed_code(speed_code)))
-        return 5
-
-    def dispense_to_waste(self, speed_code=None):
-        self._chain.append(("dispense_to_waste",
-                            self.effective_speed_code(speed_code)))
-        return 5
+    def _finished(self, op):
+        if op[0] == "dispense_to_waste":
+            self._record(op)
+        elif self._to_move or not op[2]:
+            # The remainder. A zero-volume op queued is recorded as such; a
+            # split op whose remainder was nothing is not.
+            self._record((op[0], op[1], abs(self._to_move), op[3]))
+        self._held_ul = self._target_ul
+        self.get_plunger_position()
 
     def close(self, to_waste=False):
         pass

@@ -187,17 +187,15 @@ class OpenChamberOperations():
 
     def _execute_under_drain(self):
         """Run the queued chain with the drain pump aspirating. The drain runs
-        across the whole dispense; a failing execute must not leave it on."""
-        # A pause parks here, before the drain is powered. Not inside: the
-        # drain pulling with no inflow would empty the chamber for the length
-        # of the hold, and the chain's own gate sits after dp.start().
-        self.run_control.checkpoint()
-        with self.run_control.no_hold():
-            self.dp.start(0.3)
-            try:
+        across the whole dispense and follows the syringe into a pause: a
+        drain pulling with no inflow would empty the chamber for the length
+        of the hold. A failing execute must not leave it on either."""
+        self.dp.start(0.3)      # gates: a pause already pending parks here, drain off
+        try:
+            with self.run_control.when_held(self.dp.stop, lambda: self.dp.start(0.3)):
                 self.sp.execute()
-            finally:
-                self.dp.stop()
+        finally:
+            self.dp.stop()
 
     def priming_or_clean_up(self, port, flow_rate, volume, use_ports=None, clean_up=False):
         """
