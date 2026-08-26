@@ -21,10 +21,15 @@ class SelectorValve():
         self.open(self.position)
         _logger.info("Selector valve id = %s initialized.", valve_id)
 
-    def open(self, port):
+    def open(self, port, run_control=None):
+        # Checked here rather than once per cascade: a cancel landing between
+        # two moves would otherwise still send this one. Homing at
+        # construction passes no signal -- there is no run yet.
+        if run_control is not None:
+            run_control.check()
         _logger.debug("Valve %s: open port %s", self.id, port)
         self.fc.send_command(CMD_SET.SET_ROTARY_VALVE, self.id, port)
-        self.fc.wait_for_completion()
+        self.fc.wait_for_completion(run_control=run_control)
         current_position = self.get_current_position()
         if current_position != port:
             raise RuntimeError(f"current position is {current_position}; expected {port}")
@@ -60,11 +65,6 @@ class SelectorValveSystem():
         return name_mapping.get('port_' + str(port_index))
 
     def open_port(self, port_index):
-        # No motion on a cancelled run: this is the last driver call that
-        # started one without checking, and the operations sit between valve
-        # moves and pump chains often enough that a cancel would otherwise
-        # rotate a valve on its way out.
-        self.run_control.check()
         if not 1 <= port_index <= self.available_port_number:
             # This used to be a silent return, which left whatever port was
             # last open selected -- the draw then pulled the wrong reagent
@@ -77,16 +77,17 @@ class SelectorValveSystem():
         for valve in self.valves[:-1]:  # Process all valves except the last one
             ports_in_valve = valve.number_of_ports - 1
             if port_index > (ports_processed + ports_in_valve):
-                valve.open(ports_in_valve + 1)  # Open the last port
+                valve.open(ports_in_valve + 1, self.run_control)  # Open the last port
                 ports_processed += ports_in_valve
             else:
-                valve.open(port_index - ports_processed)
+                valve.open(port_index - ports_processed, self.run_control)
                 self.current_port = port_index
                 return
 
         # If we get here, it's in the last valve
-        self.valves[-1].open(port_index - ports_processed)
-        self.fc.wait_for_completion()
+        # No trailing wait: open() has already waited for this move and read
+        # the position back.
+        self.valves[-1].open(port_index - ports_processed, self.run_control)
         self.current_port = port_index
         return
 

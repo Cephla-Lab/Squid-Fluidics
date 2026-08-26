@@ -1,15 +1,17 @@
 # tests/unit/control/test_selector_valve.py
 import pytest
 
+from fluidics.control._def import CMD_SET
 from fluidics.control.config import load_config
+from fluidics.errors import AbortRequested, RunControl
 from fluidics.control.controller import FluidControllerSimulation
 from fluidics.control.selector_valve import SelectorValveSystem
 
 
-def _make_valve_system(config_path):
+def _make_valve_system(config_path, run_control=None):
     config = load_config(str(config_path))
     fc = FluidControllerSimulation(serial_number="test")
-    return SelectorValveSystem(fc, config)
+    return SelectorValveSystem(fc, config, run_control)
 
 
 @pytest.fixture
@@ -116,3 +118,54 @@ class TestOpenPort:
         with pytest.raises(ValueError, match=r"1\.\.10"):
             open_chamber_system.open_port(port)
         assert open_chamber_system.get_current_port() == 5
+
+
+class TestACancelledRunMovesNoValve:
+    """Port addressing walks the cascade valve by valve, so a cancel can land
+    between two moves. Each move checks the run's signal before it sends, and
+    every wait on the way through takes it (see wait_for_completion for why
+    waiting one out is expensive)."""
+
+    @pytest.fixture
+    def system_and_commands(self, fixtures_dir):
+        """A valve system whose outgoing rotary commands are recorded. The
+        recording starts after construction, so the homing moves every valve
+        makes on the way up are not counted."""
+        control = RunControl()
+        system = _make_valve_system(fixtures_dir / "flow_cell_config.yaml", control)
+        sent = []
+        original = system.fc.send_command
+
+        def send_command(command, *args):
+            if command == CMD_SET.SET_ROTARY_VALVE:
+                sent.append(args)
+            return original(command, *args)
+
+        # Every valve holds this same controller, so one patch covers them all.
+        system.fc.send_command = send_command
+        return system, control, sent
+
+    def test_a_cancelled_run_sends_no_command_at_all(self, system_and_commands):
+        system, control, sent = system_and_commands
+        control.cancel()
+        with pytest.raises(AbortRequested):
+            system.open_port(1)
+        assert sent == []
+
+    def test_a_cancel_between_moves_stops_the_cascade_before_the_next_command(
+            self, system_and_commands):
+        """Port 28 is on the last valve, so the first two are stepped through
+        on the way. The cancel lands once the first move has completed -- the
+        window an entry check alone would miss, since the next valve.open()
+        would already have sent its command before its wait could raise."""
+        system, control, sent = system_and_commands
+        original = system.valves[0].open
+
+        def open_then_cancel(port, run_control=None):
+            original(port, run_control)
+            control.cancel()          # the operator, between two moves
+
+        system.valves[0].open = open_then_cancel
+        with pytest.raises(AbortRequested):
+            system.open_port(28)
+        assert len(sent) == 1, "a cancelled run moved another valve"

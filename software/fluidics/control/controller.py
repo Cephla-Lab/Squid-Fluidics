@@ -115,6 +115,19 @@ class Subscribers:
                 _logger.warning("%s subscriber failed: %s", self._label, e)
 
 
+def _interruptible_sleep(seconds, run_control):
+    """Wait out a poll interval, or raise the run's cause if it is cancelled.
+
+    The interval doubles as the wait on the signal, so a cancelled run is
+    noticed within one interval rather than at the caller's deadline. A None
+    signal is the uninterruptible case -- see wait_for_completion.
+    """
+    if run_control is None:
+        sleep(seconds)
+    else:
+        run_control.sleep(seconds)
+
+
 class PacketSubscribers:
     '''Mixin giving a controller a packet-stream subscriber list.
 
@@ -322,8 +335,18 @@ class FluidController(Microcontroller, PacketSubscribers):
         super().begin()
         self.start_reading()
     
-    def wait_for_completion(self, timeout=30):
+    def wait_for_completion(self, timeout=30, run_control=None):
         '''Block until the MCU reports a terminal status for the command we just sent.
+
+        run_control makes the wait interruptible: a cancelled run raises its
+        cause out of the poll instead of waiting out the deadline. Pass it
+        where the command's own bound is longer than an abort should wait --
+        a rotary valve move is the case this exists for, since RheoLink
+        retries around a 2 s poll. A command already bounded at a second or
+        two (the disc pump's power commands) does not need it, and one
+        reachable from stop(), close() or DeviceSet.make_safe() must not have
+        it: those run on a run that is already cancelled and have to confirm
+        their command completed.
 
         Matches on both the command UID and the publish sequence number
         (`_status_seq`, bumped by `_publish_status`), not UID alone. UID is not
@@ -355,8 +378,8 @@ class FluidController(Microcontroller, PacketSubscribers):
                     f"MCU did not complete command {self.cmd_sent} "
                     f"(uid {self.cmd_uid}) within {timeout}s"
                 )
-            sleep(0.005)
-    
+            _interruptible_sleep(0.005, run_control)
+
     def add_uid_to_cmd(self, cmd):
         '''Break cmd_uid into two bytes and overwrite the first two bytes of the command array with the uid'''
         cmd[0] = self.cmd_uid >> 8
@@ -964,6 +987,11 @@ class FluidController(Microcontroller, PacketSubscribers):
 
 
 class FluidControllerSimulation(PacketSubscribers):
+    # What a command takes on the wire, spent in wait_for_completion: the
+    # simulation blocks where the real controller blocks, so an abort can
+    # land in the same places.
+    COMMAND_SECONDS = 1
+
     def __init__(self, serial_number, use_cobs = True, log_measurements = False, debug = False):
         self.data = {
             'selector_valves_pos': {0: 1, 1: 1, 2: 1, 3: 1, 4: 1}
@@ -987,19 +1015,21 @@ class FluidControllerSimulation(PacketSubscribers):
         pass
 
     def send_command(self, command, *args):
-        sleep(1)
         if command == CMD_SET.SET_ROTARY_VALVE:
             self.data['selector_valves_pos'][args[0]] = args[1]
-        return
 
     def send_command_blocking(self, command, *args, timeout=30):
-        sleep(2)
-        if command == CMD_SET.SET_ROTARY_VALVE:
-            self.data['selector_valves_pos'][args[0]] = args[1]
-        return
+        self.send_command(command, *args)
+        return self.wait_for_completion(timeout=timeout)
 
-    def wait_for_completion(self, timeout=30):
-        pass
+    def wait_for_completion(self, timeout=30, run_control=None):
+        """Where a simulated command spends its time, and so where a cancelled
+        run raises -- the same place the real controller's poll would.
+
+        Returns a terminal status like the real one: callers branch on it.
+        """
+        _interruptible_sleep(self.COMMAND_SECONDS, run_control)
+        return COMMAND_STATUS.COMPLETED_WITHOUT_ERRORS
 
     def get_mcu_status(self):
         return self.data

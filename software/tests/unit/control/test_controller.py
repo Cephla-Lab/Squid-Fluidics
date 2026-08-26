@@ -3,6 +3,8 @@ import warnings
 
 import numpy as np
 import pytest
+
+from fluidics.errors import AbortRequested, RunControl, SafetyFault
 from cobs import cobs
 
 import fluidics.control.controller as controller_module
@@ -86,7 +88,7 @@ class TestRawToPsi:
         assert result == pytest.approx(0.0, abs=0.01)
 
 
-from fluidics.control.controller import FluidController
+from fluidics.control.controller import FluidController, FluidControllerSimulation
 from fluidics.control._def import COMMAND_STATUS
 
 
@@ -542,6 +544,27 @@ class TestWaitForCompletion:
             _make_packet(uid=10, status=COMMAND_STATUS.CMD_EXECUTION_ERROR)))
         assert fc.wait_for_completion() == COMMAND_STATUS.CMD_EXECUTION_ERROR
 
+    def test_a_cancelled_run_raises_its_cause_out_of_the_poll(self):
+        """Otherwise the abort waits out `timeout`. The cause is raised as
+        itself -- draw protection cancels with a FlowFault, and the operator
+        must read the diagnosis rather than a timeout."""
+        fc = _bare_controller()
+        fc._init_status_state()
+        fc.cmd_uid = 12
+        control = RunControl()
+        control.cancel(SafetyFault("flow collapsed"))
+        with pytest.raises(SafetyFault, match="flow collapsed"):
+            fc.wait_for_completion(timeout=30, run_control=control)
+
+    def test_an_uncancelled_run_returns_the_status_as_usual(self):
+        fc = _bare_controller()
+        fc._init_status_state()
+        fc.cmd_uid = 14
+        fc._publish_status(fc._parse_packet(
+            _make_packet(uid=14, status=COMMAND_STATUS.COMPLETED_WITHOUT_ERRORS)))
+        assert fc.wait_for_completion(run_control=RunControl()) == \
+            COMMAND_STATUS.COMPLETED_WITHOUT_ERRORS
+
     def test_times_out_if_no_packet_ever_arrives(self):
         """Regression guard: get_mcu_status() blocks forever waiting for the
         first packet, so wait_for_completion must not route through it. If it
@@ -707,7 +730,7 @@ class TestSendCommandBlockingPassesTimeout:
 
         captured = {}
 
-        def fake_wait_for_completion(timeout=30):
+        def fake_wait_for_completion(timeout=30, run_control=None):
             captured['timeout'] = timeout
             return COMMAND_STATUS.COMPLETED_WITHOUT_ERRORS
 
@@ -733,3 +756,26 @@ class TestPublishStatusSetsRecordedData:
         fc._publish_status(parsed)
 
         assert fc.recorded_data == parsed
+
+
+class TestTheSimulationMatchesTheRealController:
+    """It blocks in wait_for_completion, raises there on a cancelled run, and
+    returns a terminal status. Pinned directly rather than through a caller:
+    every caller checks the signal itself before sending, so nothing else
+    would notice if the simulation stopped refusing -- and a simulated
+    operation would then carry on past a point hardware would have refused."""
+
+    def test_a_cancelled_run_raises_out_of_the_wait(self):
+        fc = FluidControllerSimulation(serial_number="test")
+        control = RunControl()
+        control.cancel()
+        with pytest.raises(AbortRequested):
+            fc.wait_for_completion(run_control=control)
+
+    def test_it_returns_a_terminal_status_like_the_real_one(self):
+        """Callers branch on it; returning None makes them carry a
+        simulation-shaped special case."""
+        fc = FluidControllerSimulation(serial_number="test")
+        assert fc.wait_for_completion() == COMMAND_STATUS.COMPLETED_WITHOUT_ERRORS
+        assert fc.send_command_blocking(CMD_SET.CLEAR) == \
+            COMMAND_STATUS.COMPLETED_WITHOUT_ERRORS
