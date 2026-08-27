@@ -27,6 +27,7 @@ from fluidics.devices import (
     build_operations,
     build_worker,
 )
+from fluidics.manual_operations import ManualOperations
 from fluidics.run_log import setup_uncaught_exception_logging, start_log_file
 from fluidics.sequences import (
     load_sequences, save_sequences_yaml, get_included_sequences,
@@ -646,21 +647,27 @@ class SequencesWidget(QWidget):
 
 
 class ManualControlWidget(QWidget):
+    """The operator's hand on the rig, one move at a time.
+
+    Every control runs a ManualOperations verb off the GUI thread through
+    _run(), which owns the tab's single busy state: while one move runs, every
+    control is disabled and a second press is refused. Errors come back as a
+    dialog with the controls re-enabled; the pump has already been halted by
+    then, inside execute(), on the thread that owns its port.
+    """
+
     def __init__(self, config, devices):
         super().__init__()
         self.config = config
         self.devices = devices
-        self.syringePump = devices.syringe_pump
-        self.selectorValveSystem = devices.selector_valves
-        self.disc_pump = devices.disc_pump
+        self.manual = ManualOperations(devices)
+        self._operation = None      # the thread running the current move, if any
 
-        # Initialize timers
         self.progress_timer = QTimer(self)
         self.progress_timer.timeout.connect(self.updateProgress)
-        
         self.plunger_timer = QTimer(self)
         self.plunger_timer.timeout.connect(self.updatePlungerPosition)
-        
+
         self.operation_start_time = None
         self.operation_duration = None
 
@@ -676,20 +683,27 @@ class ManualControlWidget(QWidget):
         valveLayout.setContentsMargins(5, 5, 5, 5)
         valveLayout.addWidget(QLabel("Source port:"))
         self.valveCombo = QComboBox()
-        self.valveCombo.addItems(self.selectorValveSystem.get_port_names())
+        self.valveCombo.addItems(self.devices.selector_valves.get_port_names())
         self.valveCombo.currentIndexChanged.connect(self.openValve)
         valveLayout.addWidget(self.valveCombo)
         valveGroupBox.setLayout(valveLayout)
         mainLayout.addWidget(valveGroupBox)
 
+        self.pumpInput = None
+        self.pumpButton = None
         if self.config.application == "Open Chamber":
             pumpGroupBox = QGroupBox("Disc Pump Control")
             pumpLayout = QHBoxLayout()
             pumpLayout.setContentsMargins(5, 5, 5, 5)
             pumpLayout.addWidget(QLabel("Operation time:"))
-            self.pumpInput = QLineEdit()
+            # A spin box, not free text: float() on "5s" used to take the
+            # whole process down.
+            self.pumpInput = QDoubleSpinBox()
+            self.pumpInput.setRange(0.1, 600)
+            self.pumpInput.setDecimals(1)
+            self.pumpInput.setValue(10)
+            self.pumpInput.setSuffix(" s")
             pumpLayout.addWidget(self.pumpInput)
-            pumpLayout.addWidget(QLabel("s"))
             self.pumpButton = QPushButton("Start")
             pumpLayout.addWidget(self.pumpButton)
             self.pumpButton.clicked.connect(self.startDiscPump)
@@ -713,13 +727,12 @@ class ManualControlWidget(QWidget):
         leftLayout.addWidget(self.syringePortCombo, 0, 1)
 
         self.speedCombo = QComboBox()
-        speed_code_limit = self.config.syringe_pump.speed_code_limit
-        for code in range(speed_code_limit, len(self.syringePump.SPEED_SEC_MAPPING)):
-            rate = self.syringePump.get_flow_rate(code)
-            # uL/min, matching what sequences are written in -- picking a speed
-            # here and typing a flow_rate into a sequence now use one scale.
-            self.speedCombo.addItem(f"{rate:,.0f} µL/min", code)
-        self.speedCombo.setCurrentIndex(40 - self.config.syringe_pump.speed_code_limit)  # Set default to code 40
+        # uL/min, matching what sequences are written in -- picking a speed
+        # here and typing a flow_rate into a sequence use one scale. Slowest
+        # last, and the default.
+        for rate in self.manual.flow_rates():
+            self.speedCombo.addItem(f"{rate:,.0f} µL/min", rate)
+        self.speedCombo.setCurrentIndex(self.speedCombo.count() - 1)
         leftLayout.addWidget(QLabel("Speed:"), 1, 0)
         leftLayout.addWidget(self.speedCombo, 1, 1)
 
@@ -744,7 +757,6 @@ class ManualControlWidget(QWidget):
         topLayout.addWidget(leftWidget, 3)
 
         # Right side - Plunger position
-        # TODO: stop updating position when not on this tab
         rightWidget = QWidget()
         rightLayout = QVBoxLayout(rightWidget)
         self.plungerPositionLabel = QLabel("Plunger Position (μL)")
@@ -769,135 +781,116 @@ class ManualControlWidget(QWidget):
 
         self.setLayout(mainLayout)
 
-        # Initialize plunger position
         self.updatePlungerPosition()
+
+    # --- the controls: each picks a verb and hands it to _run ---
 
     def openValve(self):
         port = self.valveCombo.currentIndex() + 1
-        self.selectorValveSystem.open_port(port)
+        self._run(lambda: self.manual.open_port(port))
 
     def operateSyringe(self, action):
-        if self.syringePump.is_busy:
-            _logger.info("Syringe pump is busy.")
-            return
-
-        syringe_port = int(self.syringePortCombo.currentText())
-        speed_code = self.speedCombo.currentData()
+        port = int(self.syringePortCombo.currentText())
+        rate = self.speedCombo.currentData()
         volume = self.volumeSpinBox.value()
-        
-        try:
-            # Disable control buttons during operation
-            self.setControlsEnabled(False)
-
-            # Start operation
-            self.syringePump.reset_chain()
-            if action == "dispense":
-                exec_time = self.syringePump.dispense(syringe_port, volume, speed_code)
-            elif action == "extract":
-                exec_time = self.syringePump.extract(syringe_port, volume, speed_code)
-            elif action == "empty":
-                exec_time = self.syringePump.dispense_to_waste()
-
-            # Set up progress tracking
-            self.operation_duration = exec_time
-
-            # Start syringe operation in a separate thread
-            operation_thread = threading.Thread(target=self._executeSyringeOperation, 
-                                             args=(action, syringe_port, volume, speed_code))
-            operation_thread.daemon = True
-            operation_thread.start()
-            
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Error operating syringe pump: {str(e)}")
-            self.setControlsEnabled(True)
-
-    def _executeSyringeOperation(self, action, syringe_port, volume, speed_code):
-        try:
-            self.operation_start_time = time.time()
-
-            # Start progress updates
-            QMetaObject.invokeMethod(self, "startProgressTimer", Qt.QueuedConnection)
-
-            self.syringePump.execute()
-
-            # Clean up
-            QMetaObject.invokeMethod(self, "operationComplete", Qt.QueuedConnection)
-
-        # No TecanAPITimeout masking here: the pump serializes link access
-        # now, so a timeout is a real fault and takes the error path.
-        except Exception as e:
-            # Halt-and-settle on this worker thread, not in the Qt slot: on a
-            # dead link wait_for_stop would re-raise inside the slot (fatal
-            # under PyQt5), and on a live one it would block the event loop
-            # for the rest of the move.
-            try:
-                self.syringePump.wait_for_stop()
-            except Exception:
-                pass
-            self.syringePump.is_busy = False
-            QMetaObject.invokeMethod(self, "handleError",
-                                   Qt.QueuedConnection,
-                                   Q_ARG(str, str(e)))
+        verbs = {
+            "extract": lambda: self.manual.extract(port, volume, rate,
+                                                   on_started=self._started),
+            "dispense": lambda: self.manual.dispense(port, volume, rate,
+                                                     on_started=self._started),
+            "empty": lambda: self.manual.empty_to_waste(on_started=self._started),
+        }
+        self._run(verbs[action])
 
     def startDiscPump(self):
-        if self.disc_pump is not None:
-            self.pumpButton.setEnabled(False)
-            self.disc_pump.aspirate(float(self.pumpInput.text()))
-            self.pumpButton.setEnabled(True)
+        seconds = self.pumpInput.value()
+        self._run(lambda: self.manual.aspirate(seconds, on_started=self._started))
 
-    @pyqtSlot()
-    def startProgressTimer(self):
+    def _run(self, verb):
+        """Run one manual verb off the GUI thread; the controls come back
+        when it ends, either way. One at a time: the tab's controls share a
+        rig, and a second press while one move runs is refused, not queued."""
+        if self._operation is not None and self._operation.is_alive():
+            _logger.info("A manual operation is already running.")
+            return
+        self.setControlsEnabled(False)
+
+        def work():
+            try:
+                verb()
+            except Exception as e:
+                # The pump has already been halted, inside execute(), on this
+                # thread. Only the report crosses to the Qt thread.
+                QMetaObject.invokeMethod(self, "handleError", Qt.QueuedConnection,
+                                         Q_ARG(str, str(e)))
+            else:
+                QMetaObject.invokeMethod(self, "operationComplete", Qt.QueuedConnection)
+
+        self._operation = threading.Thread(target=work, daemon=True)
+        self._operation.start()
+
+    def _started(self, seconds):
+        """From the worker thread: the move is under way and expected to
+        take `seconds` -- what the progress bar counts against."""
+        QMetaObject.invokeMethod(self, "startProgress", Qt.QueuedConnection,
+                                 Q_ARG(float, float(seconds)))
+
+    @pyqtSlot(float)
+    def startProgress(self, seconds):
+        self.operation_start_time = time.time()
+        self.operation_duration = seconds
         self.syringeProgressBar.setValue(0)
-        self.progress_timer.start(100)  # Update progress every 100ms
+        self.progress_timer.start(100)
 
     @pyqtSlot()
     def operationComplete(self):
         self.progress_timer.stop()
-        self.syringeProgressBar.setValue(100)
+        if self.operation_duration is not None:
+            self.syringeProgressBar.setValue(100)
+        self._clearProgress()
         self.setControlsEnabled(True)
-        self.operation_start_time = None
-        self.operation_duration = None
-        self.syringePump.is_busy = False
 
     @pyqtSlot(str)
     def handleError(self, error_message):
-        # The worker thread has already halted and settled the pump.
-        QMessageBox.critical(self, "Error", f"Syringe pump error: {error_message}")
-        self.setControlsEnabled(True)
         self.progress_timer.stop()
         self.syringeProgressBar.setValue(0)
+        self._clearProgress()
+        self.setControlsEnabled(True)
+        QMessageBox.critical(self, "Error", f"Manual operation failed: {error_message}")
+
+    def _clearProgress(self):
+        self.operation_start_time = None
+        self.operation_duration = None
 
     def setControlsEnabled(self, enabled):
-        self.pushButton.setEnabled(enabled)
-        self.pullButton.setEnabled(enabled)
-        self.emptyButton.setEnabled(enabled)
-        self.syringePortCombo.setEnabled(enabled)
-        self.speedCombo.setEnabled(enabled)
-        self.volumeSpinBox.setEnabled(enabled)
+        for control in (self.pushButton, self.pullButton, self.emptyButton,
+                        self.syringePortCombo, self.speedCombo, self.volumeSpinBox,
+                        self.valveCombo, self.pumpInput, self.pumpButton):
+            if control is not None:
+                control.setEnabled(enabled)
 
     def updateProgress(self):
         if self.operation_start_time is None or self.operation_duration is None:
             return
-            
         elapsed = time.time() - self.operation_start_time
-        progress = min(100, int((elapsed / self.operation_duration) * 100))
+        progress = min(100, int((elapsed / max(self.operation_duration, 1e-9)) * 100))
         self.syringeProgressBar.setValue(progress)
 
     def updatePlungerPosition(self):
         try:
-            position = self.syringePump.get_plunger_position() * self.config.syringe_pump.volume_ul
-            self.plungerPositionBar.setValue(int(position))
-        except Exception:
-            pass
+            self.plungerPositionBar.setValue(int(self.manual.held_volume_ul()))
+        except Exception as e:
+            _logger.debug("Plunger position poll failed: %s", e)
 
     def showEvent(self, event):
-        # Start timer when widget becomes visible
         super().showEvent(event)
         self.plunger_timer.start(500)
-        self.valveCombo.setCurrentIndex(self.selectorValveSystem.get_current_port() - 1)
+        # Show where the valves are; do not move them there.
+        self.valveCombo.blockSignals(True)
+        self.valveCombo.setCurrentIndex(self.devices.selector_valves.get_current_port() - 1)
+        self.valveCombo.blockSignals(False)
 
     def hideEvent(self, event):
-        # Stop timer when widget becomes hidden
         super().hideEvent(event)
         self.plunger_timer.stop()
 
