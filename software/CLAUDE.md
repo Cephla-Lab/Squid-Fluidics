@@ -28,19 +28,14 @@ python -m pytest tests/unit            # Unit tests only
 python -m pytest tests/integration     # Integration tests (simulation classes)
 python -m pytest -v                    # Verbose
 
-# Hardware test scripts -- currently stale and unrunnable, see note below
-python tests/hardware/startup.py
-python tests/hardware/demo.py
+# Hardware smoke: bring a rig up from its config and run each manual verb once
+python -m tests.hardware.manual_check --config ../config.yaml
+python -m tests.hardware.diagnose_temperature_controller --sn <serial>
 ```
 
-Uses pytest. Hardware tests in `tests/hardware/` are excluded from the default test run. Use `--simulation` for software-only CLI testing.
+Uses pytest. Hardware scripts in `tests/hardware/` are excluded from the default test run and need a connected rig (`manual_check --simulation` checks the script itself). Run them with `python -m` from `software/` so `fluidics` imports without the package installed. Use `--simulation` for software-only CLI testing.
 
-**`tests/hardware/startup.py` and `tests/hardware/demo.py` are currently stale and will not run**, independent of anything in this change:
-- Both do `from control.controller import ...`, but `software/control/` was renamed to `software/fluidics/control/` before the flow-sensor-driver branch. `python3 -c "import control.controller"` raises `ModuleNotFoundError`.
-- `demo.py` also calls `read_received_packet_nowait()` directly in a loop. That now races the background reader thread that owns the serial port (`FluidController.start_reading()`), since both would be reading the same port concurrently.
-- `startup.py` also has several `send_command_blocking()` call sites (e.g. `CLEAR_LINES`, `UNLOAD_FLUID_VOLUME`) whose firmware-side timeout parameters run 35-50s; they need the matching `timeout=` kwarg on `send_command_blocking()` or it will raise `TimeoutError` at the 30s default before the firmware finishes.
-
-Fixing only the import would leave both scripts unrunnable in a different way, so none of the above has been repaired here -- it's tracked as separate work.
+The old `tests/hardware/startup.py` and `demo.py` (MCU-level exercises from before the syringe-pump architecture) are gone; git history has them.
 
 **Dependencies:** declared in `pyproject.toml`; install with `pip install -e ".[test]"` from this directory
 
@@ -143,4 +138,3 @@ Not guarded: the dispense-to-waste inside `_empty_syringe_pump_on_full`, and `Pr
   - Around the pump: hardware committed alongside a pump call registers what to do about a park with `when_held(on_hold, on_release)` (the drain under a dispense; hooks run with the region detached, and `on_release` never runs for a cancel). The `DrawGuard` stands down while the pump is not `moving` and restarts its ramp-up at the first sample of the new move.
   - The GUI's Pause/Resume button distinguishes the two moments the operator cares about: `paused` (asked for, the move in flight still running) shows *pausing…*, `at_rest` (paused *and* a thread parked at a gate) shows *paused* and stops the run's countdown. The GUI polls those two properties on its one-second tick; the worker's own "Paused" progress status is log-only, since the worker cannot see a park that happens inside an operation -- it is blocked in `process_sequence` at the time.
 - `send_command_blocking()` = `send_command()` + `wait_for_completion()` (polls MCU status until not `IN_PROGRESS`)
-- `tests/hardware/startup.py` and `tests/hardware/demo.py` still import from `control.`, a stale path from before `software/control/` was renamed to `fluidics/control/` — both are currently broken and unrunnable (see the note under Commands)
