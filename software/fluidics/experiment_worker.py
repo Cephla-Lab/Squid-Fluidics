@@ -150,7 +150,7 @@ class ExperimentWorker:
 
         except AbortRequested:
             _logger.warning("Run aborted by user.")
-            self._end_early()
+            self._end_early(None)      # an abort is a stop, not an error
         except Cancelled as fault:
             # The instrument stopped itself -- a flow fault, say. Reported
             # with its diagnosis, never as an abort.

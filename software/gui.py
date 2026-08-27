@@ -186,7 +186,7 @@ class SequencesWidget(PostsToQtThread, QWidget):
         self.selectorValveSystem = system.devices.selector_valves
 
         self._running_rows = []  # Tree rows of the sequences handed to the worker
-        self._outcome = None     # "stopped" or "error" once a run has ended early
+        self._ended_early = False   # a stop or an error has already had its dialog
         system.warnings.subscribe(self.reportWarning)
 
         self.initUI()
@@ -477,7 +477,7 @@ class SequencesWidget(PostsToQtThread, QWidget):
 
         self._warnings.clear()
         self.warningLabel.setVisible(False)
-        self._outcome = None
+        self._ended_early = False
 
         try:
             self.system.run(selected, callbacks)
@@ -592,11 +592,11 @@ class SequencesWidget(PostsToQtThread, QWidget):
         self._post_event('_handle_warning', message)
 
     def _handle_stopped(self):
-        self._outcome = "stopped"
+        self._ended_early = True
         QMessageBox.information(self, "Stopped", "The run was stopped.")
 
     def _handle_error(self, error_message):
-        self._outcome = "error"
+        self._ended_early = True
         QMessageBox.critical(self, "Error", error_message)
 
     def _handle_finished(self):
@@ -607,7 +607,7 @@ class SequencesWidget(PostsToQtThread, QWidget):
         self.highlightRow(None)
         self._renderRunControls()
         # A run that ended early has already said so; one dialog, not two.
-        if self._outcome is None:
+        if not self._ended_early:
             QMessageBox.information(self, "Finished", "Sequence execution finished.")
 
     def _handle_time_estimate(self, time_to_finish, n_sequences):
@@ -648,7 +648,6 @@ class ManualControlWidget(PostsToQtThread, QWidget):
         super().__init__()
         self.config = config
         self.system = system
-        self.devices = system.devices
         self.session = system.session
         self.manual = system.manual
         self._controls = []         # everything _run disables while a move runs
@@ -670,7 +669,7 @@ class ManualControlWidget(PostsToQtThread, QWidget):
         valveLayout.setContentsMargins(5, 5, 5, 5)
         valveLayout.addWidget(QLabel("Source port:"))
         self.valveCombo = QComboBox()
-        self.valveCombo.addItems(self.devices.selector_valves.get_port_names())
+        self.valveCombo.addItems(self.system.devices.selector_valves.get_port_names())
         self.valveCombo.currentIndexChanged.connect(self.openValve)
         valveLayout.addWidget(self.valveCombo)
         self._controls.append(self.valveCombo)
@@ -884,7 +883,7 @@ class ManualControlWidget(PostsToQtThread, QWidget):
         self.plunger_timer.start(500)
         # Show where the valves are; do not move them there.
         self.valveCombo.blockSignals(True)
-        self.valveCombo.setCurrentIndex(self.devices.selector_valves.get_current_port() - 1)
+        self.valveCombo.setCurrentIndex(self.system.devices.selector_valves.get_current_port() - 1)
         self.valveCombo.blockSignals(False)
 
     def hideEvent(self, event):
@@ -1521,9 +1520,6 @@ class FluidicsControlGUI(PostsToQtThread, QMainWindow):
         for tab in self.sensorTabs:
             tab.close_recordings()
 
-        # Stops whatever job the operator just agreed to abort, then closes
-        # the devices in DeviceSet.close's order (emptying the syringe to
-        # waste on Flow Cell).
         self.system.close(timeout=10)
         super().closeEvent(event)
 

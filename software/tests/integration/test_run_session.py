@@ -21,13 +21,7 @@ INCUBATING = {**FLOW_CELL_STEP, "incubation_time": 60}     # minutes: a run to c
 
 @pytest.fixture
 def devices(flow_cell_config, instant_devices):
-    devices = instant_devices(flow_cell_config)
-    # Nothing here reads flow, and closing a simulated sensor joins its
-    # publish thread mid-sleep -- 50 ms on the real clock, per test. Done
-    # now, under the fake clock, where it is instant.
-    for sensor in devices.flow_sensors:
-        sensor.close()
-    return devices
+    return instant_devices(flow_cell_config)
 
 
 @pytest.fixture

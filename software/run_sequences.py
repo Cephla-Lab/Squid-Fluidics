@@ -57,27 +57,19 @@ def main():
         # the CLI needs no rendering callbacks -- but a failed run must not
         # exit 0, and the worker reports failure only through on_error.
         system.run(included, callbacks={"on_error": run_errors.append})
-        system.session.wait()
+        system.wait()
 
     except KeyboardInterrupt:
-        # `except Exception` would not catch this, so without it Ctrl+C fell
-        # straight into finally, tearing down devices -- including the Flow
-        # Cell park-to-waste move -- underneath a worker thread still driving
-        # the pump on the same serial port. Quiesce the run first: the one
-        # cancel signal wakes the worker out of any wait (incubation,
-        # wait_for_stop), the join lets it unwind through its own error
-        # path, and only then does the finally block touch the hardware,
-        # single-threaded.
-        _logger.warning("Interrupted; stopping the run before closing devices...")
-        sys.exit(130)       # the close() below stops the run first
+        # Caught so Ctrl+C does not fall straight into finally with the exit
+        # code of a crash; system.close() below stops the run first.
+        _logger.warning("Interrupted.")
+        sys.exit(130)
     except Exception as e:
         # Nothing after the thread starts raises through here, so there is
         # no run to wait on: straight to teardown.
         _logger.exception("%s", e)
         sys.exit(1)
     finally:
-        # The system quiesces whatever job is running, then closes the
-        # devices in DeviceSet.close's order.
         if system is not None:
             close_errors = system.close()
         stop_log_file()

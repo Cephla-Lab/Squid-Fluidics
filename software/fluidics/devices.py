@@ -147,7 +147,7 @@ class DeviceSet:
         return _run_shielded(steps)
 
 
-def build_devices(config, simulation=False, on_issue=_print_issue):
+def build_devices(config, simulation=False, on_issue=None):
     """Construct and start the full stack for `config`. Returns a DeviceSet.
 
     Mirrors what the two entry points did, once: construct controller, syringe
@@ -162,6 +162,8 @@ def build_devices(config, simulation=False, on_issue=_print_issue):
     The controller, pump, and valves are not survivable -- those raise, after
     closing whatever had already started.
     """
+    if on_issue is None:
+        on_issue = _print_issue
     # Pick the classes once so the config-to-constructor mapping is written
     # once -- the sim/real copy drift this module exists to end.
     controller_cls = FluidControllerSimulation if simulation else FluidController
@@ -238,8 +240,9 @@ def build_devices(config, simulation=False, on_issue=_print_issue):
 def build_operations(config, devices, on_warning=None):
     """The operations class the application selects, wired to `devices`.
 
-    on_warning is where draw-protection notices go (Flow Cell only); None
-    keeps MERFISHOperations' default of print, which is all the CLI needs.
+    on_warning is where draw-protection notices go (Flow Cell only); the
+    system passes its warnings channel, and None keeps MERFISHOperations'
+    default of the fluidics logger -- the fallback for direct construction.
     """
     if config.application == "Flow Cell":
         return MERFISHOperations(config, devices.syringe_pump,

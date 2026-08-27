@@ -90,7 +90,7 @@ class RunSession:
         ended = []
         callbacks["on_stopped"] = lambda: ended.append(on_stopped)
         callbacks["on_error"] = lambda message: ended.append(
-            partial(on_error, message) if on_error is not None else None)
+            on_error and partial(on_error, message))
         worker = build_worker(self.devices, operations, sequences, callbacks)
 
         def body():
@@ -102,7 +102,7 @@ class RunSession:
     def run_manual(self, verb, callbacks=None):
         """Run one manual verb -- a callable -- on a new thread. Refused with
         RuntimeError while a job runs."""
-        callbacks = dict(callbacks or {})
+        callbacks = callbacks or {}
         on_stopped, on_error = callbacks.get("on_stopped"), callbacks.get("on_error")
 
         def body():
@@ -113,7 +113,7 @@ class RunSession:
                 return on_stopped
             except Exception as e:
                 _logger.error("Manual move failed: %s", e, exc_info=True)
-                return partial(on_error, str(e)) if on_error is not None else None
+                return on_error and partial(on_error, str(e))
             return None
 
         self._launch("manual", body, callbacks.get("on_finished"))

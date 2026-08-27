@@ -15,12 +15,8 @@ from .conftest import FLOW_CELL_STEP
 
 
 @pytest.fixture
-def system(flow_cell_config):
-    system = FluidicsSystem.build(flow_cell_config, simulation=True)
-    system.devices.controller.COMMAND_SECONDS = 0
-    system.devices.syringe_pump.ESTIMATE_SECONDS = 0
-    for sensor in system.devices.flow_sensors:      # see test_run_session
-        sensor.close()
+def system(flow_cell_config, instant_devices):
+    system = FluidicsSystem(flow_cell_config, instant_devices(flow_cell_config))
     yield system
     assert system.close() == []
 
@@ -50,7 +46,7 @@ class TestTheJob:
     def test_run_goes_through_the_session_with_the_systems_operations(self, system, real_clock):
         reports = []
         system.run([FLOW_CELL_STEP], callbacks={"on_finished": lambda: reports.append("finished")})
-        assert system.session.wait(5)
+        assert system.wait(5)
         assert reports == ["finished"]
         assert system.devices.syringe_pump.executed, "nothing moved"
 
@@ -58,7 +54,7 @@ class TestTheJob:
         done = threading.Event()
         system.run_manual(lambda: system.manual.extract(2, 300, 500),
                           callbacks={"on_finished": done.set})
-        assert done.wait(5) and system.session.wait(5)
+        assert done.wait(5) and system.wait(5)
         assert system.devices.syringe_pump.executed == [[("extract", 2, 300, 40)]]
 
 

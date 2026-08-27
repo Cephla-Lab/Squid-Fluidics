@@ -1,21 +1,16 @@
-"""The rig as one object.
-
-`FluidicsSystem` is what a script -- or the GUI -- holds: the devices, the
-application's operations, the manual verbs, and the one job on the rig,
-built from a config and closed once. It is assembly over the objects that
-already exist (`DeviceSet`, the operations classes, `ManualOperations`,
-`RunSession`); the reason it exists is that the two entry points each spelled
-out the same bring-up and the same shutdown by hand.
+"""The rig as one object: the devices, the application's operations, the
+manual verbs, and the one job on the rig, built from a config and closed
+once.
 
     with FluidicsSystem.build(config, simulation=True) as system:
         system.manual.open_port(3)
         system.run(sequences, callbacks={"on_error": print})
-        system.session.wait()
+        system.wait()
 """
 
 import logging
 
-from .devices import _print_issue, build_devices, build_operations
+from .devices import build_devices, build_operations
 from .manual_operations import ManualOperations
 from .run_session import RunSession
 from .subscribers import Subscribers
@@ -24,26 +19,25 @@ _logger = logging.getLogger(__name__)
 
 
 class FluidicsSystem:
-    def __init__(self, devices, operations, manual, session, warnings):
-        """Assembled; build() is the way to get one."""
+    def __init__(self, config, devices):
+        """Assemble the rig around a DeviceSet already brought up; build()
+        is the usual way, doing the bring-up too."""
         self.devices = devices
-        self.operations = operations
-        self.manual = manual
-        self.session = session
         # Draw-protection notices from the operations (Flow Cell), for
         # whoever is watching -- the run log always is.
-        self.warnings = warnings
+        self.warnings = Subscribers("fluidics warnings")
+        self.warnings.subscribe(_logger.warning)
+        self.operations = build_operations(config, devices,
+                                           on_warning=self.warnings.notify)
+        self.manual = ManualOperations(devices)
+        self.session = RunSession(devices)
 
     @classmethod
-    def build(cls, config, simulation=False, on_issue=_print_issue):
+    def build(cls, config, simulation=False, on_issue=None):
         """Bring the rig up for `config` and assemble it. What build_devices
         reports through on_issue (a degraded bring-up) passes straight
         through; what it raises (no controller, no pump) raises."""
-        devices = build_devices(config, simulation, on_issue=on_issue)
-        warnings = Subscribers("fluidics warnings")
-        warnings.subscribe(_logger.warning)
-        operations = build_operations(config, devices, on_warning=warnings.notify)
-        return cls(devices, operations, ManualOperations(devices), RunSession(devices), warnings)
+        return cls(config, build_devices(config, simulation, on_issue=on_issue))
 
     # --- the one job ---
 
@@ -54,6 +48,10 @@ class FluidicsSystem:
     def run_manual(self, verb, callbacks=None):
         """Start one manual verb; see RunSession.run_manual."""
         self.session.run_manual(verb, callbacks)
+
+    def wait(self, timeout=None):
+        """Block until the current job has ended; see RunSession.wait."""
+        return self.session.wait(timeout)
 
     # --- shutdown ---
 

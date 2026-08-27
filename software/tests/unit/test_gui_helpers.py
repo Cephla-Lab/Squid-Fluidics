@@ -449,7 +449,7 @@ class TestRunFinished:
         monkeypatch.setattr(gui.QMessageBox, "critical",
                             lambda *args: order.append(("error", args[1])))
         stub = Quiet()
-        stub._outcome = None
+        stub._ended_early = False
         stub._renderRunControls = lambda: order.append("render")
         return stub, order
 
@@ -765,9 +765,8 @@ class TestMainWindowJobs:
         gui.FluidicsControlGUI._renderTabs(stub, None)
         assert enabled == {0: True, 1: True}
 
-    def _closing(self, busy, waited=True):
+    def _closing(self, busy):
         session = FakeSession(kind="run" if busy else None)
-        session.wait = lambda timeout: session.calls.append(("wait", timeout)) or waited
         return SimpleNamespace(session=session), session.calls
 
     def test_an_idle_rig_closes_without_a_question(self, monkeypatch):
