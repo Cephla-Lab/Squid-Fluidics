@@ -13,7 +13,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QTabWidget, QWidget, QVB
                              QSpinBox, QLabel, QProgressBar, QLineEdit,
                              QGroupBox, QGridLayout, QSizePolicy, QDialog, QFormLayout,
                              QDoubleSpinBox, QDialogButtonBox)
-from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, pyqtSlot, Q_ARG, QMetaObject, QEvent, QCoreApplication
+from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QEvent, QCoreApplication
 from PyQt5.QtGui import QColor, QBrush
 
 from serial import SerialException
@@ -25,9 +25,9 @@ from fluidics.devices import (
     ISSUE_TEMPERATURE_CONTROLLER,
     build_devices,
     build_operations,
-    build_worker,
 )
 from fluidics.manual_operations import ManualOperations
+from fluidics.run_session import RunSession
 from fluidics.run_log import setup_uncaught_exception_logging, start_log_file
 from fluidics.sequences import (
     load_sequences, save_sequences_yaml, get_included_sequences,
@@ -62,6 +62,21 @@ class WorkerEvent(QEvent):
         super().__init__(WorkerEvent.EVENT_TYPE)
         self.callback_name = callback_name
         self.args = args
+
+
+class PostsToQtThread:
+    """For a QObject fed by worker threads: _post_event(name, *args) queues a
+    call to one of its own methods on the Qt thread. Mix in before the Qt
+    base class, so event() here sees the WorkerEvent first."""
+
+    def _post_event(self, method_name, *args):
+        QCoreApplication.postEvent(self, WorkerEvent(method_name, *args))
+
+    def event(self, event):
+        if event.type() == WorkerEvent.EVENT_TYPE:
+            getattr(self, event.callback_name)(*event.args)
+            return True
+        return super().event(event)
 
 
 class AddSequenceDialog(QDialog):
@@ -163,17 +178,17 @@ class AddSequenceDialog(QDialog):
         super().accept()
 
 
-class SequencesWidget(QWidget):
+class SequencesWidget(PostsToQtThread, QWidget):
+    """Edits the sequence list and runs it through the RunSession, which
+    owns the run's thread and its end; this widget renders the callbacks."""
 
-    sequence_running = pyqtSignal(bool)
-
-    def __init__(self, config, devices):
+    def __init__(self, config, devices, session):
         super().__init__()
         self.config = config
         self.devices = devices
+        self.session = session
         self.selectorValveSystem = devices.selector_valves
 
-        self.worker = None
         self._running_rows = []  # Tree rows of the sequences handed to the worker
 
         self.experiment_ops = build_operations(config, devices,
@@ -467,16 +482,15 @@ class SequencesWidget(QWidget):
         self._warnings.clear()
         self.warningLabel.setVisible(False)
 
-        self.sequence_running.emit(True)
-
-        self.worker = build_worker(self.devices, self.experiment_ops, selected, callbacks)
-        self.worker_thread = threading.Thread(target=self.worker.run, daemon=True)
+        try:
+            self.session.start(selected, self.experiment_ops, callbacks)
+        except RuntimeError as e:
+            # A manual move got in first; the tabs normally prevent this.
+            QMessageBox.warning(self, "Rig busy", str(e))
+            return
         self._renderRunControls()
-
         self.sequenceLabel.setText(f"0/{self.total_sequences} sequences")
         self.timer.start(1000)
-
-        self.worker_thread.start()
 
     def updateTimeRemaining(self):
         """The one-second tick: spend a second unless the run is stopped.
@@ -520,24 +534,6 @@ class SequencesWidget(QWidget):
         progress = min(100, int((self.elapsed_time / max(self.total_time, 1)) * 100))
         self.progressBar.setValue(progress)
 
-    def event(self, event):
-        if event.type() == WorkerEvent.EVENT_TYPE:
-            if event.callback_name == 'update_progress':
-                self._handle_progress(*event.args)
-            elif event.callback_name == 'show_warning':
-                self._handle_warning(*event.args)
-            elif event.callback_name == 'show_error':
-                self._handle_error(*event.args)
-            elif event.callback_name == 'on_finished':
-                self._handle_finished()
-            elif event.callback_name == 'set_time_estimate':
-                self._handle_time_estimate(*event.args)
-            return True
-        return super().event(event)
-
-    def _post_event(self, callback_name, *args):
-        QCoreApplication.postEvent(self, WorkerEvent(callback_name, *args))
-
     def _runState(self):
         """(asked to pause, actually stopped) -- read once per repaint.
 
@@ -565,8 +561,9 @@ class SequencesWidget(QWidget):
         any of them being called: a flow fault cancels from the MCU reader
         thread, and the buttons must go dead then too.
         """
-        live = self.worker is not None and not self.devices.run_control.cancelled
-        self.runButton.setEnabled(self.worker is None)
+        running = self.session.kind == "run"
+        live = running and not self.devices.run_control.cancelled
+        self.runButton.setEnabled(not self.session.busy)
         self.pauseButton.setEnabled(live)
         self.abortButton.setEnabled(live)
         self.pauseButton.setText(
@@ -575,9 +572,9 @@ class SequencesWidget(QWidget):
     def pauseSequences(self):
         """Hold the run after the move in flight, or let it go on."""
         if self.devices.run_control.paused:
-            self.devices.resume()
+            self.session.resume()
         else:
-            self.devices.pause()
+            self.session.pause()
         self._renderRunControls()
         # The label would otherwise wait for the next tick to say anything.
         self._showTimeRemaining()
@@ -597,7 +594,7 @@ class SequencesWidget(QWidget):
     def reportWarning(self, message):
         """Called from the MCU reader thread, so it must not touch widgets."""
         _logger.warning(message)
-        self._post_event('show_warning', message)
+        self._post_event('_handle_warning', message)
 
     def _handle_error(self, error_message):
         QMessageBox.critical(self, "Error", error_message)
@@ -608,16 +605,9 @@ class SequencesWidget(QWidget):
         self.sequenceLabel.setText("0/0 sequences")
         self.timer.stop()
         self.highlightRow(None)
-
-        if self.worker:
-            self.worker_thread.join()
-            self.worker = None
+        # The session has already freed the rig and reset the run's signal --
+        # it does so before this callback -- so the controls read idle.
         self._renderRunControls()
-        # The cancellation belongs to the run that just ended: clear it before
-        # the manual tab comes back, or its moves would raise on a stale abort.
-        self.devices.reset()
-        self.sequence_running.emit(False)
-
         QMessageBox.information(self, "Finished", "Sequence execution finished.")
 
     def _handle_time_estimate(self, time_to_finish, n_sequences):
@@ -625,40 +615,38 @@ class SequencesWidget(QWidget):
         self.progressBar.setMaximum(100)  # For percentage
         self.progressBar.setValue(0)
 
+    # The worker's callbacks arrive on its thread; each crosses to the Qt
+    # thread as a call to its _handle_ method.
     def setTimeEstimate(self, time_to_finish, n_sequences):
-        self._post_event('set_time_estimate', time_to_finish, n_sequences)
+        self._post_event('_handle_time_estimate', time_to_finish, n_sequences)
 
     def updateProgress(self, index, sequence_num, status):
-        self._post_event('update_progress', index, sequence_num, status)
+        self._post_event('_handle_progress', index, sequence_num, status)
 
     def handleError(self, error_message):
-        self._post_event('show_error', error_message)
+        self._post_event('_handle_error', error_message)
 
     def onWorkerFinished(self):
-        self._post_event('on_finished')
+        self._post_event('_handle_finished')
 
     def abortSequences(self):
-        if self.worker and self.experiment_ops:
+        if self.session.kind == "run":
             # One signal, shared by the worker and every waiting device. It
             # also releases a held run, so Abort works while paused without
             # the operator having to resume first.
-            self.devices.abort()
+            self.session.abort()
             self._renderRunControls()
 
 
-class ManualControlWidget(QWidget):
+class ManualControlWidget(PostsToQtThread, QWidget):
     """The operator's hand on the rig, one move at a time -- see _run."""
 
-    # True while a manual move runs, so the main window can keep a run from
-    # starting under it, the mirror of SequencesWidget.sequence_running.
-    manual_running = pyqtSignal(bool)
-
-    def __init__(self, config, devices):
+    def __init__(self, config, devices, session):
         super().__init__()
         self.config = config
         self.devices = devices
+        self.session = session
         self.manual = ManualOperations(devices)
-        self._operation = None      # the thread running the current move, until its report is in
         self._controls = []         # everything _run disables while a move runs
 
         self.progress_timer = QTimer(self)
@@ -768,10 +756,17 @@ class ManualControlWidget(QWidget):
 
         syringeLayout.addLayout(topLayout)
 
+        progressLayout = QHBoxLayout()
         self.syringeProgressBar = QProgressBar()
         self.syringeProgressBar.setRange(0, 100)
+        progressLayout.addWidget(self.syringeProgressBar, 1)
+        # The one control live while a move runs: stops whatever it is.
+        self.stopButton = QPushButton("Stop")
+        self.stopButton.setEnabled(False)
+        self.stopButton.clicked.connect(self.stopMove)
+        progressLayout.addWidget(self.stopButton)
         syringeLayout.addWidget(QLabel("Execution Progress:"))
-        syringeLayout.addWidget(self.syringeProgressBar)
+        syringeLayout.addLayout(progressLayout)
 
         syringeGroupBox.setLayout(syringeLayout)
         mainLayout.addWidget(syringeGroupBox)
@@ -805,44 +800,40 @@ class ManualControlWidget(QWidget):
         seconds = self.pumpInput.value()
         self._run(lambda: self.manual.aspirate(seconds, on_started=self._started))
 
+    def stopMove(self):
+        """Stop the move in flight: the same signal that aborts a run. The
+        session resets it once the move has unwound, so the next move is
+        not refused on a stale cancel."""
+        if self.session.kind == "manual":
+            self.session.abort()
+
     def _run(self, verb):
-        """Run one manual verb off the GUI thread. One at a time: the controls
-        go dead until the move's report has been handled, a second press is
-        refused rather than queued, and an error comes back as a dialog with
-        the controls restored first. The pump has already been halted by then,
-        inside execute(), on the thread that owns its port."""
-        if self._operation is not None:
-            _logger.info("A manual operation is already running.")
+        """Hand one manual verb to the session, which runs it off the GUI
+        thread. The controls go dead until the move's report has been
+        handled -- a completion, a stop, or an error as a dialog with the
+        controls restored first. One at a time: a press while the rig is
+        busy is refused, not queued."""
+        if self.session.busy:
+            _logger.info("The rig is busy; the manual move was not started.")
             return
         self.setControlsEnabled(False)
-        self.manual_running.emit(True)
-
-        def work():
-            try:
-                verb()
-            except Exception as e:
-                self._post_event("handleError", str(e))
-            else:
-                self._post_event("operationComplete")
-
-        self._operation = threading.Thread(target=work, daemon=True)
-        self._operation.start()
+        try:
+            self.session.run_manual(
+                verb,
+                on_done=lambda: self._post_event("operationComplete"),
+                on_stopped=lambda: self._post_event("operationStopped"),
+                on_error=lambda message: self._post_event("handleError", message))
+        except RuntimeError:
+            # A run got in between the check and the start.
+            _logger.info("The rig is busy; the manual move was not started.")
+            self.setControlsEnabled(True)
 
     def _started(self, seconds):
         """From the worker thread: the move is under way and expected to
         take `seconds` -- what the progress bar counts against."""
         self._post_event("startProgress", float(seconds))
 
-    # --- crossing back to the Qt thread ---
-
-    def _post_event(self, method_name, *args):
-        QCoreApplication.postEvent(self, WorkerEvent(method_name, *args))
-
-    def event(self, event):
-        if event.type() == WorkerEvent.EVENT_TYPE:
-            getattr(self, event.callback_name)(*event.args)
-            return True
-        return super().event(event)
+    # --- the move's report, on the Qt thread ---
 
     def startProgress(self, seconds):
         self.operation_start_time = time.time()
@@ -857,6 +848,11 @@ class ManualControlWidget(QWidget):
             self.syringeProgressBar.setValue(100)
         self._finished()
 
+    def operationStopped(self):
+        self.progress_timer.stop()
+        self.syringeProgressBar.setValue(0)
+        self._finished()
+
     def handleError(self, error_message):
         self.progress_timer.stop()
         self.syringeProgressBar.setValue(0)
@@ -865,13 +861,12 @@ class ManualControlWidget(QWidget):
 
     def _finished(self):
         """The move's report is in: the tab is free again."""
-        self._operation = None
         self.setControlsEnabled(True)
-        self.manual_running.emit(False)
 
     def setControlsEnabled(self, enabled):
         for control in self._controls:
             control.setEnabled(enabled)
+        self.stopButton.setEnabled(not enabled)
 
     def updateProgress(self):
         elapsed = time.time() - self.operation_start_time
@@ -884,7 +879,7 @@ class ManualControlWidget(QWidget):
         # Idle, the pump's own reading from the end of its last move is the
         # truth, and costs the GUI thread nothing.
         try:
-            volume = self.manual.held_volume_ul(refresh=self._operation is not None)
+            volume = self.manual.held_volume_ul(refresh=self.session.kind == "manual")
             self.plungerPositionBar.setValue(int(volume))
         except Exception as e:
             _logger.debug("Plunger position poll failed: %s", e)
@@ -1397,7 +1392,7 @@ class FlowSensorControlWidget(SensorTabWidget):
             layout.addWidget(sw)
 
 
-class FluidicsControlGUI(QMainWindow):
+class FluidicsControlGUI(PostsToQtThread, QMainWindow):
     def __init__(self, is_simulation):
         super().__init__()
         self.config = load_config_file()
@@ -1417,6 +1412,9 @@ class FluidicsControlGUI(QMainWindow):
             # stale process holding it) -- same operator problem, same dialog.
             QMessageBox.critical(self, "Device Unavailable", str(e))
             raise SystemExit(1)
+        # The one job on the rig -- a run or a manual move -- for both tabs.
+        self.session = RunSession(self.devices)
+        self.session.state.subscribe(lambda kind: self._post_event("_renderTabs", kind))
         self.controller = self.devices.controller
         self.syringePump = self.devices.syringe_pump
         self.selectorValveSystem = self.devices.selector_valves
@@ -1434,8 +1432,8 @@ class FluidicsControlGUI(QMainWindow):
         self.tabWidget = QTabWidget()
 
         # "Settings and Manual Control" tab
-        runExperimentsTab = SequencesWidget(self.config, self.devices)
-        manualControlTab = ManualControlWidget(self.config, self.devices)
+        runExperimentsTab = SequencesWidget(self.config, self.devices, self.session)
+        manualControlTab = ManualControlWidget(self.config, self.devices, self.session)
         # TODO: integrate temperature controller ui
 
         self.tabWidget.addTab(runExperimentsTab, "Run Experiments")
@@ -1454,8 +1452,6 @@ class FluidicsControlGUI(QMainWindow):
             self.sensorTabs.append(flowSensorTab)
 
         self.setCentralWidget(self.tabWidget)
-        runExperimentsTab.sequence_running.connect(self.set_manual_control_tab_state)
-        manualControlTab.manual_running.connect(self.set_run_tab_state)
 
     # What build_devices reports through on_issue is entry-point-neutral; the
     # dialog title and the "which tab you will be missing" guidance are the
@@ -1497,17 +1493,38 @@ class FluidicsControlGUI(QMainWindow):
         _logger.warning(msg)
         QMessageBox.warning(self, "Flow Sensor", msg)
 
-    def set_manual_control_tab_state(self, is_running):
-        manual_control_tab_index = 1
-        self.tabWidget.setTabEnabled(manual_control_tab_index, not is_running)
+    RUN_TAB, MANUAL_TAB = 0, 1
 
-    def set_run_tab_state(self, manual_move_running):
-        """A run must not start under a manual move: the operations' valve
-        turn would pass its gate and change the reagent under a live draw."""
-        run_tab_index = 0
-        self.tabWidget.setTabEnabled(run_tab_index, not manual_move_running)
+    def _renderTabs(self, kind):
+        """The tab that did not start the job goes dead while it runs: a run
+        must not start under a manual move (the operations' valve turn would
+        pass its gate and change the reagent under a live draw), nor a manual
+        move under a run."""
+        self.tabWidget.setTabEnabled(self.RUN_TAB, kind != "manual")
+        self.tabWidget.setTabEnabled(self.MANUAL_TAB, kind != "run")
+
+    def _quiesce(self):
+        """Before the devices close: a live job must end first, or the close
+        would park the syringe and drop the ports beneath a thread still
+        driving them. Asks; True if the window may close."""
+        if not self.session.busy:
+            return True
+        what = "run" if self.session.kind == "run" else "manual move"
+        answer = QMessageBox.question(
+            self, "Still running", f"A {what} is in progress. Abort it and exit?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer != QMessageBox.Yes:
+            return False
+        self.session.abort()
+        if not self.session.wait(10):
+            _logger.error("The %s did not stop within 10 s; closing the devices under it.", what)
+        return True
 
     def closeEvent(self, event):
+        if not self._quiesce():
+            event.ignore()
+            return
+
         # Qt only sends QCloseEvent to top-level windows, so a tab embedded in
         # self.tabWidget never gets one. Flush their CSV recordings here so
         # quitting mid-recording doesn't leave a file handle dangling.

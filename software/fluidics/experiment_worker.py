@@ -106,6 +106,11 @@ class ExperimentWorker:
         make_safe could not switch off is appended to the report -- after an
         abort, "the rig could not be made safe" is the line that matters.
         """
+        # An early end must not hold. An abort has opened the gate already; a
+        # failure while a pause was pending has not, and would otherwise
+        # unwind with it shut -- one gated call on this path would park for
+        # good, and the GUI would read "pausing" under the failure dialog.
+        self.run_control.release()
         failures = self._call_callback('make_safe') or []
         if failures:
             message += (" Making the rig safe failed: "

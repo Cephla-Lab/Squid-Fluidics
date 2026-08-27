@@ -90,6 +90,42 @@ class TestRunControl:
         assert time.monotonic() - started < 1
 
 
+class TestRelease:
+    """A run ending early lifts its pause without a word, and without
+    touching the cause."""
+
+    def test_a_pending_pause_is_lifted(self):
+        control = RunControl()
+        control.pause()
+        assert control.release() is True
+        assert not control.paused
+
+    def test_a_parked_thread_is_let_go(self, parks):
+        control = RunControl()
+        control.pause()
+        finished, error = parks(control, control.checkpoint)
+        control.release()
+        assert finished.wait(2) and not error
+
+    def test_the_cause_stays(self):
+        control = RunControl()
+        control.cancel()
+        control.release()
+        assert control.cancelled
+
+    def test_nothing_pending_is_nothing_done(self, caplog):
+        control = RunControl()
+        assert control.release() is False
+
+    def test_it_does_not_say_resumed(self, caplog):
+        """The operator did not press Resume; the run is ending."""
+        control = RunControl()
+        control.pause()
+        with caplog.at_level("INFO", logger="fluidics"):
+            control.release()
+        assert "Resumed" not in caplog.text
+
+
 class TestPause:
     """The gate half. Cancel latches and raises; pause holds and never does.
     They share an object because every wait must answer to both -- an Abort
