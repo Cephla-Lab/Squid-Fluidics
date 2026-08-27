@@ -23,8 +23,9 @@ _logger = logging.getLogger(__name__)
 class RunSession:
     def __init__(self, devices):
         self.devices = devices
-        # Notified with the kind of job ("run", "manual") when one starts and
-        # with None when it ends, on the job's own thread.
+        # Notified with the kind of job ("run", "manual") as one starts -- on
+        # the starter's thread, before any of the job's callbacks -- and with
+        # None when it ends, on the job's own thread.
         self.state = Subscribers("run session")
         self._lock = threading.Lock()
         self._kind = None
@@ -39,7 +40,7 @@ class RunSession:
 
     @property
     def kind(self):
-        """"run", "manual", or None."""
+        """One of "run", "manual", or None."""
         return self._kind
 
     # --- starting a job ---
@@ -125,13 +126,24 @@ class RunSession:
     # --- controlling and waiting ---
 
     def abort(self):
-        """Cancel whichever job is running: one signal, no I/O on this thread."""
+        """Cancel whichever job is running: one signal, no I/O on this thread.
+        True if there was one. Idle, the signal is left alone -- a cancel
+        with no job to reset it would abort the next start at once."""
+        if self._kind is None:
+            return False
         self.devices.abort()
+        return True
 
     def pause(self):
+        """Hold the running job at its next gate. True if this call did;
+        False when there is none -- the next job must not start paused."""
+        if self._kind is None:
+            return False
         return self.devices.pause()
 
     def resume(self):
+        if self._kind is None:
+            return False
         return self.devices.resume()
 
     def wait(self, timeout=None):
@@ -149,6 +161,9 @@ class RunSession:
         if not self._done.wait(timeout):
             return False
         thread = self._thread
-        if thread is not None:
+        # Only a live thread that is not this one can be joined: the thread
+        # of a start() that failed never ran, and a callback on the job's
+        # thread may want to wait on its own end.
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
             thread.join()
         return True

@@ -182,9 +182,58 @@ class TestAManualMove:
         assert session.wait(5)
 
 
+class TestIdle:
+    """Controls with no job leave the run's signal alone: a cancel or a pause
+    set now would land on the next job."""
+
+    def test_abort_pause_and_resume_do_nothing_and_say_so(self, rig):
+        devices, session, ops, seen = rig
+        assert session.abort() is False
+        assert session.pause() is False
+        assert session.resume() is False
+        assert not devices.run_control.cancelled and not devices.run_control.paused
+
+    def test_the_next_job_runs(self, rig, real_clock):
+        devices, session, ops, seen = rig
+        session.abort()
+        session.pause()
+        session.start([FLOW_CELL_STEP], ops)
+        assert session.wait(5)
+        assert devices.syringe_pump.executed, "the idle abort or pause reached the next job"
+
+
 class TestWait:
     def test_an_idle_session_is_waited_for_at_once(self, rig):
         assert rig[1].wait(0) is True
+
+    def test_wait_after_a_start_that_failed_does_not_raise(self, rig, monkeypatch):
+        devices, session, ops, seen = rig
+
+        class CannotStart:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def start(self):
+                raise RuntimeError("can't start new thread")
+
+            def is_alive(self):
+                return False
+
+        import fluidics.run_session as module
+        monkeypatch.setattr(module.threading, "Thread", CannotStart)
+        with pytest.raises(RuntimeError, match="can't start"):
+            session.start([FLOW_CELL_STEP], ops)
+        assert session.wait(0) is True
+
+    def test_wait_from_inside_the_jobs_own_callback_does_not_raise(self, rig, real_clock):
+        """A callback that wants to know the job is over may ask; it cannot
+        join its own thread, and must not be made to try."""
+        devices, session, ops, seen = rig
+        waited = []
+        session.start([FLOW_CELL_STEP], ops,
+                      callbacks={"on_finished": lambda: waited.append(session.wait(1))})
+        assert session.wait(5)
+        assert waited == [True]
 
     def test_wait_reports_a_timeout_rather_than_returning_early(self, rig, real_clock):
         devices, session, ops, seen = rig
