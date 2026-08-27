@@ -5,8 +5,6 @@ DeviceSet tests cannot see. The autouse fake clock makes the simulated
 bring-up and moves instant; the run log and crash hook are stubbed out."""
 
 import sys
-from types import SimpleNamespace
-
 import pytest
 
 import run_sequences
@@ -42,16 +40,7 @@ def test_a_clean_simulated_run_exits_zero(cli, sequences, config):
     assert cli(sequences, config) == 0
 
 
-def test_a_thread_that_fails_to_start_exits_promptly(cli, monkeypatch):
-    """A start() that raises lands in main()'s except Exception, which has
-    no run to wait on: teardown and exit 1, promptly. Only the CLI's own
-    Thread is stubbed -- the simulated drivers keep theirs."""
-    class CannotStart:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def start(self):
-            raise RuntimeError("can't start new thread")
-
-    monkeypatch.setattr(run_sequences, "threading", SimpleNamespace(Thread=CannotStart))
+def test_a_thread_that_fails_to_start_exits_promptly(cli, thread_cannot_start):
+    """A start() that raises lands in main()'s except Exception with the
+    session left free -- nothing to wait on: teardown and exit 1, promptly."""
     assert cli(*QUICKSTART_PAIRS[0]) == 1

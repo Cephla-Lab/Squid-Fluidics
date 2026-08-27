@@ -70,7 +70,9 @@ These must stay in sync. Same applies to `VALVE_POSITIONS`/`ValvesStates_t` and 
 - **`fluidics/merfish_operations.py`** — MERFISH experiment sequence logic
 - **`fluidics/open_chamber_operations.py`** — Open chamber experiment sequence logic
 - **`fluidics/manual_operations.py`** — `ManualOperations(devices)`: the manual tab's verbs (open port, extract, dispense, empty to waste, aspirate) as blocking, Qt-free methods; the GUI runs them off-thread, scripts call them directly
-- **`fluidics/experiment_worker.py`** — Threaded experiment execution with progress callbacks
+- **`fluidics/experiment_worker.py`** — The run loop: iterates the sequences, reports through callbacks
+- **`fluidics/subscribers.py`** — `Subscribers`: the callback list with isolated dispatch that the MCU packet stream, the flow sensors, the TCM and the run session all publish through
+- **`fluidics/run_session.py`** — `RunSession(devices)`: the one job on the rig at a time (a run or a manual move) — starts it off the caller's thread, says whether the rig is busy, stops it, waits for it, resets the run's signal when it ends; the GUI's tabs and the CLI are its callers
 
 ### Firmware Module Structure
 

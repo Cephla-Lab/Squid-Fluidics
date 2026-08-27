@@ -19,6 +19,36 @@ FLOW_CELL_STEP = {"type": "flow_reagent", "fluidic_port": 1,
 
 
 @pytest.fixture
+def instant_devices(built):
+    """A simulated DeviceSet with its pacing switched off: the controller's
+    one-second commands and the pump's five-second moves would otherwise be
+    spent for real under real_clock. The gates are untouched."""
+    def _build(config):
+        devices = built(config, simulation=True)
+        devices.controller.COMMAND_SECONDS = 0
+        devices.syringe_pump.ESTIMATE_SECONDS = 0
+        return devices
+
+    return _build
+
+
+@pytest.fixture
+def thread_cannot_start(monkeypatch):
+    """The session's Thread whose start() raises -- what a host out of
+    threads looks like. Patched after the simulated drivers have started
+    their own threads."""
+    class CannotStart:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+    import fluidics.run_session as run_session
+    monkeypatch.setattr(run_session.threading, "Thread", CannotStart)
+
+
+@pytest.fixture
 def built():
     """build_devices that closes what it built when the test ends.
 

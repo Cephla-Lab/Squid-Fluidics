@@ -96,7 +96,7 @@ Speed codes (0–40) map to stroke times via `SPEED_SEC_MAPPING`. Use `flow_rate
 2. YAML sequences define operations as typed dicts with a `type` discriminator field (legacy CSV also supported)
 3. `config.application` (`"Flow Cell"` or `"Open Chamber"`) selects the operations class
 4. `ExperimentWorker` iterates the sequence list, calling `process_sequence()` on the operations class
-5. Worker runs in a separate thread with callback-based progress reporting; cancellation comes through the run's shared `RunControl` (`fluidics/errors.py`)
+5. `RunSession` (`fluidics/run_session.py`) runs the worker on its own thread and owns the job's end; the worker reports through callbacks, and cancellation comes through the run's shared `RunControl` (`fluidics/errors.py`)
 
 ### Operations Classes
 
@@ -131,8 +131,9 @@ Not guarded: the dispense-to-waste inside `_empty_syringe_pump_on_full`, and `Pr
 
 - `fluidics/control/tecancavro/` is a vendored library for Tecan Cavro syringe pump protocol — avoid modifying
 - Config files in `sample_config/` (YAML), sequence files in `sample_sequences/` (YAML preferred, CSV supported for legacy)
-- Cancellation: `DeviceSet.abort()` cancels the run's `RunControl` (no device I/O on the calling thread); every waiting device raises the cause on its own thread, so operations unwind by the raise -- there is no `is_aborted` polling. `DeviceSet.make_safe()` quiets the rig after any early end; `DeviceSet.reset()` clears the signal when the run ends.
-- Pause: `DeviceSet.pause()`/`resume()` gate the same `RunControl`.
+- Cancellation: `RunSession.abort()` cancels the run's `RunControl` (no device I/O on the calling thread); every waiting device raises the cause on its own thread, so operations unwind by the raise -- there is no `is_aborted` polling. `DeviceSet.make_safe()` quiets the rig after any early end, and the worker's `_end_early` lifts any pending pause first (`RunControl.release()`), so nothing on the failure path can park.
+- One job on the rig: `RunSession` (`fluidics/run_session.py`) owns whichever is running -- a run or a manual move -- refuses a second, exposes its state (`busy`, `kind`, `paused`, `at_rest`, `cancelled`), and resets the signal when the job ends, atomically and before the caller's `on_finished`. Both GUI tabs and the CLI go through it; nothing else owns a thread. `Interruptible.execute()` refuses re-entry at driver depth as well. GUI wiring (the greyed tab, Stop, the close-quiesce, `PostsToQtThread`) is documented on the classes in `gui.py`.
+- Pause: `RunSession.pause()`/`resume()` gate the same `RunControl`.
   - The gate: every driver call that starts motion passes `checkpoint()` first, so a valve or drain move in flight finishes and the next one holds. Run-level waits (incubation, settle, temperature stabilization, the drain's timed aspiration) use `delay()`/`run_for()`, which count *running* time, so a pause stops those clocks. Hardware polls use `wait()`/`sleep()` and deliberately ignore pause -- a command in flight must be waited out. Abort while paused unwinds: `cancel()` opens the gate.
   - The syringe pump stops where it is: it dispatches its queued ops one at a time, `wait_for_stop` wakes on a pause (`wait_interrupted()`), halts the plunger on the thread that owns the port, parks at the gate, and on resume re-issues what the op had left as an absolute move to the op's target -- fixed from a plunger reading taken before the op started, so no read of a decelerating pump decides how much liquid moves. `Interruptible.moving` is the pump's own word on whether a move is in flight, cleared before a halt is sent.
   - Around the pump: hardware committed alongside a pump call registers what to do about a park with `when_held(on_hold, on_release)` (the drain under a dispense; hooks run with the region detached, and `on_release` never runs for a cancel). The `DrawGuard` stands down while the pump is not `moving` and restarts its ramp-up at the first sample of the new move.

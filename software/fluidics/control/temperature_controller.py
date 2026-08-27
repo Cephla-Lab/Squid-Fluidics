@@ -4,7 +4,7 @@ import time
 
 import serial
 
-from .controller import Subscribers
+from ..subscribers import Subscribers
 from .discovery import find_serial_port
 
 _logger = logging.getLogger(__name__)

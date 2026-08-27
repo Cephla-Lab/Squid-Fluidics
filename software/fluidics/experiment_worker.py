@@ -1,5 +1,4 @@
 import logging
-import threading
 
 from .errors import AbortRequested, Cancelled, RunControl
 # Re-exported: defined here before fluidics.errors existed, and scripts
@@ -40,9 +39,6 @@ class ExperimentWorker:
         self.config = config
         self.callbacks = callbacks or {}
         self.run_control = run_control if run_control is not None else RunControl()
-        # Set once run() has returned through its finally. The thing to wait
-        # on after a cancel -- not Thread.join(), see run_sequences.
-        self.finished = threading.Event()
 
         self.time_to_finish, self.n_sequences = self.get_time_to_finish()
         # The worker narrates its own run: one source feeds the console, the
@@ -106,6 +102,7 @@ class ExperimentWorker:
         make_safe could not switch off is appended to the report -- after an
         abort, "the rig could not be made safe" is the line that matters.
         """
+        self.run_control.release()      # a pending pause must not hold the unwinding
         failures = self._call_callback('make_safe') or []
         if failures:
             message += (" Making the rig safe failed: "
@@ -164,5 +161,3 @@ class ExperimentWorker:
         finally:
             _logger.info("Run finished.")
             self._call_callback('on_finished')
-            # Last: whoever waits on it may tear the devices down.
-            self.finished.set()

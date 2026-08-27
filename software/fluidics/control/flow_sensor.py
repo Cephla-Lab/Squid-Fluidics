@@ -10,7 +10,7 @@ import threading
 import time
 
 from ._def import CMD_SET, COMMAND_STATUS, MCU_CONSTANTS
-from .controller import Subscribers
+from ..subscribers import Subscribers
 
 _logger = logging.getLogger(__name__)
 

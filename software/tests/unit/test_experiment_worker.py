@@ -251,16 +251,6 @@ class TestTheSharedSignal:
         assert "TEC channel 1 not answering" in error
 
 
-    def test_finished_is_set_last(self):
-        """After on_finished: whoever waits on it may tear the devices down."""
-        seen = []
-        worker = ExperimentWorker(RecordingOps(), [FLOW], CONFIG, callbacks={
-            "on_finished": lambda: seen.append(worker.finished.is_set()),
-        })
-        worker.run()
-        assert seen == [False]
-        assert worker.finished.is_set()
-
 
 class TestPause:
     """The worker holds between sequences and stops the incubation clock."""
@@ -298,6 +288,19 @@ class TestPause:
         assert (2, "Paused") in events, events
         assert events.index((2, "Paused")) < events.index((2, "Started"))
         assert len(ops.processed) == 2, "the run did not carry on after the resume"
+
+    def test_an_early_end_lifts_a_pending_pause(self):
+        """A failure while a pause is pending must not unwind behind a shut
+        gate: make_safe and the report run with nothing able to park."""
+        control = RunControl()
+
+        class PausedThenFailing(RecordingOps):
+            def process_sequence(self, seq):
+                control.pause()                      # the operator, mid-sequence
+                raise RuntimeError("pump fault")     # the rig, a moment later
+
+        record_run(PausedThenFailing(), [FLOW], CONFIG, run_control=control)
+        assert not control.paused
 
     def test_a_cancel_beats_a_pending_pause(self):
         """Pause then Abort: the run reports aborted rather than waiting for a

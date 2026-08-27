@@ -21,7 +21,7 @@ from fluidics.control.selector_valve import SelectorValveSystem
 from fluidics.control.syringe_pump import SyringePumpSimulation
 from fluidics.control.temperature_controller import TCMControllerSimulation
 from fluidics.devices import DeviceSet, build_devices, build_operations, build_worker
-from fluidics.errors import AbortRequested, RunControl
+from fluidics.errors import RunControl
 from fluidics.merfish_operations import MERFISHOperations
 from fluidics.open_chamber_operations import OpenChamberOperations
 
@@ -247,25 +247,6 @@ def device_set(config, pump=None, controller=None, tc=None, sensors=(),
                      run_control=run_control if run_control is not None else RunControl())
 
 
-class TestDeviceSetAbort:
-    """One signal, no device I/O on the calling thread: the GUI's Abort button
-    and the CLI's Ctrl+C both cancel through here, and every device that
-    waits stops itself when its wait wakes."""
-
-    def test_abort_cancels_the_shared_signal_and_touches_no_device(self, flow_cell_config):
-        # Bare objects: any call on a device would be an AttributeError.
-        devices = device_set(flow_cell_config, pump=object(), tc=object(),
-                             disc_pump=object())
-        devices.abort()
-        assert isinstance(devices.run_control.cause, AbortRequested)
-
-    def test_reset_clears_it_for_the_next_run(self, flow_cell_config):
-        devices = device_set(flow_cell_config)
-        devices.abort()
-        devices.reset()
-        assert not devices.run_control.cancelled
-
-
 class TestMakeSafe:
     """After a cancelled run has unwound: TEC output off on every channel (an
     abort ends the experiment), drain pump off. Called by the worker on its
@@ -398,6 +379,6 @@ class TestRunControlInjection:
         """The real pump's close parks to waste with a move of its own; with
         the signal still tripped that move would raise instead of parking."""
         devices = built(flow_cell_config, simulation=True)
-        devices.abort()
+        devices.run_control.cancel()
         assert devices.close() == []
         assert not devices.run_control.cancelled

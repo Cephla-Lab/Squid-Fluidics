@@ -158,6 +158,20 @@ class RunControl:
 
     def resume(self):
         """Let the run go on. True if this call resumed it."""
+        if not self.release():
+            return False
+        _logger.info("Resumed.")
+        return True
+
+    def release(self):
+        """Lift a pause without a word: True if one was pending.
+
+        For a run that is ending early. An abort has already opened the gate
+        (cancel() does); a failure has not, and its unwinding -- make_safe's
+        round trips, the report -- must not park behind a pause that no
+        longer means anything. The cause, if one is set, stays: this is not
+        reset().
+        """
         with self._lock:
             if not self._paused:
                 return False
@@ -165,7 +179,6 @@ class RunControl:
             self._running.set()
             if self._cause is None:
                 self._interrupted.clear()
-        _logger.info("Resumed.")
         return True
 
     @property

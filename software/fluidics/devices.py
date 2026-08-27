@@ -72,7 +72,9 @@ class DeviceSet:
     syringe_pump, selector_valves, disc_pump (None outside Open Chamber),
     temperature_controller (None when absent or failed), flow_sensors (possibly
     empty), and run_control -- the one cancellation signal every waiting
-    device shares. Built by build_devices(); nothing else should construct one.
+    device shares; RunSession drives it (cancel, pause, reset), so an abort
+    from anywhere reaches every device. Built by build_devices(); nothing
+    else should construct one.
     """
 
     def __init__(self, config, controller, syringe_pump, selector_valves,
@@ -86,30 +88,6 @@ class DeviceSet:
         self.temperature_controller = temperature_controller
         self.flow_sensors = flow_sensors
         self._closed = False
-
-    def abort(self):
-        """Cancel the run: one signal, no device I/O on this thread.
-
-        The GUI's Abort button and the CLI's Ctrl+C call this from threads
-        that own no serial port. Every device that waits shares run_control
-        and stops itself when its wait wakes; the worker waits on it too.
-        """
-        self.run_control.cancel()
-
-    def reset(self):
-        """Clear the cancellation once the run that raised it has ended, before
-        anything else uses the devices (the GUI's manual tab)."""
-        self.run_control.reset()
-
-    def pause(self):
-        """Hold the run at the next gate: the move in flight finishes, and
-        nothing new starts until resume(). No device I/O on this thread --
-        each device holds itself, on the thread that owns it. RunControl
-        narrates the transition, so a caller reaching past this still logs."""
-        return self.run_control.pause()
-
-    def resume(self):
-        return self.run_control.resume()
 
     def make_safe(self):
         """Leave nothing running once a run has ended early -- abort or failure
