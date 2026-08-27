@@ -53,6 +53,26 @@ class FluidicsSystem:
         """Block until the current job has ended; see RunSession.wait."""
         return self.session.wait(timeout)
 
+    def abort(self):
+        """Stop whichever job is running; see RunSession.abort."""
+        return self.session.abort()
+
+    def pause(self):
+        return self.session.pause()
+
+    def resume(self):
+        return self.session.resume()
+
+    @property
+    def busy(self):
+        return self.session.busy
+
+    def make_safe(self):
+        """Leave nothing running after an early end; see DeviceSet.make_safe.
+        For a caller driving the verbs on its own thread, where close()'s
+        quiesce cannot see the work -- a script's interrupt handler."""
+        return self.devices.make_safe()
+
     # --- shutdown ---
 
     def close(self, timeout=10):
@@ -62,14 +82,19 @@ class FluidicsSystem:
         thread still driving them. Returns the exceptions the close raised,
         as DeviceSet.close does; safe to call twice.
         """
-        if self.session.busy:
-            what = self.session.kind
-            _logger.warning("Stopping the %s before closing the devices.", what)
-            self.session.abort()
-            if not self.session.wait(timeout):
-                _logger.error("The %s did not stop within %s s; closing the devices under it.",
-                              what, timeout)
-        return self.devices.close()
+        try:
+            if self.session.busy:
+                what = self.session.kind
+                _logger.warning("Stopping the %s before closing the devices.", what)
+                self.session.abort()
+                if not self.session.wait(timeout):
+                    _logger.error("The %s did not stop within %s s; closing the devices under it.",
+                                  what, timeout)
+        finally:
+            # Unconditional: a second Ctrl+C lands in the wait above, and the
+            # ports must still be released -- the exception goes on afterwards.
+            errors = self.devices.close()
+        return errors
 
     def __enter__(self):
         return self

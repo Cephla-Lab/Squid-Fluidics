@@ -73,7 +73,7 @@ def main():
         # nothing cancelled: halt the pump before the close below sends it
         # anything more.
         log.warning("Interrupted; halting the pump before closing.")
-        system.devices.make_safe()
+        system.make_safe()
         sys.exit(130)
     finally:
         # close() logs each failure itself; only the exit code is ours, and

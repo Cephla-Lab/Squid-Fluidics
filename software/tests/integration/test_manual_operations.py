@@ -110,6 +110,13 @@ class TestWhatTheRigOffers:
         assert [sp.flow_rate_to_speed_code(r) for r in rates] == list(
             range(sp.speed_code_limit, 41))
 
+    def test_the_valve_reads_come_through_the_verbs_object(self, rig):
+        """The tab and a script ask ManualOperations, not a driver."""
+        devices, manual = rig
+        manual.open_port(3)
+        assert manual.current_port() == 3
+        assert manual.port_names() == devices.selector_valves.get_port_names()
+
     def test_held_volume_reads_the_plunger_or_the_pumps_last_reading(self, rig):
         devices, manual = rig
         sp = devices.syringe_pump

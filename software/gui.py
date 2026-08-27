@@ -669,7 +669,7 @@ class ManualControlWidget(PostsToQtThread, QWidget):
         valveLayout.setContentsMargins(5, 5, 5, 5)
         valveLayout.addWidget(QLabel("Source port:"))
         self.valveCombo = QComboBox()
-        self.valveCombo.addItems(self.system.devices.selector_valves.get_port_names())
+        self.valveCombo.addItems(self.manual.port_names())
         self.valveCombo.currentIndexChanged.connect(self.openValve)
         valveLayout.addWidget(self.valveCombo)
         self._controls.append(self.valveCombo)
@@ -883,7 +883,7 @@ class ManualControlWidget(PostsToQtThread, QWidget):
         self.plunger_timer.start(500)
         # Show where the valves are; do not move them there.
         self.valveCombo.blockSignals(True)
-        self.valveCombo.setCurrentIndex(self.system.devices.selector_valves.get_current_port() - 1)
+        self.valveCombo.setCurrentIndex(self.manual.current_port() - 1)
         self.valveCombo.blockSignals(False)
 
     def hideEvent(self, event):
@@ -1406,16 +1406,11 @@ class FluidicsControlGUI(PostsToQtThread, QMainWindow):
             # stale process holding it) -- same operator problem, same dialog.
             QMessageBox.critical(self, "Device Unavailable", str(e))
             raise SystemExit(1)
-        self.devices = self.system.devices
         # The one job on the rig -- a run or a manual move -- for both tabs.
         self.session = self.system.session
         self.session.state.subscribe(lambda kind: self._post_event("_renderTabs", kind))
-        self.controller = self.devices.controller
-        self.syringePump = self.devices.syringe_pump
-        self.selectorValveSystem = self.devices.selector_valves
-        self.discPump = self.devices.disc_pump
-        self.temperatureController = self.devices.temperature_controller
-        self.flowSensors = self.devices.flow_sensors
+        self.temperatureController = self.system.devices.temperature_controller
+        self.flowSensors = self.system.devices.flow_sensors
 
         self.initUI()
 

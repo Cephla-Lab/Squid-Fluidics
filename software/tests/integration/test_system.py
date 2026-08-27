@@ -85,6 +85,34 @@ class TestClose:
         release.set()
         assert system.session.wait(5)
 
+    def test_a_second_interrupt_inside_the_quiesce_still_releases_the_devices(
+            self, system, real_clock):
+        """The wait for the job is where a second Ctrl+C lands; the ports
+        must be released all the same, with the interrupt going on after."""
+        release = threading.Event()
+        system.run_manual(release.wait)
+
+        def interrupted(timeout=None):
+            raise KeyboardInterrupt
+
+        system.session.wait = interrupted
+        closed = []
+        close = system.devices.close
+        system.devices.close = lambda *a, **k: closed.append(True) or close(*a, **k)
+        with pytest.raises(KeyboardInterrupt):
+            system.close()
+        assert closed == [True], "the devices were not released"
+        release.set()
+
+    def test_abort_and_busy_are_the_facades_too(self, system, real_clock):
+        """A script's signal handler holds the system, not its session."""
+        release = threading.Event()
+        assert system.busy is False and system.abort() is False
+        system.run_manual(release.wait)
+        assert system.busy is True
+        release.set()
+        assert system.wait(5)
+
     def test_the_context_manager_closes(self, flow_cell_config):
         with FluidicsSystem.build(flow_cell_config, simulation=True) as system:
             pass

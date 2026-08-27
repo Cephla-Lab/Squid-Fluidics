@@ -71,7 +71,10 @@ def main():
         sys.exit(1)
     finally:
         if system is not None:
-            close_errors = system.close()
+            # No time limit: an attended terminal waits as long as the
+            # operator will, and a second Ctrl+C forces its way through the
+            # wait -- the devices are still released (close() shields that).
+            close_errors = system.close(timeout=None)
         stop_log_file()
 
     # Reached whenever main's own try completed. The worker never raises out
