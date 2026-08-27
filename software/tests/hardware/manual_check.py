@@ -19,8 +19,13 @@ import logging
 import sys
 
 from fluidics.control.config import load_config
+from fluidics.control.controller import FluidControllerSimulation
+from fluidics.control.syringe_pump import SyringePumpSimulation
 from fluidics.devices import build_devices
 from fluidics.manual_operations import ManualOperations
+from fluidics.run_log import configure_console
+
+log = logging.getLogger("fluidics.manual_check")
 
 
 def main():
@@ -38,8 +43,13 @@ def main():
                         help="simulated hardware, to check the script itself")
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    log = logging.getLogger("manual_check")
+    configure_console()
+    if args.simulation:
+        # A self-check of the script, not of the simulation's pacing: its
+        # one-second valve commands and five-second moves would otherwise
+        # make this a fifteen-second wait.
+        FluidControllerSimulation.COMMAND_SECONDS = 0
+        SyringePumpSimulation.ESTIMATE_SECONDS = 0
 
     config = load_config(args.config)
     devices = build_devices(config, args.simulation)
@@ -59,11 +69,18 @@ def main():
             manual.aspirate(args.aspirate)
             log.info("Drain ran for %.1f s.", args.aspirate)
         log.info("Every verb ran.")
+    except KeyboardInterrupt:
+        # The verbs run on this thread, so Ctrl+C lands inside a wait with
+        # nothing cancelled: halt the pump before the close below sends it
+        # anything more.
+        log.warning("Interrupted; halting the pump before closing.")
+        devices.make_safe()
+        sys.exit(130)
     finally:
-        errors = devices.close()
-        if errors:
-            log.error("Closing the rig reported: %s", "; ".join(map(str, errors)))
-            sys.exit(1)
+        # close() logs each failure itself; only the exit code is ours, and
+        # it is run_sequences.py's for the same condition.
+        if devices.close():
+            sys.exit(2)
 
 
 if __name__ == "__main__":

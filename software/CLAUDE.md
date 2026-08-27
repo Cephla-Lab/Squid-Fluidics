@@ -35,7 +35,7 @@ python -m tests.hardware.diagnose_temperature_controller --sn <serial>
 
 Uses pytest. Hardware scripts in `tests/hardware/` are excluded from the default test run and need a connected rig (`manual_check --simulation` checks the script itself). Run them with `python -m` from `software/` so `fluidics` imports without the package installed. Use `--simulation` for software-only CLI testing.
 
-The pre-2026 `tests/hardware/startup.py` and `demo.py` exercised MCU commands (`LOAD_FLUID_VOLUME`, bang-bang and PID fluid control, `CLEAR_LINES`) from before the syringe-pump architecture; nothing in the product sends them. They were removed in the D3 decoupling PR and live in git history.
+The old `tests/hardware/startup.py` and `demo.py` (MCU-level exercises from before the syringe-pump architecture) are gone; git history has them.
 
 **Dependencies:** declared in `pyproject.toml`; install with `pip install -e ".[test]"` from this directory
 

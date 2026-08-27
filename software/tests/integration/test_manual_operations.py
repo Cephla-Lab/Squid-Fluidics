@@ -7,24 +7,21 @@ around it -- what a script or the manual tab asks for is what moves.
 
 import pytest
 
-from fluidics.devices import build_devices
 from fluidics.errors import AbortRequested
 from fluidics.manual_operations import ManualOperations
 
 
 @pytest.fixture
-def rig(open_chamber_config):
-    devices = build_devices(open_chamber_config, simulation=True)
+def rig(open_chamber_config, built):
+    devices = built(open_chamber_config, simulation=True)
     devices.controller.COMMAND_SECONDS = 0
-    yield devices, ManualOperations(devices)
-    assert devices.close() == []
+    return devices, ManualOperations(devices)
 
 
 @pytest.fixture
-def flow_cell(flow_cell_config):
-    devices = build_devices(flow_cell_config, simulation=True)
-    yield devices, ManualOperations(devices)
-    assert devices.close() == []
+def flow_cell(flow_cell_config, built):
+    devices = built(flow_cell_config, simulation=True)
+    return devices, ManualOperations(devices)
 
 
 class TestTheVerbs:
@@ -100,9 +97,6 @@ class TestOnStarted:
         manual.aspirate(0.01, on_started=seen.append)
         assert seen == [0.01]
 
-    def test_nothing_is_required(self, rig):
-        rig[1].empty_to_waste()
-
 
 class TestWhatTheRigOffers:
     def test_flow_rates_are_the_pumps_codes_within_the_limit_fastest_first(self, rig):
@@ -117,10 +111,17 @@ class TestWhatTheRigOffers:
         assert [sp.flow_rate_to_speed_code(r) for r in rates] == list(
             range(sp.speed_code_limit, 41))
 
-    def test_held_volume_reads_the_plunger(self, rig):
+    def test_held_volume_reads_the_plunger_or_the_pumps_last_reading(self, rig):
         devices, manual = rig
+        sp = devices.syringe_pump
         manual.extract(2, 300, 500)
-        assert manual.held_volume_ul() == devices.syringe_pump.get_current_volume()
+        reads = sp.get_plunger_position
+        counted = []
+        sp.get_plunger_position = lambda: counted.append(True) or reads()
+        assert manual.held_volume_ul(refresh=False) == sp.get_current_volume()
+        assert counted == [], "an idle display read the wire"
+        assert manual.held_volume_ul() == sp.get_current_volume()
+        assert counted == [True]
 
 
 class TestTheRunsControl:

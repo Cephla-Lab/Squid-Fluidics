@@ -20,7 +20,6 @@ _logger = logging.getLogger(__name__)
 
 class ManualOperations:
     def __init__(self, devices):
-        self.devices = devices
         self.sp = devices.syringe_pump
         self.sv = devices.selector_valves
         self.dp = devices.disc_pump
@@ -29,14 +28,17 @@ class ManualOperations:
 
     def flow_rates(self):
         """The flow rates the syringe pump can be asked for, in uL/min,
-        fastest first: one per speed code the rig's limit allows."""
-        return [self.sp.get_flow_rate(code)
-                for code in range(self.sp.speed_code_limit,
-                                  len(self.sp.SPEED_SEC_MAPPING))]
+        fastest first."""
+        return self.sp.available_flow_rates()
 
-    def held_volume_ul(self):
-        """What the syringe holds now, read from the plunger."""
-        return self.sp.get_plunger_position() * self.sp.volume
+    def held_volume_ul(self, refresh=True):
+        """What the syringe holds: read fresh from the plunger, or -- with
+        refresh=False -- as of the pump's last reading, which it takes after
+        every move. The fresh read is a serial round trip; a display polling
+        an idle pump has no reason to make one."""
+        if refresh:
+            self.sp.get_plunger_position()
+        return self.sp.get_current_volume()
 
     # --- the verbs ---
 
@@ -45,24 +47,22 @@ class ManualOperations:
         _logger.info("Manual: selector valve to port %d.", port)
         self.sv.open_port(port)
 
-    def extract(self, port, volume_ul, flow_rate_ul_min, on_started=None):
-        """Draw `volume_ul` in through syringe-pump `port` at `flow_rate_ul_min`."""
+    def extract(self, syringe_port, volume_ul, flow_rate_ul_min, on_started=None):
+        """Draw `volume_ul` in through the pump's `syringe_port` at `flow_rate_ul_min`."""
         _logger.info("Manual: extract %s uL through port %d at %s uL/min.",
-                     volume_ul, port, flow_rate_ul_min)
-        self._move(lambda code: self.sp.extract(port, volume_ul, code),
-                   flow_rate_ul_min, on_started)
+                     volume_ul, syringe_port, flow_rate_ul_min)
+        self._move("extract", (syringe_port, volume_ul), flow_rate_ul_min, on_started)
 
-    def dispense(self, port, volume_ul, flow_rate_ul_min, on_started=None):
-        """Push `volume_ul` out through syringe-pump `port` at `flow_rate_ul_min`."""
+    def dispense(self, syringe_port, volume_ul, flow_rate_ul_min, on_started=None):
+        """Push `volume_ul` out through the pump's `syringe_port` at `flow_rate_ul_min`."""
         _logger.info("Manual: dispense %s uL through port %d at %s uL/min.",
-                     volume_ul, port, flow_rate_ul_min)
-        self._move(lambda code: self.sp.dispense(port, volume_ul, code),
-                   flow_rate_ul_min, on_started)
+                     volume_ul, syringe_port, flow_rate_ul_min)
+        self._move("dispense", (syringe_port, volume_ul), flow_rate_ul_min, on_started)
 
     def empty_to_waste(self, on_started=None):
         """Push whatever the syringe holds out to waste, as fast as the rig allows."""
         _logger.info("Manual: empty the syringe to waste.")
-        self._move(lambda code: self.sp.dispense_to_waste(), None, on_started)
+        self._move("dispense_to_waste", (), None, on_started)
 
     def aspirate(self, seconds, on_started=None):
         """Run the drain pump at full power for `seconds` (Open Chamber rigs)."""
@@ -73,7 +73,7 @@ class ManualOperations:
             on_started(seconds)
         self.dp.aspirate(seconds)
 
-    def _move(self, queue, flow_rate_ul_min, on_started):
+    def _move(self, op, args, flow_rate_ul_min, on_started):
         """One syringe move: a fresh queue, the op, then the wait.
 
         `on_started`, if given, gets the pump's own time estimate once the
@@ -83,7 +83,7 @@ class ManualOperations:
         self.sp.reset_chain()
         code = (None if flow_rate_ul_min is None
                 else self.sp.flow_rate_to_speed_code(flow_rate_ul_min))
-        estimate = queue(code)
+        estimate = getattr(self.sp, op)(*args, code)
         if on_started is not None:
             on_started(estimate)
         self.sp.execute()

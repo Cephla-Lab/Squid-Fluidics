@@ -40,7 +40,10 @@ class Interruptible:
     """
 
     def _init_run_control(self, run_control=None):
-        self.is_busy = False
+        # Held for the length of execute(): a second caller -- the manual tab
+        # under a run, say -- is refused at once rather than sending a chain
+        # to a pump already moving on one.
+        self._executing = threading.Lock()
         # True from the moment a move is sent until it is halted or has
         # finished. Cleared *before* a halt is sent, so anything judging the
         # flow (the DrawGuard) stands down before it decays.
@@ -109,23 +112,29 @@ class Interruptible:
 
     # --- running ---
 
+    @property
+    def is_busy(self):
+        """Whether an execute() is in progress, on any thread."""
+        return self._executing.locked()
+
     def execute(self):
         """Run the queued ops in order. Returns when the last has finished;
         later than estimated if the run was paused on the way. Raises the
         run's cause if it is cancelled, before or during."""
-        # Consumed either way, as the Tecan's chain is: a cancelled chain
-        # must not resurface as chained volume the next call reports.
-        chain, self._chain = self._chain, []
-        # The gate first, even for an empty chain: an execute() after a
-        # cancel raises rather than returning as if it had run.
-        self.run_control.checkpoint()
-        self.is_busy = True
+        if not self._executing.acquire(blocking=False):
+            raise RuntimeError("the syringe pump is already executing a chain")
         try:
+            # Consumed either way, as the Tecan's chain is: a cancelled chain
+            # must not resurface as chained volume the next call reports.
+            chain, self._chain = self._chain, []
+            # The gate first, even for an empty chain: an execute() after a
+            # cancel raises rather than returning as if it had run.
+            self.run_control.checkpoint()
             for op in chain:
                 self._run_op(op)
         finally:
-            self.is_busy = False
             self.moving = False
+            self._executing.release()
 
     def _run_op(self, op):
         """Run one op to the end, however many pauses that takes."""
@@ -201,6 +210,12 @@ class SpeedCodes:
         if speed_code is None:
             return self.speed_code_limit
         return max(speed_code, self.speed_code_limit)
+
+    def available_flow_rates(self):
+        """Every flow rate this rig can be asked for, in uL/min, fastest
+        first: one per speed code from the limit down to the slowest."""
+        return [self.get_flow_rate(code)
+                for code in range(self.speed_code_limit, len(self.SPEED_SEC_MAPPING))]
 
     def get_flow_rate(self, speed_code):
         """Flow rate for a speed code, in uL/min.

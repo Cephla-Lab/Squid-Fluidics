@@ -69,7 +69,7 @@ These must stay in sync. Same applies to `VALVE_POSITIONS`/`ValvesStates_t` and 
 - **`fluidics/sequences.py`** — Sequence loading/saving/validation with pydantic discriminated union models
 - **`fluidics/merfish_operations.py`** — MERFISH experiment sequence logic
 - **`fluidics/open_chamber_operations.py`** — Open chamber experiment sequence logic
-- **`fluidics/manual_operations.py`** — `ManualOperations(devices)`: the manual tab's verbs (open a port, extract, dispense, empty to waste, aspirate) as blocking, Qt-free methods on the same gated driver calls a run uses; the GUI runs them off its thread, scripts call them directly
+- **`fluidics/manual_operations.py`** — `ManualOperations(devices)`: the manual tab's verbs (open port, extract, dispense, empty to waste, aspirate) as blocking, Qt-free methods; the GUI runs them off-thread, scripts call them directly
 - **`fluidics/experiment_worker.py`** — Threaded experiment execution with progress callbacks
 
 ### Firmware Module Structure

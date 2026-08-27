@@ -62,6 +62,24 @@ class TestOneOpAtATime:
         with pytest.raises(AbortRequested):
             pump.execute()
 
+    def test_a_second_execute_while_one_runs_is_refused(self, during_move):
+        """Two threads driving one pump -- a manual move under a run -- must
+        not both send chains; the second is refused at once, and is_busy is
+        the word on it."""
+        pump = bare_pump(ScriptedSyringe())
+        seen = []
+
+        def re_enter():
+            seen.append(pump.is_busy)
+            with pytest.raises(RuntimeError, match="already executing"):
+                pump.execute()
+
+        during_move(pump, re_enter)
+        pump.extract(2, 300, 10)
+        pump.execute()
+        assert seen == [True] and pump.is_busy is False
+        assert len(pump.syringe.dispatched) == 1
+
     def test_moving_is_the_pumps_word_on_a_move_in_flight(self, during_move):
         """What the DrawGuard stands down on: set once the move is sent,
         cleared when it ends."""

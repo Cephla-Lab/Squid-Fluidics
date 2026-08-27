@@ -594,81 +594,78 @@ class TestManualControl:
                 self.calls.append((name, args, sorted(kwargs)))
             return verb
 
-    def stub(self, application="Open Chamber"):
-        manual = self.Manual()
+    def stub(self):
         stub = SimpleNamespace(
-            manual=manual,
+            manual=self.Manual(),
             valveCombo=SimpleNamespace(currentIndex=lambda: 2),
             syringePortCombo=SimpleNamespace(currentText=lambda: "2"),
             speedCombo=SimpleNamespace(currentData=lambda: 500.0),
             volumeSpinBox=SimpleNamespace(value=lambda: 300),
             pumpInput=SimpleNamespace(value=lambda: 2.5),
             _started=lambda seconds: None,
-            ran=[],
         )
-        stub._run = lambda verb: (stub.ran.append(verb), verb())
-        return stub, manual
+        stub._run = lambda verb: verb()
+        stub._syringeArgs = lambda: gui.ManualControlWidget._syringeArgs(stub)
+        return stub
 
-    def test_the_valve_combo_opens_the_port_off_the_gui_thread(self):
-        stub, manual = self.stub()
+    def test_the_valve_combo_opens_the_port_through_run(self):
+        stub = self.stub()
         gui.ManualControlWidget.openValve(stub)
-        assert manual.calls == [("open_port", (3,), [])]
-        assert len(stub.ran) == 1
+        assert stub.manual.calls == [("open_port", (3,), [])]
 
-    @pytest.mark.parametrize("action, verb, args", [
-        ("extract", "extract", (2, 300, 500.0)),
-        ("dispense", "dispense", (2, 300, 500.0)),
-        ("empty", "empty_to_waste", ()),
+    @pytest.mark.parametrize("button, verb, args", [
+        ("extractSyringe", "extract", (2, 300, 500.0)),
+        ("dispenseSyringe", "dispense", (2, 300, 500.0)),
+        ("emptySyringe", "empty_to_waste", ()),
     ])
-    def test_each_syringe_button_is_one_verb_with_a_progress_hook(self, action, verb, args):
-        stub, manual = self.stub()
-        gui.ManualControlWidget.operateSyringe(stub, action)
-        assert manual.calls == [(verb, args, ["on_started"])]
+    def test_each_syringe_button_is_one_verb_with_a_progress_hook(self, button, verb, args):
+        stub = self.stub()
+        getattr(gui.ManualControlWidget, button)(stub)
+        assert stub.manual.calls == [(verb, args, ["on_started"])]
 
-    def test_the_disc_pump_runs_for_the_spin_box_seconds_off_the_gui_thread(self):
+    def test_the_disc_pump_runs_for_the_spin_box_seconds_through_run(self):
         """It used to block the GUI thread for the whole aspiration, and
         float() a free-text field on the way."""
-        stub, manual = self.stub()
+        stub = self.stub()
         gui.ManualControlWidget.startDiscPump(stub)
-        assert manual.calls == [("aspirate", (2.5,), ["on_started"])]
-        assert len(stub.ran) == 1
+        assert stub.manual.calls == [("aspirate", (2.5,), ["on_started"])]
 
-    def _runnable(self, monkeypatch):
-        """A stub _run can drive: a real thread, with the Qt hand-off recorded."""
-        posted = []
-        monkeypatch.setattr(gui.QMetaObject, "invokeMethod",
-                            lambda obj, name, conn, *args: posted.append((name, args)))
-        monkeypatch.setattr(gui, "Q_ARG", lambda kind, value: value)
-        enabled = []
-        stub = SimpleNamespace(_operation=None, setControlsEnabled=enabled.append)
-        return stub, posted, enabled
+    def _runnable(self):
+        """A stub _run can drive: a real thread, with the Qt hand-off and the
+        busy signal recorded."""
+        posted, enabled, running = [], [], []
+        stub = SimpleNamespace(
+            _operation=None, setControlsEnabled=enabled.append,
+            manual_running=SimpleNamespace(emit=running.append),
+            _post_event=lambda name, *args: posted.append((name, args)),
+        )
+        return stub, posted, enabled, running
 
     def _settled(self, stub):
         stub._operation.join(2)
         assert not stub._operation.is_alive()
 
-    def test_a_verb_runs_on_its_own_thread_and_reports_back(self, monkeypatch):
-        stub, posted, enabled = self._runnable(monkeypatch)
+    def test_a_verb_runs_on_its_own_thread_and_reports_back(self):
+        stub, posted, enabled, running = self._runnable()
         ran_on = []
         gui.ManualControlWidget._run(stub, lambda: ran_on.append(threading.current_thread()))
         self._settled(stub)
         assert ran_on and ran_on[0] is not threading.main_thread()
-        assert enabled == [False]
-        assert [name for name, args in posted] == ["operationComplete"]
+        assert enabled == [False] and running == [True]
+        assert posted == [("operationComplete", ())]
 
-    def test_a_failing_verb_reports_the_error_not_a_completion(self, monkeypatch):
-        stub, posted, enabled = self._runnable(monkeypatch)
+    def test_a_failing_verb_reports_the_error_not_a_completion(self):
+        stub, posted, enabled, running = self._runnable()
 
         def broken():
             raise IOError("no reply from pump")
 
         gui.ManualControlWidget._run(stub, broken)
         self._settled(stub)
-        assert [name for name, args in posted] == ["handleError"]
-        assert "no reply from pump" in str(posted[0][1])
+        assert posted == [("handleError", ("no reply from pump",))]
 
-    def test_a_second_press_while_one_runs_is_refused(self, monkeypatch):
-        stub, posted, enabled = self._runnable(monkeypatch)
+    def test_a_second_press_while_one_runs_is_refused(self):
+        stub, posted, enabled, running = self._runnable()
         release = threading.Event()
         gui.ManualControlWidget._run(stub, release.wait)
         second = []
@@ -676,34 +673,43 @@ class TestManualControl:
         release.set()
         self._settled(stub)
         assert second == [], "a second move ran while the first was still going"
-        assert enabled == [False]
+        assert enabled == [False] and running == [True]
 
-    def test_completion_restores_the_controls_and_finishes_the_bar_only_for_a_timed_move(self):
-        enabled = []
-        bar = []
-        stub = SimpleNamespace(
-            progress_timer=SimpleNamespace(stop=lambda: None),
-            syringeProgressBar=SimpleNamespace(setValue=bar.append),
-            setControlsEnabled=enabled.append,
-            operation_start_time=1.0, operation_duration=None,
-        )
-        stub._clearProgress = lambda: gui.ManualControlWidget._clearProgress(stub)
+    def test_busy_lasts_until_the_report_is_handled_not_until_the_thread_dies(self):
+        """The thread exits before its posted report is processed; a press in
+        that window must still be refused, or the stale report re-enables the
+        controls under the new move."""
+        stub, posted, enabled, running = self._runnable()
+        gui.ManualControlWidget._run(stub, lambda: None)
+        self._settled(stub)                              # thread gone, report pending
+        gui.ManualControlWidget._run(stub, lambda: posted.append("second"))
+        assert "second" not in posted
+
+    def _finishing(self):
+        stub = TestRunFinished.Quiet()
+        stub._operation = object()
+        stub.enabled, stub.running, stub.bar = [], [], []
+        stub.setControlsEnabled = stub.enabled.append
+        stub.manual_running = SimpleNamespace(emit=stub.running.append)
+        stub.syringeProgressBar = SimpleNamespace(setValue=stub.bar.append)
+        stub._finished = lambda: gui.ManualControlWidget._finished(stub)
+        return stub
+
+    def test_completion_frees_the_tab_and_finishes_the_bar_only_for_a_timed_move(self):
+        stub = self._finishing()
+        stub.progress_timer = SimpleNamespace(isActive=lambda: False, stop=lambda: None)
         gui.ManualControlWidget.operationComplete(stub)      # a valve move: no bar
-        assert bar == [] and enabled == [True]
-        stub.operation_duration = 5.0
+        assert stub.bar == [] and stub.enabled == [True] and stub.running == [False]
+        assert stub._operation is None, "the tab still counts as busy"
+        stub.progress_timer = SimpleNamespace(isActive=lambda: True, stop=lambda: None)
         gui.ManualControlWidget.operationComplete(stub)      # a timed move
-        assert bar == [100] and stub.operation_duration is None
+        assert stub.bar == [100]
 
-    def test_an_error_puts_the_controls_back_before_the_dialog(self, monkeypatch):
+    def test_an_error_frees_the_tab_before_the_dialog(self, monkeypatch):
         order = []
-        monkeypatch.setattr(gui.QMessageBox, "critical",
-                            lambda *args: order.append("dialog"))
-        stub = SimpleNamespace(
-            progress_timer=SimpleNamespace(stop=lambda: None),
-            syringeProgressBar=SimpleNamespace(setValue=lambda v: None),
-            setControlsEnabled=lambda on: order.append(("controls", on)),
-            operation_start_time=None, operation_duration=None,
-        )
-        stub._clearProgress = lambda: None
+        monkeypatch.setattr(gui.QMessageBox, "critical", lambda *args: order.append("dialog"))
+        stub = self._finishing()
+        stub.setControlsEnabled = lambda on: order.append(("controls", on))
         gui.ManualControlWidget.handleError(stub, "boom")
         assert order == [("controls", True), "dialog"]
+        assert stub._operation is None and stub.running == [False]
