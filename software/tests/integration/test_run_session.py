@@ -65,8 +65,6 @@ class TestARun:
         devices, session, ops, seen = rig
         errors = []
         session.start([INCUBATING], ops, callbacks={"on_error": errors.append})
-        assert wait_until(lambda: devices.run_control.holding or errors or
-                          session.worker is None) or True
         assert not session.wait(0.05), "an hour's incubation ended in 50 ms"
         session.abort()
         assert session.wait(5)
