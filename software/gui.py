@@ -4,7 +4,6 @@ import logging
 import os
 import re
 import sys
-import threading
 import time
 from datetime import datetime
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout,
@@ -13,7 +12,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QTabWidget, QWidget, QVB
                              QSpinBox, QLabel, QProgressBar, QLineEdit,
                              QGroupBox, QGridLayout, QSizePolicy, QDialog, QFormLayout,
                              QDoubleSpinBox, QDialogButtonBox)
-from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QEvent, QCoreApplication
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QEvent, QCoreApplication
 from PyQt5.QtGui import QColor, QBrush
 
 from serial import SerialException
@@ -541,8 +540,8 @@ class SequencesWidget(PostsToQtThread, QWidget):
         together is what keeps the clock decision and the label it prints
         from coming from different instants.
         """
-        control = self.devices.run_control
-        return control.paused, control.at_rest
+        session = self.session
+        return session.paused, session.at_rest
 
     @staticmethod
     def _pauseSuffix(paused, at_rest):
@@ -561,17 +560,15 @@ class SequencesWidget(PostsToQtThread, QWidget):
         any of them being called: a flow fault cancels from the MCU reader
         thread, and the buttons must go dead then too.
         """
-        running = self.session.kind == "run"
-        live = running and not self.devices.run_control.cancelled
+        live = self.session.kind == "run" and not self.session.cancelled
         self.runButton.setEnabled(not self.session.busy)
         self.pauseButton.setEnabled(live)
         self.abortButton.setEnabled(live)
-        self.pauseButton.setText(
-            "Resume" if self.devices.run_control.paused else "Pause")
+        self.pauseButton.setText("Resume" if self.session.paused else "Pause")
 
     def pauseSequences(self):
         """Hold the run after the move in flight, or let it go on."""
-        if self.devices.run_control.paused:
+        if self.session.paused:
             self.session.resume()
         else:
             self.session.pause()
@@ -605,8 +602,6 @@ class SequencesWidget(PostsToQtThread, QWidget):
         self.sequenceLabel.setText("0/0 sequences")
         self.timer.stop()
         self.highlightRow(None)
-        # The session has already freed the rig and reset the run's signal --
-        # it does so before this callback -- so the controls read idle.
         self._renderRunControls()
         QMessageBox.information(self, "Finished", "Sequence execution finished.")
 
@@ -653,8 +648,6 @@ class ManualControlWidget(PostsToQtThread, QWidget):
         self.progress_timer.timeout.connect(self.updateProgress)
         self.plunger_timer = QTimer(self)
         self.plunger_timer.timeout.connect(self.updatePlungerPosition)
-        self.operation_start_time = None
-        self.operation_duration = None
 
         self.initUI()
 
@@ -813,20 +806,17 @@ class ManualControlWidget(PostsToQtThread, QWidget):
         handled -- a completion, a stop, or an error as a dialog with the
         controls restored first. One at a time: a press while the rig is
         busy is refused, not queued."""
-        if self.session.busy:
-            _logger.info("The rig is busy; the manual move was not started.")
-            return
-        self.setControlsEnabled(False)
         try:
             self.session.run_manual(
                 verb,
                 on_done=lambda: self._post_event("operationComplete"),
                 on_stopped=lambda: self._post_event("operationStopped"),
                 on_error=lambda message: self._post_event("handleError", message))
-        except RuntimeError:
-            # A run got in between the check and the start.
-            _logger.info("The rig is busy; the manual move was not started.")
-            self.setControlsEnabled(True)
+        except RuntimeError as e:
+            _logger.info("%s; the manual move was not started.", e)
+            return
+        # Posted reports cannot be handled before this returns.
+        self.setControlsEnabled(False)
 
     def _started(self, seconds):
         """From the worker thread: the move is under way and expected to
@@ -842,25 +832,21 @@ class ManualControlWidget(PostsToQtThread, QWidget):
         self.progress_timer.start(100)
 
     def operationComplete(self):
-        timed = self.progress_timer.isActive()     # a valve move has no bar
-        self.progress_timer.stop()
-        if timed:
-            self.syringeProgressBar.setValue(100)
-        self._finished()
+        # A timed move's bar finishes; a valve move never had one.
+        self._settle(100 if self.progress_timer.isActive() else None)
 
     def operationStopped(self):
-        self.progress_timer.stop()
-        self.syringeProgressBar.setValue(0)
-        self._finished()
+        self._settle(0)
 
     def handleError(self, error_message):
-        self.progress_timer.stop()
-        self.syringeProgressBar.setValue(0)
-        self._finished()
+        self._settle(0)
         QMessageBox.critical(self, "Error", f"Manual operation failed: {error_message}")
 
-    def _finished(self):
-        """The move's report is in: the tab is free again."""
+    def _settle(self, bar):
+        """The move's report is in: stop counting, draw the bar, free the tab."""
+        self.progress_timer.stop()
+        if bar is not None:
+            self.syringeProgressBar.setValue(bar)
         self.setControlsEnabled(True)
 
     def setControlsEnabled(self, enabled):

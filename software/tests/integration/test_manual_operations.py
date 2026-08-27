@@ -12,15 +12,14 @@ from fluidics.manual_operations import ManualOperations
 
 
 @pytest.fixture
-def rig(open_chamber_config, built):
-    devices = built(open_chamber_config, simulation=True)
-    devices.controller.COMMAND_SECONDS = 0
+def rig(open_chamber_config, instant_devices):
+    devices = instant_devices(open_chamber_config)
     return devices, ManualOperations(devices)
 
 
 @pytest.fixture
-def flow_cell(flow_cell_config, built):
-    devices = built(flow_cell_config, simulation=True)
+def flow_cell(flow_cell_config, instant_devices):
+    devices = instant_devices(flow_cell_config)
     return devices, ManualOperations(devices)
 
 
@@ -126,13 +125,13 @@ class TestWhatTheRigOffers:
 
 class TestTheRunsControl:
     def test_an_aborted_rig_refuses_a_manual_move(self, rig):
-        """The verbs pass the same gates a run does, so devices.abort() stops
-        a manual move too -- and reset() lets the next one through."""
+        """The verbs pass the same gates a run does, so the session's abort()
+        stops a manual move too -- and reset() lets the next one through."""
         devices, manual = rig
-        devices.abort()
+        devices.run_control.cancel()
         with pytest.raises(AbortRequested):
             manual.extract(2, 300, 500)
         assert devices.syringe_pump.executed == []
-        devices.reset()
+        devices.run_control.reset()
         manual.extract(2, 300, 500)
         assert len(devices.syringe_pump.executed) == 1

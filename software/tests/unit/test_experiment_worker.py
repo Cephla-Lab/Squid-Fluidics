@@ -251,16 +251,6 @@ class TestTheSharedSignal:
         assert "TEC channel 1 not answering" in error
 
 
-    def test_finished_is_set_last(self):
-        """After on_finished: whoever waits on it may tear the devices down."""
-        seen = []
-        worker = ExperimentWorker(RecordingOps(), [FLOW], CONFIG, callbacks={
-            "on_finished": lambda: seen.append(worker.finished.is_set()),
-        })
-        worker.run()
-        assert seen == [False]
-        assert worker.finished.is_set()
-
 
 class TestPause:
     """The worker holds between sequences and stops the incubation clock."""

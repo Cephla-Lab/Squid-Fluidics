@@ -40,17 +40,7 @@ def test_a_clean_simulated_run_exits_zero(cli, sequences, config):
     assert cli(sequences, config) == 0
 
 
-def test_a_thread_that_fails_to_start_exits_promptly(cli, monkeypatch):
+def test_a_thread_that_fails_to_start_exits_promptly(cli, thread_cannot_start):
     """A start() that raises lands in main()'s except Exception with the
-    session left free -- nothing to wait on: teardown and exit 1, promptly.
-    Patched after the simulated drivers have started their own threads."""
-    class CannotStart:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def start(self):
-            raise RuntimeError("can't start new thread")
-
-    import fluidics.run_session as run_session
-    monkeypatch.setattr(run_session.threading, "Thread", CannotStart)
+    session left free -- nothing to wait on: teardown and exit 1, promptly."""
     assert cli(*QUICKSTART_PAIRS[0]) == 1

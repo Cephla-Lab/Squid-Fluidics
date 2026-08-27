@@ -9,8 +9,8 @@ sequence: no tubing arithmetic, no overflow protection, no flow guard -- an
 operator asking for 300 uL gets 300 uL.
 
 The verbs go through the same gated driver calls a run does, on the
-DeviceSet's RunControl, so devices.abort() stops a manual move the way it
-stops a run.
+DeviceSet's RunControl, so the session's abort() stops a manual move the
+way it stops a run.
 """
 
 import logging

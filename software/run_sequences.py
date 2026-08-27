@@ -74,7 +74,7 @@ def main():
         # path, and only then does the finally block touch the hardware,
         # single-threaded.
         _logger.warning("Interrupted; stopping the run before closing devices...")
-        if session is not None and session.busy:
+        if session is not None:
             session.abort()
             session.wait()
         sys.exit(130)
