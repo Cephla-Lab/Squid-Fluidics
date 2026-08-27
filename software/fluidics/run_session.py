@@ -82,8 +82,22 @@ class RunSession:
             raise RuntimeError(f"the rig is busy: a {self._kind} is in progress")
         callbacks = dict(callbacks or {})
         on_finished = callbacks.pop("on_finished", None)
+        on_stopped = callbacks.pop("on_stopped", None)
+        on_error = callbacks.pop("on_error", None)
+        # The worker reports an early end from inside run(), while the rig is
+        # still its; the report is held and delivered once the rig is free,
+        # as a manual move's is.
+        ended = []
+        callbacks["on_stopped"] = lambda: ended.append(on_stopped)
+        callbacks["on_error"] = lambda message: ended.append(
+            partial(on_error, message) if on_error is not None else None)
         worker = build_worker(self.devices, operations, sequences, callbacks)
-        self._launch("run", lambda: (worker.run(), None)[1], on_finished)
+
+        def body():
+            worker.run()
+            return ended[0] if ended else None
+
+        self._launch("run", body, on_finished)
 
     def run_manual(self, verb, callbacks=None):
         """Run one manual verb -- a callable -- on a new thread. Refused with

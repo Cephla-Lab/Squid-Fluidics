@@ -79,6 +79,24 @@ class TestARun:
         assert session.wait(5)
         assert at_finish == [(False, False, ["run", None])]
 
+    def test_a_runs_early_end_is_reported_after_the_rig_is_free(self, session, ops, real_clock):
+        """As a manual move's is: the worker says stop or error from inside
+        run(), but whoever listens must see an idle rig, the same as they do
+        on on_finished."""
+        seen = []
+        session.start([INCUBATING], ops, callbacks={
+            "on_stopped": lambda: seen.append(("stopped", session.busy, session.cancelled))})
+        assert not session.wait(0.02)
+        session.abort()
+        assert session.wait(5)
+        assert seen == [("stopped", False, False)]
+
+        bad_port = {**FLOW_CELL_STEP, "fluidic_port": 99}
+        session.start([bad_port], ops, callbacks={
+            "on_error": lambda m: seen.append(("error", session.busy, "99" in m))})
+        assert session.wait(5)
+        assert seen[-1] == ("error", False, True)
+
     def test_abort_stops_a_run_mid_incubation_and_wait_returns(self, session, ops, real_clock):
         reports = []
         session.start([INCUBATING], ops, callbacks={
