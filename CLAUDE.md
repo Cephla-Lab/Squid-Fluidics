@@ -72,7 +72,8 @@ These must stay in sync. Same applies to `VALVE_POSITIONS`/`ValvesStates_t` and 
 - **`fluidics/manual_operations.py`** — `ManualOperations(devices)`: the manual tab's verbs (open port, extract, dispense, empty to waste, aspirate) as blocking, Qt-free methods; the GUI runs them off-thread, scripts call them directly
 - **`fluidics/experiment_worker.py`** — The run loop: iterates the sequences, reports through callbacks
 - **`fluidics/subscribers.py`** — `Subscribers`: the callback list with isolated dispatch that the MCU packet stream, the flow sensors, the TCM and the run session all publish through
-- **`fluidics/run_session.py`** — `RunSession(devices)`: the one job on the rig at a time (a run or a manual move) — starts it off the caller's thread, says whether the rig is busy, stops it, waits for it, resets the run's signal when it ends; the GUI's tabs and the CLI are its callers
+- **`fluidics/run_session.py`** — `RunSession(devices)`: the one job on the rig at a time (a run or a manual move) — starts it off the caller's thread, says whether the rig is busy, stops it, waits for it, resets the run's signal when it ends
+- **`fluidics/system.py`** — `FluidicsSystem`: the rig as one object — `build(config, simulation)` brings the devices up and assembles `devices`, `operations`, `manual`, `session` and a `warnings` channel; `run()`, `run_manual()`, and `close(timeout)`, which stops whatever job is running before the devices go. What the GUI, the CLI and scripts hold
 
 ### Firmware Module Structure
 
@@ -84,7 +85,7 @@ These must stay in sync. Same applies to `VALVE_POSITIONS`/`ValvesStates_t` and 
 
 1. Config YAML defines hardware serial numbers, valve IDs, reagent mappings (legacy JSON auto-converts)
 2. YAML sequences define operations as typed dicts with a `type` discriminator field (legacy CSV also supported)
-3. `ExperimentWorker` iterates the sequence list, calling operation methods on `MERFISHOperations` or `OpenChamberOperations`
+3. `FluidicsSystem.run()` hands the list to the `RunSession`, whose `ExperimentWorker` iterates it, calling operation methods on `MERFISHOperations` or `OpenChamberOperations`
 4. Operations dispatch on `sequence['type']` (snake_case strings like `flow_reagent`, `add_reagent`, `set_temperature`)
 
 ### Sequence Models

@@ -102,7 +102,7 @@ def test_the_worker_learns_of_the_abort_from_the_operation(stack):
     events = record_run(ops, [seq, seq], config)
     assert ("progress", 1, "Completed") not in events
     assert ("progress", 2, "Started") not in events
-    assert any("abort" in message.lower() for message in errors_in(events))
+    assert ("stopped",) in events and errors_in(events) == []
 
 
 def test_a_flow_fault_reaches_the_operator_as_a_fault_not_an_abort(flow_cell_config):

@@ -5,8 +5,7 @@ from fluidics.sequences import (
     check_ports_against_config, get_included_sequences, load_sequences,
 )
 from fluidics.control.config import load_config
-from fluidics.devices import build_devices, build_operations
-from fluidics.run_session import RunSession
+from fluidics.system import FluidicsSystem
 from fluidics.run_log import (
     setup_uncaught_exception_logging, start_log_file, stop_log_file,
 )
@@ -39,8 +38,7 @@ def main():
     setup_uncaught_exception_logging()
     start_log_file()
 
-    devices = None
-    session = None
+    system = None
     run_errors = []
     close_errors = []
 
@@ -53,16 +51,13 @@ def main():
         # Fail on a mistyped port before any hardware is touched.
         check_ports_against_config(included, config)
 
-        devices = build_devices(config, args.simulation)
-        experiment_ops = build_operations(config, devices)
+        system = FluidicsSystem.build(config, args.simulation)
 
         # The worker narrates its own run through the fluidics logger, so
         # the CLI needs no rendering callbacks -- but a failed run must not
         # exit 0, and the worker reports failure only through on_error.
-        session = RunSession(devices)
-        session.start(included, experiment_ops,
-                      callbacks={"on_error": run_errors.append})
-        session.wait()
+        system.run(included, callbacks={"on_error": run_errors.append})
+        system.session.wait()
 
     except KeyboardInterrupt:
         # `except Exception` would not catch this, so without it Ctrl+C fell
@@ -74,20 +69,17 @@ def main():
         # path, and only then does the finally block touch the hardware,
         # single-threaded.
         _logger.warning("Interrupted; stopping the run before closing devices...")
-        if session is not None:
-            session.abort()
-            session.wait()
-        sys.exit(130)
+        sys.exit(130)       # the close() below stops the run first
     except Exception as e:
         # Nothing after the thread starts raises through here, so there is
         # no run to wait on: straight to teardown.
         _logger.exception("%s", e)
         sys.exit(1)
     finally:
-        # DeviceSet.close owns the teardown ordering: sensors detach before the
-        # controller stops the reader thread that owns the MCU port.
-        if devices is not None:
-            close_errors = devices.close()
+        # The system quiesces whatever job is running, then closes the
+        # devices in DeviceSet.close's order.
+        if system is not None:
+            close_errors = system.close()
         stop_log_file()
 
     # Reached whenever main's own try completed. The worker never raises out
