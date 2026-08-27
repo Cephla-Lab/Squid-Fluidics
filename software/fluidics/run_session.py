@@ -26,9 +26,10 @@ class RunSession:
     def __init__(self, devices):
         self.devices = devices
         self.control = devices.run_control
-        # Notified with the kind of job ("run", "manual") as one starts and
-        # with None when it ends -- in that order, always: both happen under
-        # the session's lock, which is re-entrant so that a subscriber may
+        # Notified with the kind of job ("run", "manual") as one starts -- on
+        # the starter's thread, before any of the job's callbacks -- and with
+        # None when it ends, on the job's thread. In that order, always: both
+        # happen under the session's lock, which is re-entrant so a subscriber may
         # start the next job from the end of this one (a waiter then waits
         # for that one too). Subscribers must not block on another thread
         # that needs the session; the GUI posts an event.
