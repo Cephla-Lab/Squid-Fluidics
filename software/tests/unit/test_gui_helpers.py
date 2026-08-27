@@ -625,7 +625,7 @@ class TestManualControl:
         gui.ManualControlWidget.operateSyringe(stub, action)
         assert manual.calls == [(verb, args, ["on_started"])]
 
-    def test_the_disc_pump_runs_for_the_spin_boxs_seconds_off_the_gui_thread(self):
+    def test_the_disc_pump_runs_for_the_spin_box_seconds_off_the_gui_thread(self):
         """It used to block the GUI thread for the whole aspiration, and
         float() a free-text field on the way."""
         stub, manual = self.stub()

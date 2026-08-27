@@ -28,8 +28,8 @@ def main():
     parser.add_argument("--config", required=True, help="rig config YAML")
     parser.add_argument("--reagent-port", type=int, default=1,
                         help="selector-valve port to open first (default 1)")
-    parser.add_argument("--volume", type=float, default=200,
-                        help="uL to draw and then empty to waste (default 200)")
+    parser.add_argument("--volume", type=int, default=200,
+                        help="whole uL to draw and then empty to waste (default 200)")
     parser.add_argument("--flow-rate", type=float, default=500,
                         help="uL/min for the draw (default 500)")
     parser.add_argument("--aspirate", type=float, default=2,
