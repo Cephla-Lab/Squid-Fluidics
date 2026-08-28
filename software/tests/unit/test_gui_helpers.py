@@ -879,7 +879,10 @@ class TestPickConfig:
     def test_the_rigs_own_config_wins_and_is_remembered_absolutely(self, picking):
         picking.write("config.yaml")
         picking.settings["config_path"] = picking.write("elsewhere.yaml")
-        assert gui.pick_config() is not None
+        config, path = gui.pick_config()
+        assert config is not None
+        assert path == picking.settings["config_path"], \
+            "the returned path is the one save_config must write back to"
         remembered = picking.settings["config_path"]
         assert remembered.endswith("config.yaml"), "the remembered file outranked the rig's own"
         assert os.path.isabs(remembered), \
@@ -888,23 +891,26 @@ class TestPickConfig:
     def test_the_cli_path_outranks_everything(self, picking):
         picking.write("config.yaml")
         given = picking.write("given.yaml")
-        assert gui.pick_config(given) is not None
+        config, path = gui.pick_config(given)
+        assert config is not None and path == os.path.abspath(given)
         assert picking.settings["config_path"] == os.path.abspath(given)
 
     def test_the_last_picked_file_serves_when_the_rig_has_none(self, picking):
         picking.settings["config_path"] = picking.write("elsewhere.yaml")
-        assert gui.pick_config() is not None
+        config, _ = gui.pick_config()
+        assert config is not None
         assert picking.errors == []
         assert picking.settings["config_path"].endswith("elsewhere.yaml")
 
     def test_nothing_found_asks_and_cancel_means_none(self, picking):
-        assert gui.pick_config() is None
+        assert gui.pick_config() == (None, None)
         assert picking.errors == []
 
     def test_a_file_that_fails_to_load_gets_a_dialog_then_asks_again(self, picking):
         (picking.tmp / "config.yaml").write_text("application: 'No Such Application'\n")
         picking.asked.append(picking.write("good.yaml"))
-        assert gui.pick_config() is not None
+        config, _ = gui.pick_config()
+        assert config is not None
         assert len(picking.errors) == 1 and "config.yaml" in picking.errors[0]
         assert picking.settings["config_path"].endswith("good.yaml")
 
@@ -975,3 +981,69 @@ class TestConfirmStart:
         monkeypatch.setattr(gui.QMessageBox, "question",
                             lambda *args: gui.QMessageBox.Yes)
         assert gui.SequencesWidget._confirmStart(SimpleNamespace(), 60, 1) is True
+
+
+class TestPortNames:
+    """Renaming ports: the dialog collects the mapping, editPortNames writes
+    it into the config and the rig's own file, the combo repaints in place."""
+
+    def test_the_dialog_prefills_and_returns_only_named_ports(self, qapp):
+        dialog = gui.PortNamesDialog(None, 4, {"port_2": "DAPI"})
+        assert [edit.text() for edit in dialog._edits] == ["", "DAPI", "", ""]
+        dialog._edits[0].setText("  wash  ")
+        dialog._edits[1].setText("")            # cleared by the operator
+        dialog.accept()
+        assert dialog.result_mapping == {"port_1": "wash"}
+
+    def test_a_rename_lands_in_config_file_and_combo(self, qapp, monkeypatch,
+                                                     tmp_path, fixtures_dir):
+        config_path = str(tmp_path / "config.yaml")
+        shutil.copy(fixtures_dir / "flow_cell_config.yaml", config_path)
+        config = gui.load_config(config_path)
+
+        class FakeDialog:
+            def __init__(self, parent, port_count, mapping):
+                self.result_mapping = {"port_1": "DAPI"}
+
+            def exec_(self):
+                return gui.QDialog.Accepted
+
+        monkeypatch.setattr(gui, "PortNamesDialog", FakeDialog)
+        refreshed = []
+        stub = SimpleNamespace(session=FakeSession(), config=config,
+                               config_path=config_path,
+                               _refreshPortNames=lambda: refreshed.append(True))
+        gui.ManualControlWidget.editPortNames(stub)
+        assert config.reagent_selection.selector_valves.name_mapping == \
+            {"port_1": "DAPI"}
+        assert refreshed == [True]
+        reloaded = gui.load_config(config_path)
+        assert reloaded.reagent_selection.selector_valves.name_mapping == \
+            {"port_1": "DAPI"}
+
+    def test_busy_refuses_before_the_dialog_opens(self, monkeypatch):
+        warned = []
+        monkeypatch.setattr(gui.QMessageBox, "warning",
+                            lambda parent, title, text: warned.append(title))
+        constructed = []
+        monkeypatch.setattr(gui, "PortNamesDialog",
+                            lambda *args: constructed.append(True))
+        stub = SimpleNamespace(session=FakeSession(kind="manual"))
+        gui.ManualControlWidget.editPortNames(stub)
+        assert warned == ["Rig busy"] and constructed == []
+
+    def test_the_repaint_keeps_the_selection_and_moves_no_valve(self, qapp):
+        from PyQt5.QtWidgets import QComboBox
+        combo = QComboBox()
+        combo.addItems(["Port 1: ", "Port 2: ", "Port 3: "])
+        combo.setCurrentIndex(2)
+        moved = []
+        combo.currentIndexChanged.connect(moved.append)
+        stub = SimpleNamespace(
+            valveCombo=combo,
+            manual=SimpleNamespace(
+                port_names=lambda: ["Port 1: DAPI", "Port 2: ", "Port 3: "]))
+        gui.ManualControlWidget._refreshPortNames(stub)
+        assert combo.currentIndex() == 2
+        assert combo.itemText(0) == "Port 1: DAPI"
+        assert moved == [], "a rename must not move a valve"

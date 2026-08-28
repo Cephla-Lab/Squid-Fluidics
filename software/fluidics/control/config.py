@@ -6,6 +6,7 @@ import json
 import os
 from typing import Dict, List, Literal, Optional
 
+import ruamel.yaml
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -231,6 +232,71 @@ def convert_legacy_config(old: dict) -> dict:
 
     new['application'] = 'Flow Cell' if is_flow_cell else application
     return new
+
+
+def save_config(config: FluidicsConfig, config_path: str) -> str:
+    """Write `config` back to its YAML file; returns the path written.
+
+    Round-tripped with ruamel.yaml so the file's own comments and layout
+    survive -- a per-rig config is hand-maintained, and renaming a port
+    must not cost the plumbing notes. Only the values change; keys the
+    model no longer carries leave the file. A .json path is normalized to
+    the sibling .yaml exactly as load_config does: loading a legacy JSON
+    already wrote and used that file, so it is the one being edited -- the
+    JSON itself is never rewritten.
+    """
+    base, ext = os.path.splitext(config_path)
+    if ext == '.json':
+        config_path = base + '.yaml'
+    values = config.model_dump(exclude_none=True)
+    yaml_rt = ruamel.yaml.YAML()    # round-trip mode: keeps comments
+    yaml_rt.preserve_quotes = True
+    try:
+        with open(config_path) as f:
+            document = yaml_rt.load(f)
+    except FileNotFoundError:
+        document = None
+    if document is None:
+        document = values
+    else:
+        _update_yaml_node(document, values)
+    with open(config_path, 'w') as f:
+        yaml_rt.dump(document, f)
+    return config_path
+
+
+def _update_yaml_node(node, values):
+    """Overwrite `node` (a ruamel mapping) with `values`, key by key,
+    recursing into mappings so keys keep the comments attached to them.
+    A value that did not change is left entirely alone -- the file's own
+    text (quoting included) is authoritative for what was not edited, so a
+    quoted `monitor: "off"` cannot come back as a bare YAML boolean."""
+    for key in [k for k in node if k not in values]:
+        del node[key]
+    for key, value in values.items():
+        if key in node and isinstance(value, dict) and isinstance(node[key], dict):
+            _update_yaml_node(node[key], value)
+        elif key not in node or node[key] != value:
+            node[key] = _yaml_faithful(value)
+
+
+def _yaml_faithful(value):
+    """`value`, with any string plain YAML would reinterpret -- "off",
+    "yes", "3", "" -- wrapped so it is written quoted: an operator may name
+    a port anything, and the name must come back as the same string."""
+    if isinstance(value, str):
+        try:
+            reread = yaml.safe_load(value)
+        except yaml.YAMLError:
+            reread = None
+        if reread != value:
+            return ruamel.yaml.scalarstring.DoubleQuotedScalarString(value)
+        return value
+    if isinstance(value, dict):
+        return {key: _yaml_faithful(inner) for key, inner in value.items()}
+    if isinstance(value, list):
+        return [_yaml_faithful(inner) for inner in value]
+    return value
 
 
 def available_port_count(config: FluidicsConfig) -> int:

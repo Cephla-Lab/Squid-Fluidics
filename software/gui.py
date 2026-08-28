@@ -11,7 +11,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QTabWidget, QWidget, QVB
                              QHeaderView, QCheckBox, QFileDialog, QMessageBox, QComboBox,
                              QSpinBox, QLabel, QProgressBar, QLineEdit,
                              QGroupBox, QGridLayout, QSizePolicy, QDialog, QFormLayout,
-                             QDoubleSpinBox, QDialogButtonBox)
+                             QDoubleSpinBox, QDialogButtonBox, QScrollArea)
 from PyQt5.QtCore import (Qt, QTimer, pyqtSignal, QEvent, QCoreApplication,
                           QSettings, QSignalBlocker)
 from PyQt5.QtGui import QColor, QBrush
@@ -19,7 +19,8 @@ from PyQt5.QtGui import QColor, QBrush
 from serial import SerialException
 
 from fluidics.control.config import (
-    DEFAULT_CONFIG_PATHS, available_port_count, default_config_path, load_config,
+    DEFAULT_CONFIG_PATHS, available_port_count, default_config_path,
+    load_config, save_config,
 )
 from fluidics.errors import DeviceError
 from fluidics.devices import (
@@ -31,7 +32,9 @@ from fluidics.experiment_worker import SEQUENCE_COMPLETED
 from fluidics.run_log import setup_uncaught_exception_logging, start_log_file
 from fluidics.sequences import (
     load_sequences, save_sequences_yaml,
-    get_fields_for_type, check_ports_against_config, sequence_port_problems,
+    get_fields_for_type, check_ports_against_config,
+    check_types_against_application, sequence_port_problems,
+    sequence_type_problem,
     SEQUENCE_TYPES, SEQUENCE_TYPE_LABELS, APPLICATION_SEQUENCES,
     SequenceListAdapter,
 )
@@ -50,9 +53,10 @@ def pick_config(cli_path=None):
     """The rig config to run with, loaded: the --config path if given, else
     the rig's own local config (default_config_path), else the last file an
     operator picked; when none of those exists, or one fails to load, a
-    dialog asks instead of a traceback. Returns the loaded config, or None
-    if the operator cancelled. The conventional local file outranks the
-    remembered one on purpose: a rig's ./config.yaml is the rig's.
+    dialog asks instead of a traceback. Returns (config, path) -- the path
+    for save_config to write renames back to -- or (None, None) if the
+    operator cancelled. The conventional local file outranks the remembered
+    one on purpose: a rig's ./config.yaml is the rig's.
     """
     settings = QSettings()
     remembered = settings.value("config_path")
@@ -63,7 +67,7 @@ def pick_config(cli_path=None):
             path, _ = QFileDialog.getOpenFileName(
                 None, "Select a rig config", "", "Config files (*.yaml *.json)")
             if not path:
-                return None
+                return None, None
         try:
             config = load_config(path)
         except Exception as e:
@@ -73,7 +77,7 @@ def pick_config(cli_path=None):
             # Absolute, or the memory means "whatever directory I am run
             # from next time" -- inert exactly when it is needed.
             settings.setValue("config_path", os.path.abspath(path))
-            return config
+            return config, os.path.abspath(path)
 
 
 class WorkerEvent(QEvent):
@@ -196,6 +200,49 @@ class AddSequenceDialog(QDialog):
             elif isinstance(widget, QSpinBox):
                 d[field_name] = widget.value()
         self.result_dict = d
+        super().accept()
+
+
+class PortNamesDialog(QDialog):
+    """Rename the reagent ports: one row per port, blank means unnamed.
+    After OK, result_mapping holds the config's name_mapping shape --
+    {'port_<n>': name} for the named ports only -- and None before."""
+
+    def __init__(self, parent, port_count, name_mapping):
+        super().__init__(parent)
+        self.setWindowTitle("Port Names")
+        self.result_mapping = None
+        self._edits = []
+
+        form_host = QWidget()
+        form = QFormLayout(form_host)
+        for port in range(1, port_count + 1):
+            edit = QLineEdit()
+            edit.setText((name_mapping or {}).get(f"port_{port}", ""))
+            self._edits.append(edit)
+            form.addRow(f"Port {port}", edit)
+
+        # A cascade offers a couple dozen ports; the dialog scrolls rather
+        # than outgrowing the screen.
+        scroll = QScrollArea()
+        scroll.setWidget(form_host)
+        scroll.setWidgetResizable(True)
+        scroll.setMinimumHeight(min(400, 28 * port_count + 20))
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(scroll)
+        layout.addWidget(buttons)
+
+    def accept(self):
+        self.result_mapping = {
+            f"port_{port}": text
+            for port, text in ((i + 1, edit.text().strip())
+                               for i, edit in enumerate(self._edits))
+            if text}
         super().accept()
 
 
@@ -438,6 +485,11 @@ class SequencesWidget(PostsToQtThread, QWidget):
         """The verdict on one row, as a message or None. A pure question:
         the model is never rewritten -- it holds what the operator typed;
         the coercion happens on a copy here, and for real in getSequences."""
+        # The type first: a wrong-application row is also union-valid, and
+        # for an unknown type this message beats the union's tag complaint.
+        type_problem = sequence_type_problem(seq, self.config.application)
+        if type_problem is not None:
+            return type_problem
         try:
             validated = SequenceListAdapter.validate_python([seq])
         except ValidationError as e:
@@ -599,10 +651,11 @@ class SequencesWidget(PostsToQtThread, QWidget):
             return
         try:
             selected = self.getSequences(selected_only=True)
-            # A port this rig does not have must fail here, at the button,
-            # not hours in when the valve is asked to open it -- live
-            # validation paints the same verdict, but this is the gate.
+            # A port this rig does not have, or a wrong-application type,
+            # must fail here, at the button, not hours in -- live
+            # validation paints the same verdicts, but this is the gate.
             check_ports_against_config(selected, self.config)
+            check_types_against_application(selected, self.config)
         except Exception as e:
             QMessageBox.critical(self, "Invalid Sequence", f"Failed to validate sequences: {str(e)}")
             return
@@ -823,9 +876,10 @@ class SequencesWidget(PostsToQtThread, QWidget):
 class ManualControlWidget(PostsToQtThread, QWidget):
     """The operator's hand on the rig, one move at a time -- see _run."""
 
-    def __init__(self, config, system):
+    def __init__(self, config, system, config_path=None):
         super().__init__()
         self.config = config
+        self.config_path = config_path   # where port renames are written back
         self.system = system
         self.session = system.session
         self.manual = system.manual
@@ -852,6 +906,10 @@ class ManualControlWidget(PostsToQtThread, QWidget):
         self.valveCombo.currentIndexChanged.connect(self.openValve)
         valveLayout.addWidget(self.valveCombo)
         self._controls.append(self.valveCombo)
+        self.portNamesButton = QPushButton("Port Names…")
+        self.portNamesButton.clicked.connect(self.editPortNames)
+        valveLayout.addWidget(self.portNamesButton)
+        self._controls.append(self.portNamesButton)
         valveGroupBox.setLayout(valveLayout)
         mainLayout.addWidget(valveGroupBox)
 
@@ -960,6 +1018,41 @@ class ManualControlWidget(PostsToQtThread, QWidget):
     def openValve(self):
         port = self.valveCombo.currentIndex() + 1
         self._run(lambda: self.manual.open_port(port))
+
+    def editPortNames(self):
+        """Rename the reagent ports and write the rig's config back. Idle
+        only: the names feed port lists a running job may be reading."""
+        if self.session.busy:
+            QMessageBox.warning(self, "Rig busy",
+                                "Port names can be edited when the rig is idle.")
+            return
+        sv = self.config.reagent_selection.selector_valves
+        dialog = PortNamesDialog(self, available_port_count(self.config),
+                                 sv.name_mapping)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        sv.name_mapping = dialog.result_mapping or None
+        self._refreshPortNames()
+        if self.config_path is None:
+            QMessageBox.warning(self, "Not saved",
+                                "No config file is known for this session; "
+                                "the names apply until the app closes.")
+            return
+        try:
+            save_config(self.config, self.config_path)
+        except Exception as e:
+            QMessageBox.critical(self, "Error",
+                                 "The names apply for this session, but "
+                                 f"saving the config failed: {e}")
+
+    def _refreshPortNames(self):
+        """Repaint the port list from the config, keeping the selection --
+        a rename must not move a valve."""
+        with QSignalBlocker(self.valveCombo):
+            current = self.valveCombo.currentIndex()
+            self.valveCombo.clear()
+            self.valveCombo.addItems(self.manual.port_names())
+            self.valveCombo.setCurrentIndex(current)
 
     def _syringeArgs(self):
         return (int(self.syringePortCombo.currentText()), self.volumeSpinBox.value(),
@@ -1566,9 +1659,10 @@ class FlowSensorControlWidget(SensorTabWidget):
 
 
 class FluidicsControlGUI(PostsToQtThread, QMainWindow):
-    def __init__(self, config, is_simulation):
+    def __init__(self, config, is_simulation, config_path=None):
         super().__init__()
         self.config = config
+        self.config_path = config_path   # where save_config writes renames
         self.simulation = is_simulation
         # Tabs that own CSV recordings. closeEvent flushes them on exit, since
         # Qt never delivers a close event to a tab-embedded child widget.
@@ -1603,7 +1697,8 @@ class FluidicsControlGUI(PostsToQtThread, QMainWindow):
 
         # "Settings and Manual Control" tab
         runExperimentsTab = SequencesWidget(self.config, self.system)
-        manualControlTab = ManualControlWidget(self.config, self.system)
+        manualControlTab = ManualControlWidget(self.config, self.system,
+                                               config_path=self.config_path)
         # TODO: integrate temperature controller ui
 
         self.tabWidget.addTab(runExperimentsTab, "Run Experiments")
@@ -1715,9 +1810,9 @@ if __name__ == '__main__':
     # The identity every QSettings() in the process stores under.
     QCoreApplication.setOrganizationName("Cephla")
     QCoreApplication.setApplicationName("FluidicsControl")
-    config = pick_config(args.config)
+    config, config_path = pick_config(args.config)
     if config is None:
         sys.exit(1)
-    gui = FluidicsControlGUI(config, args.simulation)
+    gui = FluidicsControlGUI(config, args.simulation, config_path=config_path)
     gui.show()
     sys.exit(app.exec_())

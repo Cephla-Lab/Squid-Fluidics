@@ -186,3 +186,17 @@ class TestLiveValidation:
         assert not widget.runButton.isEnabled()
         widget.tree.topLevelItem(0).setCheckState(0, gui.Qt.Unchecked)
         assert widget.runButton.isEnabled()
+
+
+class TestApplicationTypes:
+    def test_a_wrong_application_row_is_flagged_and_blocks_the_run(self, widget):
+        """The live paint speaks the same verdict as the run gate: this rig
+        is Flow Cell, and an Open Chamber type must not wait until run time
+        to be refused."""
+        widget.setSequences([FLOW, {"type": "add_reagent", "fluidic_port": 2,
+                                    "flow_rate": 500, "volume": 100}])
+        assert "not a Flow Cell sequence type" in widget._invalid[1]
+        assert not widget.runButton.isEnabled()
+        widget.tree.setCurrentItem(widget.tree.topLevelItem(1))
+        widget.removeSequence()
+        assert widget.runButton.isEnabled()
