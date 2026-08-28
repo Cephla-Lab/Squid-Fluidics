@@ -2,6 +2,8 @@
 import json
 
 import pytest
+
+from fluidics.control.config import default_config_path
 from pydantic import ValidationError
 
 from fluidics.control.config import (
@@ -333,3 +335,23 @@ class TestUnknownKeysAreRejected:
                                     "tolerance_celcius": 0.5})  # sic
         with pytest.raises(ValidationError, match="tolerance_celcius"):
             FluidicsConfig(**config)
+
+
+class TestDefaultConfigPath:
+    """The rig's conventional local config, shared by the GUI and the CLI:
+    config.yaml, then the legacy config.json."""
+
+    def test_yaml_wins_over_json(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "config.yaml").write_text("")
+        (tmp_path / "config.json").write_text("")
+        assert default_config_path() == "./config.yaml"
+
+    def test_the_legacy_json_serves_alone(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "config.json").write_text("")
+        assert default_config_path() == "./config.json"
+
+    def test_none_when_the_directory_has_neither(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        assert default_config_path() is None

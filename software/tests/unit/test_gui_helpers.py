@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from pathlib import Path
+import shutil
 
 import gui
 
@@ -485,7 +485,8 @@ class TestPauseControls:
     may still be moving.
     """
 
-    def widget(self, paused=False, at_rest=False, total_time=100, elapsed=0,
+    @staticmethod
+    def widget(paused=False, at_rest=False, total_time=100, elapsed=0,
                worker=True):
         session = FakeSession(kind="run" if worker else None, paused=paused, at_rest=at_rest)
         stub = SimpleNamespace(
@@ -813,17 +814,9 @@ class TestRunDisplayClocks:
         and -- since the tick is what watches for a flow-fault self-cancel --
         the buttons kept honest."""
         stopped, shown = [], []
-        stub = SimpleNamespace(
-            session=FakeSession(kind="run"),
-            runButton=Button(), pauseButton=Button(), abortButton=Button(),
-            timeLabel=SimpleNamespace(setText=shown.append),
-            progressBar=SimpleNamespace(setValue=lambda v: None),
-            timer=SimpleNamespace(stop=lambda: stopped.append(True)),
-            total_time=100, elapsed_time=200,
-        )
-        for name in ("_runState", "_showTimeRemaining", "_renderRunControls"):
-            stub.__dict__[name] = _bind(name, stub)
-        stub.__dict__["_pauseSuffix"] = gui.SequencesWidget._pauseSuffix
+        stub = TestPauseControls.widget(total_time=100, elapsed=200)
+        stub.timer = SimpleNamespace(stop=lambda: stopped.append(True))
+        stub.timeLabel = SimpleNamespace(setText=shown.append)
         gui.SequencesWidget.updateTimeRemaining(stub)
         assert stopped == [], "the tick stopped on the estimate, not the run"
         assert shown == ["00:00:00 remaining"]
@@ -831,7 +824,7 @@ class TestRunDisplayClocks:
 
 
 class TestPickConfig:
-    """3.3: --config, then the rig's own ./config.yaml, then the last file
+    """3.3: --config, then the rig's own local config, then the last file
     picked; a dialog instead of a traceback when none exists or one fails."""
 
     class Settings(dict):
@@ -842,62 +835,54 @@ class TestPickConfig:
             self[key] = value
 
     @pytest.fixture
-    def picking(self, monkeypatch, tmp_path):
-        settings = self.Settings()
-        asked, errors = [], []
-        monkeypatch.setattr(gui, "QSettings", lambda org, app: settings)
+    def picking(self, monkeypatch, tmp_path, fixtures_dir):
+        ns = SimpleNamespace(settings=self.Settings(), asked=[], errors=[], tmp=tmp_path)
+        monkeypatch.setattr(gui, "QSettings", lambda: ns.settings)
         monkeypatch.setattr(gui.QFileDialog, "getOpenFileName",
-                            lambda *a, **k: (asked.pop(0) if asked else "", ""))
+                            lambda *a, **k: (ns.asked.pop(0) if ns.asked else "", ""))
         monkeypatch.setattr(gui.QMessageBox, "critical",
-                            lambda parent, title, text: errors.append(text))
+                            lambda parent, title, text: ns.errors.append(text))
         monkeypatch.chdir(tmp_path)
-        return settings, asked, errors, tmp_path
+        ns.write = lambda name: str(shutil.copy(fixtures_dir / "flow_cell_config.yaml",
+                                                tmp_path / name))
+        return ns
 
-    def _write(self, path):
-        import shutil
-        shutil.copy(Path(gui.__file__).parent / "sample_config" / "flow_cell_config.yaml", path)
-        return str(path)
-
-    def test_the_rigs_own_config_wins_and_is_remembered(self, picking):
-        settings, asked, errors, tmp = picking
-        self._write(tmp / "config.yaml")
-        settings["config_path"] = self._write(tmp / "elsewhere.yaml")
+    def test_the_rigs_own_config_wins_and_is_remembered_absolutely(self, picking):
+        picking.write("config.yaml")
+        picking.settings["config_path"] = picking.write("elsewhere.yaml")
         assert gui.pick_config() is not None
-        assert settings["config_path"].endswith("config.yaml"), \
-            "the remembered file outranked the rig's own"
+        remembered = picking.settings["config_path"]
+        assert remembered.endswith("config.yaml"), "the remembered file outranked the rig's own"
+        assert os.path.isabs(remembered), \
+            "a relative memory means whatever directory comes next -- inert when needed"
 
     def test_the_cli_path_outranks_everything(self, picking):
-        settings, asked, errors, tmp = picking
-        self._write(tmp / "config.yaml")
-        given = self._write(tmp / "given.yaml")
+        picking.write("config.yaml")
+        given = picking.write("given.yaml")
         assert gui.pick_config(given) is not None
-        assert settings["config_path"] == given
+        assert picking.settings["config_path"] == os.path.abspath(given)
 
     def test_the_last_picked_file_serves_when_the_rig_has_none(self, picking):
-        settings, asked, errors, tmp = picking
-        settings["config_path"] = self._write(tmp / "elsewhere.yaml")
+        picking.settings["config_path"] = picking.write("elsewhere.yaml")
         assert gui.pick_config() is not None
-        assert errors == [] and settings["config_path"].endswith("elsewhere.yaml")
+        assert picking.errors == []
+        assert picking.settings["config_path"].endswith("elsewhere.yaml")
 
     def test_nothing_found_asks_and_cancel_means_none(self, picking):
-        settings, asked, errors, tmp = picking
         assert gui.pick_config() is None
-        assert errors == []
+        assert picking.errors == []
 
     def test_a_file_that_fails_to_load_gets_a_dialog_then_asks_again(self, picking):
-        settings, asked, errors, tmp = picking
-        bad = tmp / "config.yaml"
-        bad.write_text("application: 'No Such Application'\n")
-        asked.append(self._write(tmp / "good.yaml"))
+        (picking.tmp / "config.yaml").write_text("application: 'No Such Application'\n")
+        picking.asked.append(picking.write("good.yaml"))
         assert gui.pick_config() is not None
-        assert len(errors) == 1 and "config.yaml" in errors[0]
-        assert settings["config_path"].endswith("good.yaml")
+        assert len(picking.errors) == 1 and "config.yaml" in picking.errors[0]
+        assert picking.settings["config_path"].endswith("good.yaml")
 
 
 class TestBringupDialogs:
     def test_a_stuck_valve_gets_the_same_dialog_as_an_unplugged_pump(self, qapp, monkeypatch):
-        """DeviceError joins the bring-up tuple: fail fast, report well."""
-        from fluidics.control.config import load_config
+        """One DeviceError family, one bring-up dialog: fail fast, report well."""
         from fluidics.errors import DeviceError
         dialogs = []
         monkeypatch.setattr(gui.QMessageBox, "critical",
@@ -906,8 +891,7 @@ class TestBringupDialogs:
         def stuck(config, simulation, on_issue=None):
             raise DeviceError("Selector valve 0: at position 1, expected 2 -- check the valve is free to rotate")
 
-        monkeypatch.setattr(gui.FluidicsSystem, "build", staticmethod(stuck))
-        config = load_config(str(Path(gui.__file__).parent / "sample_config" / "flow_cell_config.yaml"))
+        monkeypatch.setattr(gui.FluidicsSystem, "build", stuck)
         with pytest.raises(SystemExit):
-            gui.FluidicsControlGUI(config, is_simulation=True)
+            gui.FluidicsControlGUI(None, is_simulation=True)
         assert dialogs and "free to rotate" in dialogs[0][1]

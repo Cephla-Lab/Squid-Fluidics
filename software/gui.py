@@ -17,8 +17,7 @@ from PyQt5.QtGui import QColor, QBrush
 
 from serial import SerialException
 
-from fluidics.control.config import load_config
-from fluidics.control.discovery import DeviceNotFoundError
+from fluidics.control.config import DEFAULT_CONFIG_PATHS, default_config_path, load_config
 from fluidics.errors import DeviceError
 from fluidics.devices import (
     ISSUE_FLOW_SENSORS,
@@ -44,16 +43,16 @@ _logger = logging.getLogger("fluidics.gui")
 
 def pick_config(cli_path=None):
     """The rig config to run with, loaded: the --config path if given, else
-    the rig's own ./config.yaml (or .json), else the last file an operator
-    picked; when none of those exists, or one fails to load, a dialog asks
-    instead of a traceback. Returns the loaded config, or None if the
-    operator cancelled. The conventional local file outranks the remembered
-    one on purpose: a rig's ./config.yaml is the rig's.
+    the rig's own local config (default_config_path), else the last file an
+    operator picked; when none of those exists, or one fails to load, a
+    dialog asks instead of a traceback. Returns the loaded config, or None
+    if the operator cancelled. The conventional local file outranks the
+    remembered one on purpose: a rig's ./config.yaml is the rig's.
     """
-    settings = QSettings("Cephla", "FluidicsControl")
-    path = cli_path or next(
-        (p for p in ["./config.yaml", "./config.json", settings.value("config_path")]
-         if p and os.path.exists(p)), None)
+    settings = QSettings()
+    remembered = settings.value("config_path")
+    path = cli_path or default_config_path() or (
+        remembered if remembered and os.path.exists(remembered) else None)
     while True:
         if path is None:
             path, _ = QFileDialog.getOpenFileName(
@@ -65,9 +64,11 @@ def pick_config(cli_path=None):
         except Exception as e:
             QMessageBox.critical(None, "Config Error", f"Could not load {path}:\n\n{e}")
             path = None
-            continue
-        settings.setValue("config_path", path)
-        return config
+        else:
+            # Absolute, or the memory means "whatever directory I am run
+            # from next time" -- inert exactly when it is needed.
+            settings.setValue("config_path", os.path.abspath(path))
+            return config
 
 
 class WorkerEvent(QEvent):
@@ -527,11 +528,9 @@ class SequencesWidget(PostsToQtThread, QWidget):
         if not at_rest:
             self.elapsed_time += 1  # Add one second
         self._showTimeRemaining(self._pauseSuffix(paused, at_rest))
-        # A run can also end while the tick is what is watching: a flow fault
-        # cancels from the reader thread. So the tick runs until the run
-        # ends (_handle_finished stops it), not until the estimate does --
-        # an estimate is an estimate, and a run outliving it still needs
-        # its label and its buttons kept honest.
+        # Runs until _handle_finished stops it, not until the estimate hits
+        # zero: a run can outlive its estimate, and a flow fault cancels
+        # from the reader thread with only this tick watching.
         self._renderRunControls()
 
     def _showTimeRemaining(self, suffix=None):
@@ -1425,10 +1424,11 @@ class FluidicsControlGUI(PostsToQtThread, QMainWindow):
         try:
             self.system = FluidicsSystem.build(self.config, self.simulation,
                                                on_issue=self._report_bringup_issue)
-        except (DeviceNotFoundError, DeviceError, SerialException) as e:
+        except (DeviceError, SerialException) as e:
             # Nothing works without the controller or the pump, so there is
-            # no window worth showing -- just the message. DeviceNotFoundError
-            # is "not plugged in / wrong serial"; SerialException is the
+            # no window worth showing -- just the message. DeviceError covers
+            # "not plugged in / wrong serial" and "present but stuck";
+            # SerialException is the
             # sibling "plugged in but the port won't open" (permissions, a
             # stale process holding it) -- same operator problem, same dialog.
             QMessageBox.critical(self, "Device Unavailable", str(e))
@@ -1554,11 +1554,14 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--simulation", help="Run the GUI with simulated hardware.", action='store_true')
     parser.add_argument("--config", help="Rig config, YAML or legacy JSON (default: "
-                        "./config.yaml then ./config.json, then the last file "
-                        "picked; asks otherwise).")
+                        f"{' then '.join(DEFAULT_CONFIG_PATHS)}, then the last "
+                        "file picked; asks otherwise).")
     args = parser.parse_args()
 
     app = QApplication(sys.argv)
+    # The identity every QSettings() in the process stores under.
+    QCoreApplication.setOrganizationName("Cephla")
+    QCoreApplication.setApplicationName("FluidicsControl")
     config = pick_config(args.config)
     if config is None:
         sys.exit(1)

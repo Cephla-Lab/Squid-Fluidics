@@ -34,6 +34,7 @@ class SelectorValve():
         self.fc.wait_for_completion(run_control=run_control)
         current_position = self.get_current_position()
         if current_position != port:
+            self.position = current_position    # the truth the readback gave
             raise DeviceError(f"Selector valve {self.id}: at position "
                               f"{current_position}, expected {port} -- check "
                               "the valve is free to rotate")

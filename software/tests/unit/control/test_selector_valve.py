@@ -47,13 +47,15 @@ class TestSelectorValveSystemInit:
 
 class TestAStuckValve:
     def test_it_is_reported_by_name_with_what_to_check(self, flow_cell_system, monkeypatch):
-        """Fail-fast is the policy (decided 2026-08-28); the report has to
-        carry the valve and the remedy, and be a type the GUI's bring-up
-        dialog catches -- not a bare RuntimeError traceback."""
+        """Fail-fast is the policy; the report has to carry the valve and
+        the remedy, and be a type the bring-up dialog catches -- not a bare
+        RuntimeError traceback. And the object keeps the position the
+        readback actually gave, not the one it hoped for."""
         valve = flow_cell_system.valves[0]
         monkeypatch.setattr(valve, "get_current_position", lambda: 1)
         with pytest.raises(DeviceError, match="Selector valve 0.*expected 2.*free to rotate"):
             valve.open(2)
+        assert valve.position == 1
 
 
 class TestPortToReagent:

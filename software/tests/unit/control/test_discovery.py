@@ -74,3 +74,11 @@ class TestDriversRouteThroughIt:
                 controller.begin()
         finally:
             controller.close()
+
+
+def test_a_missing_device_is_a_device_error():
+    """One family, one bring-up dialog: the entry points catch DeviceError
+    and get the missing-device case with it."""
+    from fluidics.control.discovery import DeviceNotFoundError
+    from fluidics.errors import DeviceError
+    assert issubclass(DeviceNotFoundError, DeviceError)

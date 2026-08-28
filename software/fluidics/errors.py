@@ -4,7 +4,9 @@ A leaf module -- stdlib only -- so the drivers under fluidics/control can
 import it without the control layer depending on the experiment layer.
 
     FluidicsError
-    ├── OperationError      a step failed; something is wrong with the step
+    ├── DeviceError
+│   └── DeviceNotFoundError
+├── OperationError      a step failed; something is wrong with the step
     └── Cancelled           the run stopped early, on purpose
         ├── AbortRequested  the operator pressed Abort. Expected, not an error.
         └── SafetyFault     the instrument stopped itself. A failure.
@@ -31,10 +33,17 @@ class FluidicsError(Exception):
 
 
 class DeviceError(FluidicsError):
-    """A device is present but misbehaving, named for the operator: a valve
-    that did not reach its port, a controller answering nonsense. The
-    entry points render it as a dialog or a logged failure, like
-    DeviceNotFoundError."""
+    """A device is misbehaving or missing, named for the operator: a valve
+    that did not reach its port, a pump that is not on the bus. The entry
+    points render it as a dialog or a logged failure."""
+
+
+class DeviceNotFoundError(DeviceError):
+    """A configured device is not on the bus.
+
+    The message carries what the operator needs: which device, which serial
+    number the config names, and what is actually plugged in.
+    """
 
 
 class OperationError(FluidicsError):
