@@ -90,14 +90,13 @@ class TestFailurePath:
         errors = [e[1] for e in events if e[0] == "error"]
         assert "repeat 2" in errors[0]
 
-    def test_an_abort_from_the_operations_reports_and_finishes(self):
+    def test_an_abort_from_the_operations_reports_a_stop_and_finishes(self):
+        """A stop is what the operator asked for: reported as one, never as
+        an error -- and finished still fires."""
         ops = RecordingOps(raise_on={0: AbortRequested()})
         _, events = run_worker([dict(FLOW), dict(FLOW)], ops=ops)
-        errors = [e[1] for e in events if e[0] == "error"]
-        # Substring, not the exact wording: the contract is one error
-        # callback that says aborted, and finished still firing.
-        assert len(errors) == 1
-        assert "aborted" in errors[0]
+        assert errors_in(events) == []
+        assert events.count(("stopped",)) == 1
         assert events[-1] == ("finished",)
 
 
@@ -154,9 +153,8 @@ class TestTheSharedSignal:
         _, events = run_worker([dict(FLOW, incubation_time=30)], run_control=control)
         assert ("progress", 1, "Incubating") in events
         assert ("progress", 1, "Completed") not in events
-        (error,) = errors_in(events)
-        assert "aborted" in error
-        assert events.index(("make_safe",)) < events.index(("error", error))
+        assert errors_in(events) == []
+        assert events.index(("make_safe",)) < events.index(("stopped",))
         assert events[-1] == ("finished",)
 
 
@@ -174,11 +172,12 @@ class TestTheSharedSignal:
 
         worker = ExperimentWorker(RecordingOps(), [dict(FLOW), dict(FLOW)], CONFIG, callbacks={
             "update_progress": on_progress,
+            "on_stopped": lambda: events.append(("stopped",)),
             "on_error": lambda message: events.append(("error", message)),
         }, run_control=control)
         worker.run()
         assert ("progress", 2, "Started") not in events
-        assert any("aborted" in message for message in errors_in(events))
+        assert ("stopped",) in events and errors_in(events) == []
 
     def test_a_safety_fault_is_reported_with_its_diagnosis_not_as_an_abort(self):
         """The instrument stopped itself. The operator must read what the
@@ -205,7 +204,7 @@ class TestTheSharedSignal:
                                run_control=control)
         assert ("progress", 1, "Completed") not in events
         assert ("progress", 2, "Started") not in events
-        assert any("aborted" in message for message in errors_in(events))
+        assert ("stopped",) in events and errors_in(events) == []
 
     def test_a_completed_run_leaves_the_rig_alone(self):
         """The temperature must keep holding: a run whose last step is
@@ -316,4 +315,4 @@ class TestPause:
         ops = PauseThenAbort()
         _, events = run_worker([dict(FLOW), dict(FLOW)], ops=ops, run_control=control)
         assert len(ops.processed) == 1
-        assert any("aborted" in message for message in errors_in(events))
+        assert ("stopped",) in events and errors_in(events) == []

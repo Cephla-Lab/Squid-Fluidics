@@ -31,6 +31,14 @@ class ManualOperations:
         fastest first."""
         return self.sp.available_flow_rates()
 
+    def port_names(self):
+        """The selector-valve ports as the operator names them."""
+        return self.sv.get_port_names()
+
+    def current_port(self):
+        """The reagent port the valves are on now."""
+        return self.sv.get_current_port()
+
     def held_volume_ul(self, refresh=True):
         """What the syringe holds: read fresh from the plunger, or -- with
         refresh=False -- as of the pump's last reading, which it takes after

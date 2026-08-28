@@ -69,35 +69,42 @@ class RunSession:
 
     # --- starting a job ---
 
-    def start(self, sequences, operations, callbacks=None):
-        """Run `sequences` through `operations` on a new thread.
+    # Every job reports the same way: on_stopped() if the operator stopped
+    # it, on_error(message) if it failed, and on_finished() last, always. A
+    # run's callbacks also carry the worker's update_progress and
+    # on_estimate. The reports run after the rig is free, so a GUI
+    # rendering on them sees an idle rig.
 
-        `callbacks` are ExperimentWorker's (update_progress, on_error,
-        on_finished, on_estimate). The run's signal is reset and the rig
-        marked free *before* the caller's on_finished runs, so a GUI
-        rendering on it sees an idle rig. Refused with RuntimeError while a
-        job runs.
-        """
+    def start(self, sequences, operations, callbacks=None):
+        """Run `sequences` through `operations` on a new thread. Refused with
+        RuntimeError while a job runs."""
         if self.busy:       # before the worker is built, whose estimate callback would fire
             raise RuntimeError(f"the rig is busy: a {self._kind} is in progress")
         callbacks = dict(callbacks or {})
         on_finished = callbacks.pop("on_finished", None)
+        on_stopped = callbacks.pop("on_stopped", None)
+        on_error = callbacks.pop("on_error", None)
+        # The worker reports an early end from inside run(), while the rig is
+        # still its; the report is held and delivered once the rig is free,
+        # as a manual move's is.
+        ended = []
+        callbacks["on_stopped"] = lambda: ended.append(on_stopped)
+        callbacks["on_error"] = lambda message: ended.append(
+            on_error and partial(on_error, message))
         worker = build_worker(self.devices, operations, sequences, callbacks)
 
         def body():
             worker.run()
-            return on_finished
+            return ended[0] if ended else None
 
-        self._launch("run", body)
+        self._launch("run", body, on_finished)
 
-    def run_manual(self, verb, on_done=None, on_error=None, on_stopped=None):
-        """Run one manual verb -- a callable -- on a new thread.
+    def run_manual(self, verb, callbacks=None):
+        """Run one manual verb -- a callable -- on a new thread. Refused with
+        RuntimeError while a job runs."""
+        callbacks = callbacks or {}
+        on_stopped, on_error = callbacks.get("on_stopped"), callbacks.get("on_error")
 
-        on_done() when it finished, on_error(message) when it raised,
-        on_stopped() when the run's signal cancelled it (the operator pressed
-        Stop). Each is called after the rig is free. Refused with
-        RuntimeError while a job runs.
-        """
         def body():
             try:
                 verb()
@@ -106,14 +113,15 @@ class RunSession:
                 return on_stopped
             except Exception as e:
                 _logger.error("Manual move failed: %s", e, exc_info=True)
-                return partial(on_error, str(e)) if on_error is not None else None
-            return on_done
+                return on_error and partial(on_error, str(e))
+            return None
 
-        self._launch("manual", body)
+        self._launch("manual", body, callbacks.get("on_finished"))
 
-    def _launch(self, kind, body):
-        """Start `body` on the job's thread. It returns what to report -- a
-        callable, or None -- and the report runs once the rig is free."""
+    def _launch(self, kind, body, on_finished):
+        """Start `body` on the job's thread. It returns how the job ended
+        early -- a callable to report it, or None -- and once the rig is free
+        that report runs, then on_finished."""
         with self._lock:
             if self._kind is not None:
                 raise RuntimeError(f"the rig is busy: a {self._kind} is in progress")
@@ -128,6 +136,8 @@ class RunSession:
                 self._finish()          # whatever happened, the rig is free
             if report is not None:
                 report()
+            if on_finished is not None:
+                on_finished()
 
         thread = threading.Thread(target=job, daemon=True)
         try:

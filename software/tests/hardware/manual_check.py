@@ -21,9 +21,8 @@ import sys
 from fluidics.control.config import load_config
 from fluidics.control.controller import FluidControllerSimulation
 from fluidics.control.syringe_pump import SyringePumpSimulation
-from fluidics.devices import build_devices
-from fluidics.manual_operations import ManualOperations
 from fluidics.run_log import configure_console
+from fluidics.system import FluidicsSystem
 
 log = logging.getLogger("fluidics.manual_check")
 
@@ -52,9 +51,9 @@ def main():
         SyringePumpSimulation.ESTIMATE_SECONDS = 0
 
     config = load_config(args.config)
-    devices = build_devices(config, args.simulation)
+    system = FluidicsSystem.build(config, args.simulation)
     try:
-        manual = ManualOperations(devices)
+        manual = system.manual
         log.info("Rig up. The syringe holds %.0f uL.", manual.held_volume_ul())
 
         manual.open_port(args.reagent_port)
@@ -65,7 +64,7 @@ def main():
         manual.empty_to_waste(on_started=lambda s: log.info("Emptying; about %.0f s.", s))
         log.info("Emptied. The syringe holds %.0f uL.", manual.held_volume_ul())
 
-        if devices.disc_pump is not None:
+        if system.devices.disc_pump is not None:
             manual.aspirate(args.aspirate)
             log.info("Drain ran for %.1f s.", args.aspirate)
         log.info("Every verb ran.")
@@ -74,12 +73,12 @@ def main():
         # nothing cancelled: halt the pump before the close below sends it
         # anything more.
         log.warning("Interrupted; halting the pump before closing.")
-        devices.make_safe()
+        system.make_safe()
         sys.exit(130)
     finally:
         # close() logs each failure itself; only the exit code is ours, and
         # it is run_sequences.py's for the same condition.
-        if devices.close():
+        if system.close():
             sys.exit(2)
 
 

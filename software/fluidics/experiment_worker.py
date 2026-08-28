@@ -20,8 +20,10 @@ class ExperimentWorker:
             config: Configuration object
             callbacks: Dictionary of callback functions with keys:
                 - 'update_progress': fn(index, sequence_num, status)
-                - 'on_error': fn(error_message)
-                - 'on_finished': fn()
+                - 'on_stopped': fn() -- the operator aborted the run
+                - 'on_error': fn(error_message) -- the run failed, or the
+                  instrument stopped it (a flow fault), with its diagnosis
+                - 'on_finished': fn() -- always, last
                 - 'on_estimate': fn(time_to_finish, n_sequences)
                 - 'make_safe': fn() -> [exceptions it could not act on] --
                   called on the worker thread once a run has ended early,
@@ -93,21 +95,25 @@ class ExperimentWorker:
         # at the boundary, rather than inside the sequence about to start.
         self.run_control.checkpoint()
 
-    def _end_early(self, message):
-        """Quiet the rig, then report why it stopped.
+    def _end_early(self, message=None):
+        """Quiet the rig, then report why it stopped: on_stopped for an abort
+        (no message), on_error(message) for a failure or a fault.
 
         Act, then report: the console and run log already carry the message
         (the handlers log first); what trails make_safe's round trips is the
         GUI's dialog and the manual tab's return, which is the point. What
-        make_safe could not switch off is appended to the report -- after an
-        abort, "the rig could not be made safe" is the line that matters.
+        make_safe could not switch off is reported as an error even after an
+        abort -- "the rig could not be made safe" is the line that matters.
         """
         self.run_control.release()      # a pending pause must not hold the unwinding
         failures = self._call_callback('make_safe') or []
         if failures:
-            message += (" Making the rig safe failed: "
-                        + "; ".join(str(e) for e in failures))
-        self._call_callback('on_error', message)
+            unsafe = "Making the rig safe failed: " + "; ".join(str(e) for e in failures)
+            message = f"{message} {unsafe}" if message else unsafe
+        if message is None:
+            self._call_callback('on_stopped')
+        else:
+            self._call_callback('on_error', message)
 
     def run(self):
         current_sequence = 0
@@ -144,7 +150,7 @@ class ExperimentWorker:
 
         except AbortRequested:
             _logger.warning("Run aborted by user.")
-            self._end_early("Operation aborted by user")
+            self._end_early(None)      # an abort is a stop, not an error
         except Cancelled as fault:
             # The instrument stopped itself -- a flow fault, say. Reported
             # with its diagnosis, never as an abort.

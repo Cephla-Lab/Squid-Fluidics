@@ -442,13 +442,35 @@ class TestAbortSequences:
 class TestRunFinished:
     """Called unbound against a stub."""
 
-    def test_a_finished_run_redraws_the_controls_before_it_reports(self, monkeypatch):
+    def _finishing(self, monkeypatch):
         order = []
-        monkeypatch.setattr(gui.QMessageBox, "information", lambda *args: order.append("dialog"))
+        monkeypatch.setattr(gui.QMessageBox, "information",
+                            lambda *args: order.append(("info", args[1])))
+        monkeypatch.setattr(gui.QMessageBox, "critical",
+                            lambda *args: order.append(("error", args[1])))
         stub = Quiet()
+        stub._ended_early = False
         stub._renderRunControls = lambda: order.append("render")
+        return stub, order
+
+    def test_a_completed_run_redraws_the_controls_then_says_finished(self, monkeypatch):
+        stub, order = self._finishing(monkeypatch)
         gui.SequencesWidget._handle_finished(stub)
-        assert order == ["render", "dialog"]
+        assert order == ["render", ("info", "Finished")]
+
+    def test_a_stopped_run_says_stopped_once_not_finished(self, monkeypatch):
+        """The operator pressed Abort: one dialog saying so, not an Error
+        followed by a Finished."""
+        stub, order = self._finishing(monkeypatch)
+        gui.SequencesWidget._handle_stopped(stub)
+        gui.SequencesWidget._handle_finished(stub)
+        assert order == [("info", "Stopped"), "render"]
+
+    def test_a_failed_run_says_why_once(self, monkeypatch):
+        stub, order = self._finishing(monkeypatch)
+        gui.SequencesWidget._handle_error(stub, "pump fault")
+        gui.SequencesWidget._handle_finished(stub)
+        assert order == [("error", "Error"), "render"]
 
 
 class TestPauseControls:
@@ -642,13 +664,13 @@ class TestManualControl:
         """A stub _run can drive: the session records what it is handed."""
         handed, posted, enabled = [], [], []
 
-        def run_manual(verb, **callbacks):
+        def run_manual(verb, callbacks):
             if refuse:
                 raise RuntimeError("the rig is busy: a run is in progress")
             handed.append((verb, callbacks))
 
         stub = SimpleNamespace(
-            session=SimpleNamespace(run_manual=run_manual),
+            system=SimpleNamespace(run_manual=run_manual),
             setControlsEnabled=enabled.append,
             _post_event=lambda name, *args: posted.append((name, args)),
         )
@@ -661,11 +683,11 @@ class TestManualControl:
         assert enabled == [False]
         (given, callbacks), = handed
         assert given is verb
-        callbacks["on_done"]()
         callbacks["on_stopped"]()
         callbacks["on_error"]("no reply from pump")
-        assert posted == [("operationComplete", ()), ("operationStopped", ()),
-                          ("handleError", ("no reply from pump",))]
+        callbacks["on_finished"]()
+        assert posted == [("operationStopped", ()), ("handleError", ("no reply from pump",)),
+                          ("operationFinished", ())]
 
     def test_a_refused_press_leaves_the_controls_alone(self):
         stub, handed, posted, enabled = self._runnable(refuse=True)
@@ -684,32 +706,38 @@ class TestManualControl:
         stub.enabled, stub.bar = [], []
         stub.setControlsEnabled = stub.enabled.append
         stub.syringeProgressBar = SimpleNamespace(setValue=stub.bar.append)
-        stub.progress_timer = SimpleNamespace(isActive=lambda: timed, stop=lambda: None)
-        stub._settle = _bind("_settle", stub, gui.ManualControlWidget)
+        timer = SimpleNamespace(active=timed)
+        timer.isActive = lambda: timer.active
+        timer.stop = lambda: setattr(timer, "active", False)
+        stub.progress_timer = timer
+        stub._settleBar = _bind("_settleBar", stub, gui.ManualControlWidget)
         return stub
 
-    def test_completion_frees_the_tab_and_finishes_the_bar_only_for_a_timed_move(self):
+    def test_finished_frees_the_tab_and_completes_a_bar_still_counting(self):
         stub = self._finishing(timed=False)
-        gui.ManualControlWidget.operationComplete(stub)      # a valve move: no bar
+        gui.ManualControlWidget.operationFinished(stub)      # a valve move: no bar
         assert stub.bar == [] and stub.enabled == [True]
         stub = self._finishing(timed=True)
-        gui.ManualControlWidget.operationComplete(stub)      # a timed move
-        assert stub.bar == [100]
+        gui.ManualControlWidget.operationFinished(stub)      # a timed move that ran out
+        assert stub.bar == [100] and stub.enabled == [True]
 
-    def test_a_stopped_move_frees_the_tab_with_no_dialog(self, monkeypatch):
+    def test_a_stopped_move_zeroes_the_bar_with_no_dialog_and_finished_frees_the_tab(
+            self, monkeypatch):
         monkeypatch.setattr(gui.QMessageBox, "critical",
                             lambda *args: pytest.fail("a stop is not an error"))
         stub = self._finishing(timed=True)
         gui.ManualControlWidget.operationStopped(stub)
+        gui.ManualControlWidget.operationFinished(stub)
         assert stub.bar == [0] and stub.enabled == [True]
 
-    def test_an_error_frees_the_tab_before_the_dialog(self, monkeypatch):
-        order = []
-        monkeypatch.setattr(gui.QMessageBox, "critical", lambda *args: order.append("dialog"))
-        stub = self._finishing(timed=False)
-        stub.setControlsEnabled = lambda on: order.append(("controls", on))
+    def test_an_error_zeroes_the_bar_and_says_why(self, monkeypatch):
+        dialogs = []
+        monkeypatch.setattr(gui.QMessageBox, "critical", lambda *args: dialogs.append(args[2]))
+        stub = self._finishing(timed=True)
         gui.ManualControlWidget.handleError(stub, "boom")
-        assert order == [("controls", True), "dialog"]
+        gui.ManualControlWidget.operationFinished(stub)
+        assert stub.bar == [0] and stub.enabled == [True]
+        assert dialogs == ["Manual operation failed: boom"]
 
     def test_the_stop_button_is_live_exactly_while_the_others_are_not(self):
         states = []
@@ -723,7 +751,8 @@ class TestManualControl:
 
 class TestMainWindowJobs:
     """The main window keeps the tab that did not start the job dead while it
-    runs, and will not close the devices under a live job."""
+    runs, and asks before closing under a live job (the system then stops it
+    before the devices close)."""
 
     def test_the_other_tab_goes_dead_for_the_length_of_the_job(self):
         enabled = {}
@@ -736,9 +765,8 @@ class TestMainWindowJobs:
         gui.FluidicsControlGUI._renderTabs(stub, None)
         assert enabled == {0: True, 1: True}
 
-    def _closing(self, busy, waited=True):
+    def _closing(self, busy):
         session = FakeSession(kind="run" if busy else None)
-        session.wait = lambda timeout: session.calls.append(("wait", timeout)) or waited
         return SimpleNamespace(session=session), session.calls
 
     def test_an_idle_rig_closes_without_a_question(self, monkeypatch):
@@ -754,15 +782,8 @@ class TestMainWindowJobs:
         assert gui.FluidicsControlGUI._quiesce(stub) is False
         assert order == []
 
-    def test_accepting_aborts_and_waits_before_the_close(self, monkeypatch):
+    def test_accepting_lets_the_window_close(self, monkeypatch):
         monkeypatch.setattr(gui.QMessageBox, "question", lambda *args: gui.QMessageBox.Yes)
         stub, order = self._closing(busy=True)
         assert gui.FluidicsControlGUI._quiesce(stub) is True
-        assert order == ["abort", ("wait", 10)]
-
-    def test_a_job_that_will_not_stop_is_closed_under_with_a_word(self, monkeypatch, caplog):
-        monkeypatch.setattr(gui.QMessageBox, "question", lambda *args: gui.QMessageBox.Yes)
-        stub, order = self._closing(busy=True, waited=False)
-        with caplog.at_level("ERROR"):
-            assert gui.FluidicsControlGUI._quiesce(stub) is True
-        assert "did not stop" in caplog.text
+        assert order == [], "the stopping is the system's, in close()"

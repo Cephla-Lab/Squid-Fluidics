@@ -27,6 +27,12 @@ def instant_devices(built):
         devices = built(config, simulation=True)
         devices.controller.COMMAND_SECONDS = 0
         devices.syringe_pump.ESTIMATE_SECONDS = 0
+        # Closing a simulated flow sensor joins its publish thread mid-sleep
+        # -- 50 ms on the real clock, per test. Done now, under the fake
+        # clock, where it is instant; close() is idempotent, and none of
+        # these tests read flow.
+        for sensor in devices.flow_sensors:
+            sensor.close()
         return devices
 
     return _build

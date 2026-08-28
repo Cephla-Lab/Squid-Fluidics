@@ -21,13 +21,7 @@ INCUBATING = {**FLOW_CELL_STEP, "incubation_time": 60}     # minutes: a run to c
 
 @pytest.fixture
 def devices(flow_cell_config, instant_devices):
-    devices = instant_devices(flow_cell_config)
-    # Nothing here reads flow, and closing a simulated sensor joins its
-    # publish thread mid-sleep -- 50 ms on the real clock, per test. Done
-    # now, under the fake clock, where it is instant.
-    for sensor in devices.flow_sensors:
-        sensor.close()
-    return devices
+    return instant_devices(flow_cell_config)
 
 
 @pytest.fixture
@@ -79,13 +73,34 @@ class TestARun:
         assert session.wait(5)
         assert at_finish == [(False, False, ["run", None])]
 
+    def test_a_runs_early_end_is_reported_after_the_rig_is_free(self, session, ops, real_clock):
+        """As a manual move's is: the worker says stop or error from inside
+        run(), but whoever listens must see an idle rig, the same as they do
+        on on_finished."""
+        seen = []
+        session.start([INCUBATING], ops, callbacks={
+            "on_stopped": lambda: seen.append(("stopped", session.busy, session.cancelled))})
+        assert not session.wait(0.02)
+        session.abort()
+        assert session.wait(5)
+        assert seen == [("stopped", False, False)]
+
+        bad_port = {**FLOW_CELL_STEP, "fluidic_port": 99}
+        session.start([bad_port], ops, callbacks={
+            "on_error": lambda m: seen.append(("error", session.busy, "99" in m))})
+        assert session.wait(5)
+        assert seen[-1] == ("error", False, True)
+
     def test_abort_stops_a_run_mid_incubation_and_wait_returns(self, session, ops, real_clock):
-        errors = []
-        session.start([INCUBATING], ops, callbacks={"on_error": errors.append})
+        reports = []
+        session.start([INCUBATING], ops, callbacks={
+            "on_stopped": lambda: reports.append("stopped"),
+            "on_error": lambda m: reports.append(("error", m)),
+            "on_finished": lambda: reports.append("finished")})
         assert not session.wait(0.02), "an hour's incubation ended in 20 ms"
         assert session.abort() is True
         assert session.wait(5)
-        assert errors == ["Operation aborted by user"]
+        assert reports == ["stopped", "finished"]
         assert not session.busy
 
     def test_a_second_job_while_a_run_is_going_is_refused(self, session, ops, seen, real_clock):
@@ -126,7 +141,7 @@ class TestAManualMove:
             manual.extract(2, 300, 500)
 
         done = threading.Event()
-        session.run_manual(move, on_done=done.set)
+        session.run_manual(move, callbacks={"on_finished": done.set})
         assert done.wait(5) and session.wait(5)
         assert during == [(during[0][0], "manual")]
         assert during[0][0] is not threading.main_thread()
@@ -139,9 +154,11 @@ class TestAManualMove:
         def broken():
             raise IOError("no reply from pump")
 
-        session.run_manual(broken, on_error=lambda m: reported.append((m, session.busy)))
+        session.run_manual(broken, callbacks={
+            "on_error": lambda m: reported.append((m, session.busy)),
+            "on_finished": lambda: reported.append("finished")})
         assert session.wait(5)
-        assert reported == [("no reply from pump", False)]
+        assert reported == [("no reply from pump", False), "finished"]
 
     @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
     def test_a_move_that_dies_of_anything_still_frees_the_rig(self, session, real_clock):
@@ -160,19 +177,19 @@ class TestAManualMove:
         not raise on the cancel that stopped this one."""
         devices.syringe_pump.ESTIMATE_SECONDS = 60
         reports = []
-        session.run_manual(lambda: manual.extract(2, 300, 500),
-                           on_done=lambda: reports.append("done"),
-                           on_error=lambda m: reports.append(("error", m)),
-                           on_stopped=lambda: reports.append("stopped"))
+        callbacks = {"on_finished": lambda: reports.append("finished"),
+                     "on_error": lambda m: reports.append(("error", m)),
+                     "on_stopped": lambda: reports.append("stopped")}
+        session.run_manual(lambda: manual.extract(2, 300, 500), callbacks)
         assert wait_until(lambda: devices.syringe_pump.moving)
         session.abort()
         assert session.wait(5)
-        assert reports == ["stopped"]
+        assert reports == ["stopped", "finished"]
         assert not session.cancelled, "the stop was not reset for the next job"
         devices.syringe_pump.ESTIMATE_SECONDS = 0
-        session.run_manual(manual.empty_to_waste, on_done=lambda: reports.append("done"))
+        session.run_manual(manual.empty_to_waste, callbacks)
         assert session.wait(5)
-        assert reports == ["stopped", "done"]
+        assert reports == ["stopped", "finished", "finished"]
 
     def test_a_run_while_a_move_is_going_is_refused(self, session, ops, real_clock):
         release = threading.Event()
