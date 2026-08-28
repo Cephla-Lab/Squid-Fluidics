@@ -12,6 +12,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from pathlib import Path
+
 import gui
 
 
@@ -787,3 +789,125 @@ class TestMainWindowJobs:
         stub, order = self._closing(busy=True)
         assert gui.FluidicsControlGUI._quiesce(stub) is True
         assert order == [], "the stopping is the system's, in close()"
+
+
+class TestRunDisplayClocks:
+    """3.2: every run starts its clocks fresh, and the tick outlives the
+    estimate -- an estimate is an estimate. Called unbound against stubs."""
+
+    def test_a_new_run_starts_its_clocks_fresh(self):
+        started = []
+        stub = SimpleNamespace(
+            elapsed_time=42, total_time=300, total_sequences=7,
+            sequenceLabel=SimpleNamespace(setText=lambda t: None),
+            timer=SimpleNamespace(start=started.append),
+            _renderRunControls=lambda: None,
+        )
+        gui.SequencesWidget._beginRunDisplay(stub)
+        assert stub.elapsed_time == 0
+        assert stub.total_time is None, "the old estimate would price the new run"
+        assert started == [1000]
+
+    def test_the_tick_outlives_the_estimate(self):
+        """A run longer than its estimate still needs the label at 00:00:00
+        and -- since the tick is what watches for a flow-fault self-cancel --
+        the buttons kept honest."""
+        stopped, shown = [], []
+        stub = SimpleNamespace(
+            session=FakeSession(kind="run"),
+            runButton=Button(), pauseButton=Button(), abortButton=Button(),
+            timeLabel=SimpleNamespace(setText=shown.append),
+            progressBar=SimpleNamespace(setValue=lambda v: None),
+            timer=SimpleNamespace(stop=lambda: stopped.append(True)),
+            total_time=100, elapsed_time=200,
+        )
+        for name in ("_runState", "_showTimeRemaining", "_renderRunControls"):
+            stub.__dict__[name] = _bind(name, stub)
+        stub.__dict__["_pauseSuffix"] = gui.SequencesWidget._pauseSuffix
+        gui.SequencesWidget.updateTimeRemaining(stub)
+        assert stopped == [], "the tick stopped on the estimate, not the run"
+        assert shown == ["00:00:00 remaining"]
+        assert stub.elapsed_time == 201
+
+
+class TestPickConfig:
+    """3.3: --config, then the rig's own ./config.yaml, then the last file
+    picked; a dialog instead of a traceback when none exists or one fails."""
+
+    class Settings(dict):
+        def value(self, key):
+            return self.get(key)
+
+        def setValue(self, key, value):
+            self[key] = value
+
+    @pytest.fixture
+    def picking(self, monkeypatch, tmp_path):
+        settings = self.Settings()
+        asked, errors = [], []
+        monkeypatch.setattr(gui, "QSettings", lambda org, app: settings)
+        monkeypatch.setattr(gui.QFileDialog, "getOpenFileName",
+                            lambda *a, **k: (asked.pop(0) if asked else "", ""))
+        monkeypatch.setattr(gui.QMessageBox, "critical",
+                            lambda parent, title, text: errors.append(text))
+        monkeypatch.chdir(tmp_path)
+        return settings, asked, errors, tmp_path
+
+    def _write(self, path):
+        import shutil
+        shutil.copy(Path(gui.__file__).parent / "sample_config" / "flow_cell_config.yaml", path)
+        return str(path)
+
+    def test_the_rigs_own_config_wins_and_is_remembered(self, picking):
+        settings, asked, errors, tmp = picking
+        self._write(tmp / "config.yaml")
+        settings["config_path"] = self._write(tmp / "elsewhere.yaml")
+        assert gui.pick_config() is not None
+        assert settings["config_path"].endswith("config.yaml"), \
+            "the remembered file outranked the rig's own"
+
+    def test_the_cli_path_outranks_everything(self, picking):
+        settings, asked, errors, tmp = picking
+        self._write(tmp / "config.yaml")
+        given = self._write(tmp / "given.yaml")
+        assert gui.pick_config(given) is not None
+        assert settings["config_path"] == given
+
+    def test_the_last_picked_file_serves_when_the_rig_has_none(self, picking):
+        settings, asked, errors, tmp = picking
+        settings["config_path"] = self._write(tmp / "elsewhere.yaml")
+        assert gui.pick_config() is not None
+        assert errors == [] and settings["config_path"].endswith("elsewhere.yaml")
+
+    def test_nothing_found_asks_and_cancel_means_none(self, picking):
+        settings, asked, errors, tmp = picking
+        assert gui.pick_config() is None
+        assert errors == []
+
+    def test_a_file_that_fails_to_load_gets_a_dialog_then_asks_again(self, picking):
+        settings, asked, errors, tmp = picking
+        bad = tmp / "config.yaml"
+        bad.write_text("application: 'No Such Application'\n")
+        asked.append(self._write(tmp / "good.yaml"))
+        assert gui.pick_config() is not None
+        assert len(errors) == 1 and "config.yaml" in errors[0]
+        assert settings["config_path"].endswith("good.yaml")
+
+
+class TestBringupDialogs:
+    def test_a_stuck_valve_gets_the_same_dialog_as_an_unplugged_pump(self, qapp, monkeypatch):
+        """DeviceError joins the bring-up tuple: fail fast, report well."""
+        from fluidics.control.config import load_config
+        from fluidics.errors import DeviceError
+        dialogs = []
+        monkeypatch.setattr(gui.QMessageBox, "critical",
+                            lambda parent, title, text: dialogs.append((title, text)))
+
+        def stuck(config, simulation, on_issue=None):
+            raise DeviceError("Selector valve 0: at position 1, expected 2 -- check the valve is free to rotate")
+
+        monkeypatch.setattr(gui.FluidicsSystem, "build", staticmethod(stuck))
+        config = load_config(str(Path(gui.__file__).parent / "sample_config" / "flow_cell_config.yaml"))
+        with pytest.raises(SystemExit):
+            gui.FluidicsControlGUI(config, is_simulation=True)
+        assert dialogs and "free to rotate" in dialogs[0][1]

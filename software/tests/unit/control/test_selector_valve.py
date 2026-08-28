@@ -4,7 +4,7 @@ import pytest
 
 from fluidics.control._def import CMD_SET
 from fluidics.control.config import load_config
-from fluidics.errors import AbortRequested, RunControl
+from fluidics.errors import AbortRequested, DeviceError, RunControl
 from fluidics.control.controller import FluidControllerSimulation
 from fluidics.control.selector_valve import SelectorValveSystem
 
@@ -43,6 +43,17 @@ class TestSelectorValveSystemInit:
     def test_open_chamber_port_count(self, open_chamber_system):
         # 1 valve with 10 ports: 10
         assert open_chamber_system.available_port_number == 10
+
+
+class TestAStuckValve:
+    def test_it_is_reported_by_name_with_what_to_check(self, flow_cell_system, monkeypatch):
+        """Fail-fast is the policy (decided 2026-08-28); the report has to
+        carry the valve and the remedy, and be a type the GUI's bring-up
+        dialog catches -- not a bare RuntimeError traceback."""
+        valve = flow_cell_system.valves[0]
+        monkeypatch.setattr(valve, "get_current_position", lambda: 1)
+        with pytest.raises(DeviceError, match="Selector valve 0.*expected 2.*free to rotate"):
+            valve.open(2)
 
 
 class TestPortToReagent:

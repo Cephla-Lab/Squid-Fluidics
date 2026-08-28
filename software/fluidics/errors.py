@@ -30,6 +30,13 @@ class FluidicsError(Exception):
     """Base for everything this package raises on purpose."""
 
 
+class DeviceError(FluidicsError):
+    """A device is present but misbehaving, named for the operator: a valve
+    that did not reach its port, a controller answering nonsense. The
+    entry points render it as a dialog or a logged failure, like
+    DeviceNotFoundError."""
+
+
 class OperationError(FluidicsError):
     """A step failed; something is wrong with the step."""
 
