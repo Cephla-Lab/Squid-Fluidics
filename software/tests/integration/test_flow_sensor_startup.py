@@ -34,7 +34,7 @@ class TestBuildFlowSensors:
             s.close()
 
         # FlowSensorSimulation.close() clears its own subscriber list and sets
-        # terminate_reading_thread; it never touches fc.packet_callback (only
+        # its stop event; it never touches fc.packet_callback (only
         # the real FlowSensor's __init__ installs that wiring, which these
         # simulation instances never go through), so there is nothing to
         # assert on fc here. _subscribers == [] is the actual mechanism by
@@ -46,7 +46,7 @@ class TestBuildFlowSensors:
         # asserts the real, documented effects of close() instead of a no-op.
         for s in sensors:
             assert len(s._subscribers) == 0
-            assert s.terminate_reading_thread is True
+            assert s._stop_reading.is_set()
         assert seen == []
 
 

@@ -4,7 +4,9 @@ lifecycle (build, run, wait, tear down, exit code), which the worker and
 DeviceSet tests cannot see. The autouse fake clock makes the simulated
 bring-up and moves instant; the run log and crash hook are stubbed out."""
 
+import shutil
 import sys
+
 import pytest
 
 import run_sequences
@@ -14,18 +16,14 @@ from .test_sample_files import QUICKSTART_PAIRS, SOFTWARE
 
 @pytest.fixture
 def cli(monkeypatch):
+    """main()'s exit code for the given argv: a clean run returns, everything
+    else exits."""
     monkeypatch.setattr(run_sequences, "start_log_file", lambda directory=None: None)
     monkeypatch.setattr(run_sequences, "stop_log_file", lambda: None)
     monkeypatch.setattr(run_sequences, "setup_uncaught_exception_logging", lambda: None)
 
-    def run(sequences, config):
-        """main()'s exit code for the documented pairing: a clean run
-        returns, everything else exits."""
-        monkeypatch.setattr(sys, "argv", [
-            "run_sequences.py",
-            "--path", str(SOFTWARE / "sample_sequences" / sequences),
-            "--config", str(SOFTWARE / "sample_config" / config),
-            "--simulation"])
+    def run(*argv):
+        monkeypatch.setattr(sys, "argv", ["run_sequences.py", *argv])
         try:
             run_sequences.main()
         except SystemExit as exit_info:
@@ -35,33 +33,35 @@ def cli(monkeypatch):
     return run
 
 
+@pytest.fixture
+def cli_pair(cli):
+    """The documented pairing: a sequence file and a config from the sample
+    directories, run in simulation."""
+    def run(sequences, config):
+        return cli("--path", str(SOFTWARE / "sample_sequences" / sequences),
+                   "--config", str(SOFTWARE / "sample_config" / config),
+                   "--simulation")
+
+    return run
+
+
 @pytest.mark.parametrize("sequences, config", QUICKSTART_PAIRS)
-def test_a_clean_simulated_run_exits_zero(cli, sequences, config):
-    assert cli(sequences, config) == 0
+def test_a_clean_simulated_run_exits_zero(cli_pair, sequences, config):
+    assert cli_pair(sequences, config) == 0
 
 
-def test_a_thread_that_fails_to_start_exits_promptly(cli, thread_cannot_start):
+def test_a_thread_that_fails_to_start_exits_promptly(cli_pair, thread_cannot_start):
     """A start() that raises lands in main()'s except Exception with the
     session left free -- nothing to wait on: teardown and exit 1, promptly."""
-    assert cli(*QUICKSTART_PAIRS[0]) == 1
+    assert cli_pair(*QUICKSTART_PAIRS[0]) == 1
 
 
 def test_without_a_config_flag_the_rigs_own_legacy_json_serves(cli, monkeypatch, tmp_path):
     """The GUI and the CLI share one convention (default_config_path): a
     legacy JSON-only rig must not launch under one and traceback in the
     other."""
-    import shutil
-    import sys as _sys
     shutil.copy(SOFTWARE / "tests" / "fixtures" / "legacy_flow_cell_config.json",
                 tmp_path / "config.json")
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(_sys, "argv", [
-        "run_sequences.py",
-        "--path", str(SOFTWARE / "sample_sequences" / "merfish-experiment.yaml"),
-        "--simulation"])
-    try:
-        run_sequences.main()
-        code = 0
-    except SystemExit as exit_info:
-        code = exit_info.code
-    assert code == 0
+    assert cli("--path", str(SOFTWARE / "sample_sequences" / "merfish-experiment.yaml"),
+               "--simulation") == 0

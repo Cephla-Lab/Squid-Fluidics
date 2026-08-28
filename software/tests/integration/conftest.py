@@ -20,17 +20,15 @@ FLOW_CELL_STEP = {"type": "flow_reagent", "fluidic_port": 1,
 
 @pytest.fixture
 def instant_devices(built):
-    """A simulated DeviceSet with its pacing switched off: the controller's
-    one-second commands and the pump's five-second moves would otherwise be
-    spent for real under real_clock. The gates are untouched."""
+    """A simulated DeviceSet with its pacing switched off (build_devices'
+    instant knob): the controller's one-second commands and the pump's
+    five-second moves would otherwise be spent for real under real_clock.
+    The gates are untouched."""
     def _build(config):
-        devices = built(config, simulation=True)
-        devices.controller.COMMAND_SECONDS = 0
-        devices.syringe_pump.ESTIMATE_SECONDS = 0
-        # Closing a simulated flow sensor joins its publish thread mid-sleep
-        # -- 50 ms on the real clock, per test. Done now, under the fake
-        # clock, where it is instant; close() is idempotent, and none of
-        # these tests read flow.
+        devices = built(config, simulation=True, instant=True)
+        # The publish thread has nothing to say to these tests (none read
+        # flow), and under the fake clock its per-reading wait is a busy
+        # spin; close() is idempotent, so the teardown's close is unharmed.
         for sensor in devices.flow_sensors:
             sensor.close()
         return devices

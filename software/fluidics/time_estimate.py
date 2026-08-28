@@ -1,14 +1,10 @@
 """Estimate a run's time before it starts, by running it.
 
-The estimate used to be a second, hand-maintained copy of the timing
-knowledge (+60 s per set_temperature, +2 s per fluidic step) that had
-drifted from what the operations do: it ignored the syringe-emptying
-dumps, the tubing-turnover chains, the priming loop's per-port draws and
-the quantized speed codes. estimate_run_time keeps no copy: it replays
-the sequences against a simulated rig built from the same config -- the
-same operations code queues the same chains, overflow dumps and all --
-and totals what actually got queued. Hardware is never touched; a real
-run is estimated on its simulated twin, in milliseconds.
+estimate_run_time keeps no hand-maintained copy of the timing knowledge:
+it replays the sequences against a simulated rig built from the same
+config -- the same operations code queues the same chains, overflow dumps
+and all -- and totals what actually got queued. Hardware is never touched;
+a real run is estimated on its simulated twin, in milliseconds.
 
 The estimate is per sequence (one figure per repeat, in run order), so a
 display can re-anchor at every boundary: when a sequence completes, what
@@ -19,6 +15,7 @@ ones actually took.
 import logging
 
 from .control._def import CMD_SET
+from .devices import build_devices, build_operations
 from .errors import RunControl
 
 _logger = logging.getLogger(__name__)
@@ -67,64 +64,46 @@ def estimate_run_time(config, sequences):
         _logger.warning("Could not estimate the run by replay (%s); using a "
                         "flat fallback of %.0f s per sequence.",
                         e, FALLBACK_SEQUENCE_SECONDS)
-        durations = [seq.get("incubation_time", 0) * 60 + FALLBACK_SEQUENCE_SECONDS
-                     for seq in sequences for _ in range(seq.get("repeat", 1))]
+        durations = []
+        for seq in sequences:
+            per_repeat = (seq.get("incubation_time", 0) * 60
+                          + FALLBACK_SEQUENCE_SECONDS)
+            durations += [per_repeat] * seq.get("repeat", 1)
     return sum(durations), durations
 
 
-def _chain_seconds(executed, pump):
-    """Seconds for the chains the operations queued: each op at its own
-    speed code's rate. The fold mirrors the simulation's held-volume
-    accounting -- starting mid-stroke as it does -- so a waste dump is
-    counted at what is held when it runs, not at zero and not at full."""
-    held = 0.5 * pump.volume
-    seconds = 0.0
-    for chain in executed:
-        for op in chain:
-            if op[0] == "extract":
-                moved = op[2]
-                held += moved
-            elif op[0] == "dispense":
-                moved = op[2]
-                held -= moved
-            else:
-                moved = held
-                held = 0.0
-            seconds += moved / pump.get_flow_rate(op[-1]) * 60
-    return seconds
+def _op_seconds(pump, op, held_ul):
+    """(seconds, held after) for one recorded op, billed at its own speed
+    code's rate. The moved volume comes from the pump's own accounting
+    (_held_after), so a waste dump is counted at what is held when it runs
+    -- not at zero and not at full -- with no second copy of that
+    convention here."""
+    after = pump._held_after([op], held_ul)
+    return abs(after - held_ul) / pump.get_flow_rate(op[-1]) * 60, after
 
 
 def _replay(config, sequences):
-    # Imported here: devices imports this module for build_worker, and the
-    # replay is the only place the estimate needs the factory back.
-    from .control.controller import FluidControllerSimulation
-    from .devices import build_devices, build_operations
-
     control = _MeteredRunControl()
-    paced = FluidControllerSimulation.COMMAND_SECONDS
-    # The simulation's pacing is for watching it run; an estimate should
-    # take milliseconds. Zeroed for the whole replay -- the drain's blocking
-    # commands carry no run_control, so they would really sleep it -- and
-    # restored at the end; nothing else runs a job meanwhile (the session
-    # estimates inside start(), which refuses concurrent jobs).
-    FluidControllerSimulation.COMMAND_SECONDS = 0
-    devices = None
+    # instant: the simulation paces itself to feel real -- a second per
+    # command, slept for real on the paths that carry no run_control (the
+    # valves' homing, the drain's blocking commands). An estimate wants the
+    # accounting, not the feel.
+    devices = build_devices(config, simulation=True, run_control=control,
+                            instant=True)
     try:
-        devices = build_devices(config, simulation=True, run_control=control)
         ops = build_operations(config, devices)
-        sp = devices.syringe_pump
-        valve_moves = []
-        send = devices.controller.send_command
-
-        def counting(command, *args):
-            if command == CMD_SET.SET_ROTARY_VALVE:
-                valve_moves.append(args)
-            return send(command, *args)
-
-        devices.controller.send_command = counting
-
+        pump = devices.syringe_pump
+        sent = devices.controller.sent
+        # Bring-up (the homing moves, the initial CLEAR) is not the run's
+        # time: every counter starts from what the build already spent.
+        held = pump.get_current_volume()
+        chains_counted = 0
+        commands_counted = len(sent)
+        chain_seconds = 0.0
+        valve_moves = 0
         fixed = 0.0
-        marks = []
+        previous = 0.0
+        durations = []
         for seq in sequences:
             for _ in range(seq.get("repeat", 1)):
                 if seq["type"] == "set_temperature":
@@ -132,15 +111,21 @@ def _replay(config, sequences):
                 else:
                     ops.process_sequence(seq)
                 fixed += seq.get("incubation_time", 0) * 60
-                # The running total after this repeat; the per-sequence
-                # figures are the differences.
-                marks.append(fixed + control.metered
-                             + _chain_seconds(sp.executed, sp)
-                             + len(valve_moves) * VALVE_MOVE_SECONDS)
-        return [mark - previous for mark, previous in zip(marks, [0.0] + marks)]
+                # Bill what this repeat queued -- and only that: the records
+                # grow, the counters remember how far the last repeat read.
+                for chain in pump.executed[chains_counted:]:
+                    for op in chain:
+                        seconds, held = _op_seconds(pump, op, held)
+                        chain_seconds += seconds
+                chains_counted = len(pump.executed)
+                valve_moves += sum(command == CMD_SET.SET_ROTARY_VALVE
+                                   for command, *_ in sent[commands_counted:])
+                commands_counted = len(sent)
+
+                total = (fixed + control.metered + chain_seconds
+                         + valve_moves * VALVE_MOVE_SECONDS)
+                durations.append(total - previous)
+                previous = total
+        return durations
     finally:
-        try:
-            if devices is not None:
-                devices.close()
-        finally:
-            FluidControllerSimulation.COMMAND_SECONDS = paced
+        devices.close()

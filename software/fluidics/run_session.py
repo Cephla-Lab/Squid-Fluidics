@@ -18,6 +18,7 @@ from functools import partial
 from .devices import build_worker
 from .errors import Cancelled
 from .subscribers import Subscribers
+from .time_estimate import estimate_run_time
 
 _logger = logging.getLogger(__name__)
 
@@ -80,11 +81,20 @@ class RunSession:
     # on_estimate. The reports run after the rig is free, so a GUI
     # rendering on them sees an idle rig.
 
-    def start(self, sequences, operations, callbacks=None):
+    def start(self, sequences, operations, callbacks=None, durations=None):
         """Run `sequences` through `operations` on a new thread. Refused with
-        RuntimeError while a job runs."""
+        RuntimeError while a job runs.
+
+        durations: the run's per-sequence time estimate, when the caller
+        already has one in hand (the GUI prices its confirm dialog first and
+        passes the same figures, so the dialog and the countdown cannot
+        disagree). Estimated here otherwise -- the one place every run
+        passes through, so every run carries figures.
+        """
         if self.busy:       # before the worker is built, whose estimate callback would fire
             raise RuntimeError(f"the rig is busy: a {self._kind} is in progress")
+        if durations is None:
+            durations = estimate_run_time(self.devices.config, sequences)[1]
         callbacks = dict(callbacks or {})
         on_finished = callbacks.pop("on_finished", None)
         on_stopped = callbacks.pop("on_stopped", None)
@@ -96,7 +106,8 @@ class RunSession:
         callbacks["on_stopped"] = lambda: ended.append(on_stopped)
         callbacks["on_error"] = lambda message: ended.append(
             on_error and partial(on_error, message))
-        worker = build_worker(self.devices, operations, sequences, callbacks)
+        worker = build_worker(self.devices, operations, sequences, callbacks,
+                              durations=durations)
 
         def body():
             worker.run()

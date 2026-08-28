@@ -26,7 +26,6 @@ from .control.syringe_pump import SyringePump, SyringePumpSimulation
 from .control.temperature_controller import TCMController, TCMControllerSimulation
 from .errors import RunControl
 from .experiment_worker import ExperimentWorker
-from .time_estimate import estimate_run_time
 from .merfish_operations import MERFISHOperations
 from .open_chamber_operations import OpenChamberOperations
 
@@ -148,7 +147,8 @@ class DeviceSet:
         return _run_shielded(steps)
 
 
-def build_devices(config, simulation=False, on_issue=None, run_control=None):
+def build_devices(config, simulation=False, on_issue=None, run_control=None,
+                  instant=False):
     """Construct and start the full stack for `config`. Returns a DeviceSet.
 
     Mirrors what the two entry points did, once: construct controller, syringe
@@ -162,7 +162,14 @@ def build_devices(config, simulation=False, on_issue=None, run_control=None):
     reported through on_issue and left out rather than failing the launch.
     The controller, pump, and valves are not survivable -- those raise, after
     closing whatever had already started.
+
+    instant: switch the simulated rig's pacing off -- the controller's
+    one-second commands and the pump's five-second moves take no time. For
+    rigs built to be read rather than watched: the time estimate's replay,
+    tests. Simulation only.
     """
+    if instant and not simulation:
+        raise ValueError("instant pacing is for simulated rigs only")
     if on_issue is None:
         on_issue = _print_issue
     # Pick the classes once so the config-to-constructor mapping is written
@@ -180,6 +187,11 @@ def build_devices(config, simulation=False, on_issue=None, run_control=None):
         speed_code_limit=config.syringe_pump.speed_code_limit,
         waste_port=config.syringe_pump.waste_port,
         run_control=run_control)
+    if instant:
+        # On the instances, before bring-up -- the valves' homing waits are
+        # paced too -- so a concurrently simulated rig keeps its own pacing.
+        controller.COMMAND_SECONDS = 0
+        syringe_pump.ESTIMATE_SECONDS = 0
 
     temperature_controller = None
     if config.temperature_controller is not None:
@@ -261,17 +273,15 @@ def build_operations(config, devices, on_warning=None):
     raise ValueError(f"Unsupported application: {config.application!r}")
 
 
-def build_worker(devices, operations, sequences, callbacks=None):
+def build_worker(devices, operations, sequences, callbacks=None, durations=None):
     """Wire one run's worker to `devices`: the shared run_control, the
     make_safe callback (which this function owns), and the run's time
-    estimate -- replayed against the simulated twin of this config
-    (fluidics.time_estimate), so it comes from the code that will run the
-    sequences, one figure per sequence for the display to re-anchor on."""
+    estimate -- `durations`, one figure per sequence for the display to
+    re-anchor on, replayed by whoever starts the run (RunSession.start)."""
     callbacks = dict(callbacks or {})
     if "make_safe" in callbacks:
         raise ValueError("build_worker supplies make_safe; do not pass one")
     callbacks["make_safe"] = devices.make_safe
-    seconds, durations = estimate_run_time(devices.config, sequences)
     return ExperimentWorker(operations, sequences, devices.config, callbacks,
                             run_control=devices.run_control,
-                            time_to_finish=seconds, durations=durations)
+                            durations=durations)

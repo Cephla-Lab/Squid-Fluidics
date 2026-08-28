@@ -187,7 +187,7 @@ class FlowSensorSimulation:
         self._subscribers = Subscribers(f"Flow sensor '{name}'")
         self._fault_subscribers = Subscribers(f"Flow sensor '{name}' faults")
 
-        self.terminate_reading_thread = False
+        self._stop_reading = threading.Event()
         self.reading_thread = threading.Thread(target=self._reading_loop, daemon=True)
 
         _logger.info("Simulated flow sensor %r on I2C index %s.", name, index)
@@ -221,15 +221,17 @@ class FlowSensorSimulation:
         self._fault_subscribers.notify(mode, fault, timestamp)
 
     def close(self):
-        self.terminate_reading_thread = True
+        self._stop_reading.set()
         if self.reading_thread.is_alive():
             self.reading_thread.join(timeout=2)
         self._subscribers.clear()
         self._fault_subscribers.clear()
 
     def _reading_loop(self):
-        while not self.terminate_reading_thread:
-            time.sleep(0.06)
+        # An Event, not a sleep, so close() wakes the loop at once instead of
+        # waiting out the tick -- a simulated rig is built and torn down per
+        # test and per time estimate.
+        while not self._stop_reading.wait(0.06):
             self._subscribers.notify(self.simulated_flow_ul_min, time.time())
 
 

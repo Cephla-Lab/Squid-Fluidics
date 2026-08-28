@@ -14,6 +14,7 @@ from .devices import build_devices, build_operations
 from .manual_operations import ManualOperations
 from .run_session import RunSession
 from .subscribers import Subscribers
+from .time_estimate import estimate_run_time
 
 _logger = logging.getLogger(__name__)
 
@@ -41,9 +42,16 @@ class FluidicsSystem:
 
     # --- the one job ---
 
-    def run(self, sequences, callbacks=None):
-        """Start a run of `sequences`; see RunSession.start."""
-        self.session.start(sequences, self.operations, callbacks)
+    def estimate(self, sequences):
+        """(total_seconds, durations) for a run of `sequences` on this rig:
+        what a confirm dialog shows, ready to hand back to run() so the run
+        reports the same figures. See time_estimate.estimate_run_time."""
+        return estimate_run_time(self.devices.config, sequences)
+
+    def run(self, sequences, callbacks=None, durations=None):
+        """Start a run of `sequences`; see RunSession.start. `durations`
+        from estimate() rides along so the run is not priced twice."""
+        self.session.start(sequences, self.operations, callbacks, durations)
 
     def run_manual(self, verb, callbacks=None):
         """Start one manual verb; see RunSession.run_manual."""
