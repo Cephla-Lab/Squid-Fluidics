@@ -520,9 +520,11 @@ def run_widget(paused=False, at_rest=False, total_time=100, elapsed=0):
     # them on the stub too.
     for name in ("_showTimeRemaining", "_renderRunControls"):
         stub.__dict__[name] = _bind(name, stub)
-    # A static method needs no stub of its own; a valid list blocks nothing.
+    # A static method needs no stub of its own; a valid list blocks nothing;
+    # the usage table has its own tests.
     stub.__dict__["_pauseSuffix"] = gui.SequencesWidget._pauseSuffix
     stub.__dict__["_blockingError"] = lambda: None
+    stub.__dict__["_renderUsage"] = lambda: None
     return stub
 
 
@@ -1044,3 +1046,45 @@ class TestPortNames:
         assert combo.currentIndex() == 2
         assert combo.itemText(0) == "Port 1: DAPI"
         assert moved == [], "a rename must not move a valve"
+
+
+class TestUsageTable:
+    """The run tab's per-port table: painted from the ledger's snapshot,
+    names read fresh from the config at each paint, hidden when empty."""
+
+    def _stub(self, qapp, totals, names=None):
+        from PyQt5.QtWidgets import QTableWidget
+        table = QTableWidget(0, 3)
+        stub = SimpleNamespace(
+            usageTable=table,
+            system=SimpleNamespace(
+                usage=SimpleNamespace(snapshot=lambda: dict(totals)),
+                devices=SimpleNamespace(selector_valves=SimpleNamespace(
+                    port_to_reagent=lambda port: (names or {}).get(port)))),
+        )
+        return stub, table
+
+    def test_totals_paint_with_fresh_names(self, qapp):
+        stub, table = self._stub(qapp, {3: 1500.0, 1: 500.0}, {3: "DAPI"})
+        gui.SequencesWidget._renderUsage(stub)
+        assert not table.isHidden()
+        assert table.rowCount() == 2
+        rows = [(table.item(r, 0).text(), table.item(r, 1).text(),
+                 table.item(r, 2).text()) for r in range(2)]
+        assert rows == [("1", "", "500"), ("3", "DAPI", "1500")]
+
+    def test_nothing_drawn_hides_the_table(self, qapp):
+        stub, table = self._stub(qapp, {})
+        table.setVisible(True)
+        gui.SequencesWidget._renderUsage(stub)
+        assert table.isHidden()
+
+
+class TestHeldVolumePaint:
+    def test_the_bar_paints_the_published_reading(self, qapp):
+        from PyQt5.QtWidgets import QProgressBar
+        bar = QProgressBar()
+        bar.setRange(0, 5000)
+        stub = SimpleNamespace(plungerPositionBar=bar)
+        gui.ManualControlWidget._handle_held_volume(stub, 2600.0)
+        assert bar.value() == 2600

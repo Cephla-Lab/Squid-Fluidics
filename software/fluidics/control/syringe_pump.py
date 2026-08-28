@@ -5,6 +5,7 @@ import time
 import fluidics.control.tecancavro as tecancavro
 
 from ..errors import Cancelled, RunControl, SafetyFault
+from ..subscribers import Subscribers
 from .discovery import find_serial_port
 
 _logger = logging.getLogger(__name__)
@@ -50,6 +51,13 @@ class Interruptible:
         self.moving = False
         self.run_control = run_control if run_control is not None else RunControl()
         self._chain = []
+        # What the pump tells whoever listens (fire-and-forget; no
+        # subscriber, no effect): draws carries (pump_port, volume_ul) for
+        # every dispatched extract -- the reagent ledger's feed; held_volume
+        # carries the held uL whenever the pump takes a reading, so a
+        # display never has to poll the serial line for it.
+        self.draws = Subscribers("syringe draws")
+        self.held_volume = Subscribers("syringe held volume")
 
     # --- queueing ---
 
@@ -138,15 +146,23 @@ class Interruptible:
 
     def _run_op(self, op):
         """Run one op to the end, however many pauses that takes."""
-        self.run_control.checkpoint()
+        self.run_control.checkpoint()   # a cancel here dispatched nothing
         estimate = self._start(op)
         self.moving = True
-        while self.wait_for_stop(estimate):
-            self._halted(op)
-            self.run_control.checkpoint()
-            estimate = self._resume(op)
-            self.moving = True
-        self._finished(op)
+        try:
+            while self.wait_for_stop(estimate):
+                self._halted(op)
+                self.run_control.checkpoint()
+                estimate = self._resume(op)
+                self.moving = True
+            self._finished(op)
+        finally:
+            # A dispatched extract is charged in full, finished or cancelled
+            # mid-draw: a generous total beats a silent undercount, and the
+            # queued volume is exact whenever the op ran to its end --
+            # pauses included, since this publishes once, at the true end.
+            if op[0] == "extract":
+                self.draws.notify(op[1], op[2])
 
     def wait_for_stop(self, t=0):
         """Block until the move finishes or the run stops. Returns False when
@@ -300,8 +316,8 @@ class SyringePump(SpeedCodes, Interruptible):
         # deadlock loudly in testing, not silently interleave.
         self._serial_lock = threading.Lock()
 
+        self._init_run_control(run_control)     # channels exist before the first reading
         self.get_plunger_position()
-        self._init_run_control(run_control)
 
         _logger.info("Syringe pump initialized.")
 
@@ -309,6 +325,9 @@ class SyringePump(SpeedCodes, Interruptible):
         with self._serial_lock:
             position = self.syringe.getPlungerPos()
         self.plunger_pos = position / self.range
+        # Every fresh reading is published: displays paint what the pump
+        # last recorded instead of polling the serial line themselves.
+        self.held_volume.notify(self.get_current_volume())
         return self.plunger_pos
 
     def get_current_volume(self):
@@ -488,6 +507,7 @@ class SyringePumpSimulation(SpeedCodes, Interruptible):
 
     def get_plunger_position(self):
         self.plunger_pos = self._held_ul / self.volume
+        self.held_volume.notify(self.get_current_volume())
         return self.plunger_pos
 
     def get_current_volume(self):
