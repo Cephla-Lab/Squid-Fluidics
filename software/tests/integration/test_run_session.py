@@ -276,6 +276,21 @@ class TestTheEndIsOneTransition:
         assert saw_done == [False], "the chained job read the session as done while it ran"
 
 
+class TestTheClock:
+    def test_it_restarts_with_each_job(self, session, real_clock):
+        release = threading.Event()
+        session.run_manual(release.wait)
+        assert wait_until(lambda: session.elapsed_seconds > 0.02)
+        release.set()
+        assert session.wait(5)
+        first = session.elapsed_seconds
+        release2 = threading.Event()
+        session.run_manual(release2.wait)
+        assert session.elapsed_seconds < first, "the new job inherited the old clock"
+        release2.set()
+        assert session.wait(5)
+
+
 class TestIdle:
     """Controls with no job leave the run's signal alone: a cancel or a pause
     set now would land on the next job."""

@@ -47,7 +47,7 @@ class TestHappyPath:
         ops, events = run_worker([dict(FLOW, name="a"), dict(FLOW, name="b")])
         assert [s["name"] for s in ops.processed] == ["a", "b"]
         assert events == [
-            ("estimate", 2),
+            ("estimate",),
             ("progress", 1, "Started"), ("progress", 1, "Completed"),
             ("progress", 2, "Started"), ("progress", 2, "Completed"),
             ("finished",),
@@ -101,20 +101,18 @@ class TestFailurePath:
 
 
 class TestEstimate:
-    def test_the_estimate_arrives_before_run_and_counts_repeats(self):
+    def test_the_estimate_arrives_before_run_exactly_as_handed_in(self):
+        """The figures are priced by whoever starts the run
+        (fluidics.time_estimate, via RunSession.start); the worker only
+        relays them."""
         ops = RecordingOps()
         events = []
         ExperimentWorker(ops, [dict(FLOW, repeat=2), dict(FLOW)], CONFIG,
-                         callbacks={
-                             "on_estimate":
-                                 lambda t, n: events.append((t, n)),
-                         })
+                         callbacks={"on_estimate": events.append},
+                         durations=[41.0, 41.0, 41.0])
         # Fired from the constructor: the GUI sizes its progress bar before
         # the run starts.
-        assert len(events) == 1
-        seconds, n = events[0]
-        assert n == 3
-        assert seconds > 0
+        assert events == [[41.0, 41.0, 41.0]]
 
 
 class TestRunNarrative:

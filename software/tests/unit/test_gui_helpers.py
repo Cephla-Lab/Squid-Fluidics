@@ -56,11 +56,13 @@ class FakeSession:
     """The RunSession as the widgets see it: a kind, the state that follows
     from it, and the controls recorded."""
 
-    def __init__(self, kind=None, paused=False, at_rest=False, cancelled=False):
+    def __init__(self, kind=None, paused=False, at_rest=False, cancelled=False,
+                 elapsed_seconds=0.0):
         self.kind = kind
         self.paused = paused
         self.at_rest = at_rest
         self.cancelled = cancelled
+        self.elapsed_seconds = elapsed_seconds
         self.calls = []
 
     @property
@@ -475,6 +477,32 @@ class TestRunFinished:
         assert order == [("error", "Error"), "render"]
 
 
+def run_widget(paused=False, at_rest=False, total_time=100, elapsed=0,
+               worker=True):
+    """A SequencesWidget stub mid-run, for the clock-and-buttons methods
+    called unbound -- constructing the real widget needs a QApplication.
+    Module-level beside the fakes it is built from: more than one test class
+    paints against it."""
+    session = FakeSession(kind="run" if worker else None, paused=paused,
+                          at_rest=at_rest, elapsed_seconds=elapsed)
+    stub = SimpleNamespace(
+        session=session,
+        runButton=Button(), pauseButton=Button(), abortButton=Button(),
+        timeLabel=SimpleNamespace(setText=lambda text: None),
+        progressBar=SimpleNamespace(setValue=lambda value: None),
+        timer=SimpleNamespace(stop=lambda: None),
+        total_time=total_time,
+        calls=session.calls,
+    )
+    # The widget's methods call back into self, so an unbound call needs
+    # them on the stub too.
+    for name in ("_runState", "_showTimeRemaining", "_renderRunControls"):
+        stub.__dict__[name] = _bind(name, stub)
+    # A static method needs no stub of its own.
+    stub.__dict__["_pauseSuffix"] = gui.SequencesWidget._pauseSuffix
+    return stub
+
+
 class TestPauseControls:
     """The button and the label, called unbound against stubs -- constructing
     SequencesWidget needs a QApplication.
@@ -485,44 +513,24 @@ class TestPauseControls:
     may still be moving.
     """
 
-    @staticmethod
-    def widget(paused=False, at_rest=False, total_time=100, elapsed=0,
-               worker=True):
-        session = FakeSession(kind="run" if worker else None, paused=paused, at_rest=at_rest)
-        stub = SimpleNamespace(
-            session=session,
-            runButton=Button(), pauseButton=Button(), abortButton=Button(),
-            timeLabel=SimpleNamespace(setText=lambda text: None),
-            progressBar=SimpleNamespace(setValue=lambda value: None),
-            timer=SimpleNamespace(stop=lambda: None),
-            total_time=total_time,
-            elapsed_time=elapsed,
-            calls=session.calls,
-        )
-        # The widget's methods call back into self, so an unbound call needs
-        # them on the stub too.
-        for name in ("_runState", "_showTimeRemaining", "_renderRunControls"):
-            stub.__dict__[name] = _bind(name, stub)
-        # A static method needs no stub of its own.
-        stub.__dict__["_pauseSuffix"] = gui.SequencesWidget._pauseSuffix
-        return stub
-
-    @pytest.mark.parametrize("paused, at_rest, suffix, spends_time", [
-        (False, False, "", True),
-        (True, False, " (pausing\u2026)", True),    # the move in flight still counts
-        (True, True, " (paused)", False),           # stopped: no time passes
+    @pytest.mark.parametrize("paused, at_rest, suffix", [
+        (False, False, ""),
+        (True, False, " (pausing\u2026)"),
+        (True, True, " (paused)"),
         # (False, True) cannot arise: RunControl.at_rest is paused *and*
         # something parked, pinned in test_errors.py.
     ])
-    def test_the_two_moments_and_what_each_costs(self, paused, at_rest, suffix,
-                                                 spends_time):
+    def test_the_two_moments_and_their_label(self, paused, at_rest, suffix):
+        """What each costs is the clock's business now (TestRunningClock in
+        test_errors); the tick paints the session's figure with the suffix."""
         shown = []
-        stub = self.widget(paused=paused, at_rest=at_rest)
+        stub = run_widget(paused=paused, at_rest=at_rest, elapsed=7)
         stub.timeLabel = SimpleNamespace(setText=shown.append)
         assert gui.SequencesWidget._pauseSuffix(paused, at_rest) == suffix
         gui.SequencesWidget.updateTimeRemaining(stub)
-        assert stub.elapsed_time == (1 if spends_time else 0)
-        assert shown == [f"00:01:{40 - int(spends_time):02d} remaining{suffix}"]
+        # 7 of the 100 elapsed: the label proves the tick read the session's
+        # clock rather than counting one of its own.
+        assert shown == [f"00:01:33 remaining{suffix}"]
 
     def test_the_state_is_read_once_a_tick(self):
         """The clock decision and the label it prints must come from the same
@@ -531,7 +539,7 @@ class TestPauseControls:
         reads = []
 
         class Control:
-            kind, busy, cancelled = "run", True, False
+            kind, busy, cancelled, elapsed_seconds = "run", True, False, 0.0
 
             @property
             def paused(self):
@@ -543,38 +551,38 @@ class TestPauseControls:
                 reads.append("at_rest")
                 return True
 
-        stub = self.widget()
+        stub = run_widget()
         stub.session = Control()
         gui.SequencesWidget.updateTimeRemaining(stub)
         assert reads.count("at_rest") == 1, reads
 
     def test_the_first_press_pauses_and_offers_a_resume(self):
-        stub = self.widget()
+        stub = run_widget()
         gui.SequencesWidget.pauseSequences(stub)
         assert stub.calls == ["pause"]
         assert stub.pauseButton.text() == "Resume"
 
     def test_the_next_press_resumes(self):
-        stub = self.widget(paused=True)
+        stub = run_widget(paused=True)
         gui.SequencesWidget.pauseSequences(stub)
         assert stub.calls == ["resume"]
         assert stub.pauseButton.text() == "Pause"
 
-    def test_a_press_costs_the_estimate_nothing(self):
-        """The press refreshes the label; going through the one-second tick to
-        do that would charge a second of the run for every click."""
+    def test_a_press_repaints_the_label_without_touching_the_clock(self):
+        """The press redraws the last-painted state with the new suffix; the
+        clock is the session's and only the tick reads it. (Before the clock
+        moved, a press routed through the tick charged a second per click.)"""
         shown = []
-        stub = self.widget(elapsed=10)
+        stub = run_widget(elapsed=10)
         stub.timeLabel = SimpleNamespace(setText=shown.append)
         gui.SequencesWidget.pauseSequences(stub)
-        assert stub.elapsed_time == 10
         assert shown == ["00:01:30 remaining (pausing\u2026)"]
 
     def test_a_press_before_the_estimate_arrives_does_not_raise(self):
         """The worker posts the estimate to the event queue, so an operator
         who presses Pause within the first second finds total_time unset. A
         slot that raises there takes the whole GUI down with it."""
-        stub = self.widget(total_time=None)
+        stub = run_widget(total_time=None)
         gui.SequencesWidget.pauseSequences(stub)
         assert stub.calls == ["pause"]
         assert stub.pauseButton.text() == "Resume"
@@ -584,7 +592,7 @@ class TestPauseControls:
         actually stopped."""
         stopped = []
         shown = []
-        stub = self.widget(paused=True, at_rest=True, total_time=1, elapsed=99)
+        stub = run_widget(paused=True, at_rest=True, total_time=1, elapsed=99)
         stub.timer = SimpleNamespace(stop=lambda: stopped.append(True))
         stub.timeLabel = SimpleNamespace(setText=shown.append)
         gui.SequencesWidget.updateTimeRemaining(stub)
@@ -594,7 +602,7 @@ class TestPauseControls:
     def test_a_run_that_ends_on_its_own_takes_the_controls_with_it(self):
         """A flow fault cancels from the MCU reader thread, so no button press
         and no callback runs: the tick is what notices."""
-        stub = self.widget()
+        stub = run_widget()
         stub.session.cancelled = True
         gui.SequencesWidget.updateTimeRemaining(stub)
         assert stub.pauseButton.enabled is False
@@ -799,13 +807,12 @@ class TestRunDisplayClocks:
     def test_a_new_run_starts_its_clocks_fresh(self):
         started = []
         stub = SimpleNamespace(
-            elapsed_time=42, total_time=300, total_sequences=7,
+            total_time=300, total_sequences=7,
             sequenceLabel=SimpleNamespace(setText=lambda t: None),
             timer=SimpleNamespace(start=started.append),
             _renderRunControls=lambda: None,
         )
         gui.SequencesWidget._beginRunDisplay(stub)
-        assert stub.elapsed_time == 0
         assert stub.total_time is None, "the old estimate would price the new run"
         assert started == [1000]
 
@@ -814,13 +821,12 @@ class TestRunDisplayClocks:
         and -- since the tick is what watches for a flow-fault self-cancel --
         the buttons kept honest."""
         stopped, shown = [], []
-        stub = TestPauseControls.widget(total_time=100, elapsed=200)
+        stub = run_widget(total_time=100, elapsed=200)
         stub.timer = SimpleNamespace(stop=lambda: stopped.append(True))
         stub.timeLabel = SimpleNamespace(setText=shown.append)
         gui.SequencesWidget.updateTimeRemaining(stub)
         assert stopped == [], "the tick stopped on the estimate, not the run"
         assert shown == ["00:00:00 remaining"]
-        assert stub.elapsed_time == 201
 
 
 class TestPickConfig:
@@ -895,3 +901,54 @@ class TestBringupDialogs:
         with pytest.raises(SystemExit):
             gui.FluidicsControlGUI(None, is_simulation=True)
         assert dialogs and "free to rotate" in dialogs[0][1]
+
+
+class TestReAnchoring:
+    """When a sequence completes, what remains is the estimate of the ones
+    not yet run -- whatever the finished ones actually took. Called unbound
+    against stubs."""
+
+    def stub(self, durations, elapsed=100.0):
+        return SimpleNamespace(
+            session=FakeSession(kind="run", elapsed_seconds=elapsed),
+            sequenceLabel=SimpleNamespace(setText=lambda t: None),
+            total_sequences=len(durations), total_time=999.0,
+            _durations=list(durations),
+            _running_rows=[], highlightRow=lambda row: None,
+        )
+
+    def test_a_completed_sequence_reanchors_the_countdown(self):
+        stub = self.stub([60.0, 40.0, 20.0], elapsed=100.0)
+        gui.SequencesWidget._handle_progress(stub, 0, 1, "Completed")
+        assert stub.total_time == pytest.approx(100.0 + 60.0), \
+            "the remainder is the not-yet-run estimates from the clock's now"
+
+    def test_only_a_completion_reanchors(self):
+        stub = self.stub([60.0, 40.0])
+        for status in ("Started", "Incubating", "Paused"):
+            gui.SequencesWidget._handle_progress(stub, 0, 1, status)
+        assert stub.total_time == 999.0
+
+    def test_no_durations_means_no_reanchor(self):
+        stub = self.stub([])
+        gui.SequencesWidget._handle_progress(stub, 0, 1, "Completed")
+        assert stub.total_time == 999.0
+
+
+class TestConfirmStart:
+    def test_the_dialog_carries_the_figures_and_no_means_no(self, monkeypatch):
+        asked = []
+
+        def question(parent, title, text, buttons, default):
+            asked.append(text)
+            return gui.QMessageBox.No
+
+        monkeypatch.setattr(gui.QMessageBox, "question", question)
+        stub = SimpleNamespace()
+        assert gui.SequencesWidget._confirmStart(stub, 3725, 7) is False
+        assert "7 sequence(s)" in asked[0] and "01:02:05" in asked[0]
+
+    def test_yes_starts(self, monkeypatch):
+        monkeypatch.setattr(gui.QMessageBox, "question",
+                            lambda *args: gui.QMessageBox.Yes)
+        assert gui.SequencesWidget._confirmStart(SimpleNamespace(), 60, 1) is True

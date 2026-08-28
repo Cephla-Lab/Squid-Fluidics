@@ -90,6 +90,57 @@ class TestRunControl:
         assert time.monotonic() - started < 1
 
 
+class TestRunningClock:
+    """The display's clock: wall time minus held spans, agreeing with what
+    run_for/delay charge. Owned here so the GUI can read-and-paint instead
+    of counting ticks -- a counter charged whole seconds by which side of a
+    pause the tick landed on."""
+
+    def test_zero_before_the_clock_is_started(self):
+        assert RunControl().running_seconds() == 0.0
+
+    def test_running_time_is_wall_time_while_nothing_holds(self, real_clock):
+        control = RunControl()
+        control.restart_clock()
+        time.sleep(0.05)
+        assert control.running_seconds() == pytest.approx(0.05, abs=0.03)
+
+    def test_a_held_span_costs_nothing(self, real_clock, parks):
+        control = RunControl()
+        control.restart_clock()
+        started = time.monotonic()
+        control.pause()
+        finished, error = parks(control, control.checkpoint)
+        time.sleep(0.1)                      # a tenth of a second at rest
+        # Read *while* still parked: the clock must stand still during the
+        # hold, not merely bank it afterwards -- the countdown repaints
+        # every second of a pause.
+        during = control.running_seconds()
+        assert during < time.monotonic() - started - 0.05, \
+            f"the clock ran on during the hold: {during:.3f}"
+        control.resume()
+        assert finished.wait(2) and not error
+        wall = time.monotonic() - started
+        running = control.running_seconds()
+        assert running < wall - 0.05, \
+            f"the held span was charged: running {running:.3f} of wall {wall:.3f}"
+
+    def test_a_pause_still_in_flight_still_counts(self, real_clock):
+        """Asked-for but not yet at rest: the move is really running."""
+        control = RunControl()
+        control.restart_clock()
+        control.pause()                      # nothing parks
+        time.sleep(0.05)
+        assert control.running_seconds() == pytest.approx(0.05, abs=0.03)
+
+    def test_restart_zeroes_it(self, real_clock):
+        control = RunControl()
+        control.restart_clock()
+        time.sleep(0.03)
+        control.restart_clock()
+        assert control.running_seconds() == pytest.approx(0.0, abs=0.02)
+
+
 class TestRelease:
     """A run ending early lifts its pause without a word, and without
     touching the cause."""

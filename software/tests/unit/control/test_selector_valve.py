@@ -12,6 +12,10 @@ from fluidics.control.selector_valve import SelectorValveSystem
 def _make_valve_system(config_path, run_control=None):
     config = load_config(str(config_path))
     fc = FluidControllerSimulation(serial_number="test")
+    # Before SelectorValveSystem homes the valves: under the real clock a
+    # paced homing spends its full second per valve, and no test here pins
+    # the pacing -- they pin the gates and the routing.
+    fc.COMMAND_SECONDS = 0
     return SelectorValveSystem(fc, config, run_control)
 
 
@@ -190,8 +194,5 @@ class TestAPausedRunMovesNoValve:
         """The valve in flight finishes; the next one holds at the gate."""
         control = RunControl()
         system = _make_valve_system(fixtures_dir / "flow_cell_config.yaml", control)
-        # Under the real clock the simulated move would take its full second;
-        # what this pins is the gate, not the move.
-        system.fc.COMMAND_SECONDS = 0
         holds_while_paused(control, lambda: system.open_port(1))
         assert system.current_port == 1

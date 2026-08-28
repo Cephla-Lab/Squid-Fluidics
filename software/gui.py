@@ -24,6 +24,7 @@ from fluidics.devices import (
     ISSUE_TEMPERATURE_CONTROLLER,
 )
 from fluidics.system import FluidicsSystem
+from fluidics.experiment_worker import SEQUENCE_COMPLETED
 from fluidics.run_log import setup_uncaught_exception_logging, start_log_file
 from fluidics.sequences import (
     load_sequences, save_sequences_yaml, get_included_sequences,
@@ -194,6 +195,12 @@ class AddSequenceDialog(QDialog):
         super().accept()
 
 
+def _hms(seconds):
+    """Seconds as hh:mm:ss, for the estimate dialog and the countdown."""
+    seconds = int(seconds)
+    return f"{seconds // 3600:02d}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
+
+
 class SequencesWidget(PostsToQtThread, QWidget):
     """Edits the sequence list and runs it through the system's session, which
     owns the run's thread and its end; this widget renders the callbacks."""
@@ -206,6 +213,7 @@ class SequencesWidget(PostsToQtThread, QWidget):
         self.selectorValveSystem = system.devices.selector_valves
 
         self._running_rows = []  # Tree rows of the sequences handed to the worker
+        self._durations = []     # per-sequence estimates, for re-anchoring
         self._ended_early = False   # a stop or an error has already had its dialog
         system.warnings.subscribe(self.reportWarning)
 
@@ -288,7 +296,6 @@ class SequencesWidget(PostsToQtThread, QWidget):
         # Timer for updating time remaining
         self.timer = QTimer()
         self.timer.timeout.connect(self.updateTimeRemaining)
-        self.elapsed_time = 0
         self.total_time = None
 
     FIELD_LABELS = {
@@ -495,49 +502,56 @@ class SequencesWidget(PostsToQtThread, QWidget):
             'on_estimate': self.setTimeEstimate,
         }
 
+        # Estimated here, before anything starts, so the operator confirms
+        # with the figure in hand; the same figures ride into the run below,
+        # so the dialog and the countdown cannot disagree.
+        seconds, durations = self.system.estimate(selected)
+        if not self._confirmStart(seconds, self.total_sequences):
+            return
+
         self._warnings.clear()
         self.warningLabel.setVisible(False)
         self._ended_early = False
 
         try:
-            self.system.run(selected, callbacks)
+            self.system.run(selected, callbacks, durations=durations)
         except RuntimeError as e:
             # A manual move got in first; the tabs normally prevent this.
             QMessageBox.warning(self, "Rig busy", str(e))
             return
         self._beginRunDisplay()
 
+    def _confirmStart(self, seconds, n_sequences):
+        """The operator sees the bill before the run starts: how many
+        sequences, how long they should take. True to go ahead."""
+        answer = QMessageBox.question(
+            self, "Start run?",
+            f"{n_sequences} sequence(s), estimated {_hms(seconds)}.\n\nStart the run?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+        return answer == QMessageBox.Yes
+
     def _beginRunDisplay(self):
-        """A fresh run's clocks. The previous run's seconds must not leak in,
-        and its estimate must not price this one while the new estimate is
-        still in the post."""
-        self.elapsed_time = 0
+        """A fresh run's display. The previous run's estimate must not price
+        this one while the new estimate is still in the post."""
         self.total_time = None
         self._renderRunControls()
         self.sequenceLabel.setText(f"0/{self.total_sequences} sequences")
         self.timer.start(1000)
 
     def updateTimeRemaining(self):
-        """The one-second tick: spend a second unless the run is stopped.
+        """The one-second repaint: read the session's clock, paint, and keep
+        the buttons honest.
 
-        A run at rest spends no time, the way the incubation clock does. A
-        pause that has been asked for but not yet reached still counts -- the
-        move in flight really is running.
+        Runs until _handle_finished stops it, not until the estimate hits
+        zero: a run can outlive its estimate, and a flow fault cancels
+        from the reader thread with only this tick watching.
         """
-        paused, at_rest = self._runState()
-        if not at_rest:
-            self.elapsed_time += 1  # Add one second
-        self._showTimeRemaining(self._pauseSuffix(paused, at_rest))
-        # Runs until _handle_finished stops it, not until the estimate hits
-        # zero: a run can outlive its estimate, and a flow fault cancels
-        # from the reader thread with only this tick watching.
+        self._showTimeRemaining()
         self._renderRunControls()
 
     def _showTimeRemaining(self, suffix=None):
-        """Draw the label and the bar from the elapsed time as it stands.
-
-        Separate from the tick, which advances that clock: a Pause click
-        refreshes the label and must not spend a second of the run.
+        """Draw the label and the bar from the session's clock as it stands.
+        The session's clock is the truth: it excludes held time precisely.
         """
         if self.total_time is None:
             # The estimate is posted to this thread's queue, so it can still
@@ -546,15 +560,11 @@ class SequencesWidget(PostsToQtThread, QWidget):
             return
         if suffix is None:
             suffix = self._pauseSuffix(*self._runState())
-        remaining = max(0, self.total_time - self.elapsed_time)
+        elapsed = self.session.elapsed_seconds
+        remaining = max(0, self.total_time - elapsed)
+        self.timeLabel.setText(f"{_hms(remaining)} remaining{suffix}")
 
-        hours = int(remaining // 3600)
-        minutes = int((remaining % 3600) // 60)
-        seconds = int(remaining % 60)
-        self.timeLabel.setText(
-            f"{hours:02d}:{minutes:02d}:{seconds:02d} remaining{suffix}")
-
-        progress = min(100, int((self.elapsed_time / max(self.total_time, 1)) * 100))
+        progress = min(100, int((elapsed / max(self.total_time, 1)) * 100))
         self.progressBar.setValue(progress)
 
     def _runState(self):
@@ -602,6 +612,12 @@ class SequencesWidget(PostsToQtThread, QWidget):
 
     def _handle_progress(self, index, sequence_num, status):
         self.sequenceLabel.setText(f"{sequence_num}/{self.total_sequences} sequences")
+        if status == SEQUENCE_COMPLETED and self._durations:
+            # Re-anchor: whatever the finished sequences actually took, what
+            # remains is the estimate of the ones not yet run, from now.
+            completed = sequence_num     # 1-based count == first not-yet-run index
+            self.total_time = (self.session.elapsed_seconds
+                               + sum(self._durations[completed:]))
         row = self._running_rows[index] if 0 <= index < len(self._running_rows) else None
         self.highlightRow(row)
 
@@ -636,15 +652,16 @@ class SequencesWidget(PostsToQtThread, QWidget):
         if not self._ended_early:
             QMessageBox.information(self, "Finished", "Sequence execution finished.")
 
-    def _handle_time_estimate(self, time_to_finish, n_sequences):
-        self.total_time = time_to_finish
+    def _handle_time_estimate(self, durations):
+        self.total_time = sum(durations)
+        self._durations = list(durations)
         self.progressBar.setMaximum(100)  # For percentage
         self.progressBar.setValue(0)
 
     # The worker's callbacks arrive on its thread; each crosses to the Qt
     # thread as a call to its _handle_ method.
-    def setTimeEstimate(self, time_to_finish, n_sequences):
-        self._post_event('_handle_time_estimate', time_to_finish, n_sequences)
+    def setTimeEstimate(self, durations):
+        self._post_event('_handle_time_estimate', durations)
 
     def updateProgress(self, index, sequence_num, status):
         self._post_event('_handle_progress', index, sequence_num, status)

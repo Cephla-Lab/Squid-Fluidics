@@ -33,6 +33,19 @@ _pristine_sleep = _time.sleep
 _pristine_time = _time.time
 _pristine_monotonic = _time.monotonic
 
+# Every binding _fast_clock fakes and real_clock restores -- one list, so the
+# undo cannot silently go partial when a module's from-import binding joins
+# (a from-imported sleep holds its own reference; patching time.sleep alone
+# misses it). Target -> the pristine function it stands in for; _fast_clock
+# derives which fake to install from which pristine it replaces.
+_CLOCK_BINDINGS = {
+    "time.sleep": _pristine_sleep,
+    "time.time": _pristine_time,
+    "time.monotonic": _pristine_monotonic,
+    "fluidics.control.controller.sleep": _pristine_sleep,
+    "fluidics.control.controller.time": _pristine_time,
+}
+
 
 @pytest.fixture
 def real_clock(monkeypatch):
@@ -43,11 +56,8 @@ def real_clock(monkeypatch):
     against it would pass on the broken code too.
     """
     monkeypatch.setattr(threading.Event, "wait", _pristine_wait)
-    monkeypatch.setattr("time.sleep", _pristine_sleep)
-    # Both clocks too, or code that measures how long a wait took (RunControl
-    # .run_for) reads a frozen clock, concludes no time passed, and loops.
-    monkeypatch.setattr("time.time", _pristine_time)
-    monkeypatch.setattr("time.monotonic", _pristine_monotonic)
+    for target, pristine in _CLOCK_BINDINGS.items():
+        monkeypatch.setattr(target, pristine)
 
 
 @pytest.fixture
@@ -251,21 +261,24 @@ def _fast_clock(monkeypatch):
             # let start() return early and a following join() raise.
             return _pristine_wait(self)
         fake_time[0] += timeout
+        # Yield the GIL the way a real wait would, as fake_sleep does: the
+        # simulated flow sensor's publish loop waits on an Event per reading
+        # and would otherwise spin, starving every other thread.
+        real_sleep(0)
         return self.is_set()
 
-    # Patch the time module itself. monotonic moves with the same fake clock:
-    # durations are measured off it (RunControl.run_for), so a test that
-    # advances one clock and reads the other would see no time pass at all.
-    monkeypatch.setattr("time.sleep", fake_sleep)
-    monkeypatch.setattr("time.time", fake_time_fn)
-    monkeypatch.setattr("time.monotonic", fake_time_fn)
-
-    # Patch modules that use 'from time import sleep' or 'from time import time'
-    # No module-level patches for the operations or sequence_utils: their
-    # waits go through RunControl (Event.wait, patched below) and they read
-    # the clock through the time module, patched above.
-    monkeypatch.setattr("fluidics.control.controller.sleep", fake_sleep)
-    monkeypatch.setattr("fluidics.control.controller.time", fake_time_fn)
+    # One list with real_clock (_CLOCK_BINDINGS): the time module itself plus
+    # every module that did 'from time import sleep/time' and so holds its
+    # own reference. monotonic moves with the same fake clock: durations are
+    # measured off it (RunControl.run_for), so a test that advances one clock
+    # and reads the other would see no time pass at all. No module-level
+    # patches for the operations or sequence_utils: their waits go through
+    # RunControl (Event.wait, patched below) and they read the clock through
+    # the time module.
+    fakes = {_pristine_sleep: fake_sleep, _pristine_time: fake_time_fn,
+             _pristine_monotonic: fake_time_fn}
+    for target, pristine in _CLOCK_BINDINGS.items():
+        monkeypatch.setattr(target, fakes[pristine])
 
     # Patch threading.Event.wait (used by DiscPump.aspirate)
     monkeypatch.setattr(threading.Event, "wait", fake_event_wait)

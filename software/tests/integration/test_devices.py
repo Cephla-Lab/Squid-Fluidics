@@ -155,7 +155,7 @@ class TestSurvivableFailures:
         with pytest.raises(RuntimeError, match="expected 1"):
             build_devices(flow_cell_config, simulation=True)
         assert len(started) == 1
-        assert all(s.terminate_reading_thread for s in started)
+        assert all(s._stop_reading.is_set() for s in started)
         assert RecordingController.last.closes == 1
         assert RecordingTCM.last.closes == 1
 

@@ -938,6 +938,10 @@ class FluidControllerSimulation(PacketSubscribers):
         self.data = {
             'selector_valves_pos': {0: 1, 1: 1, 2: 1, 3: 1, 4: 1}
         }
+        # Every command asked of it, in order -- the record the time estimate
+        # reads valve moves from, the way it reads chains from the pump's
+        # `executed`.
+        self.sent = []
         # Never fires — this class has no packet stream — but a real FlowSensor
         # against a simulated controller is a supported combination, so it must
         # offer the same subscribe/unsubscribe surface.
@@ -957,6 +961,7 @@ class FluidControllerSimulation(PacketSubscribers):
         pass
 
     def send_command(self, command, *args):
+        self.sent.append((command,) + args)
         if command == CMD_SET.SET_ROTARY_VALVE:
             self.data['selector_valves_pos'][args[0]] = args[1]
 
