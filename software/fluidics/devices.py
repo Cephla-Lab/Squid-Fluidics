@@ -26,7 +26,7 @@ from .control.syringe_pump import SyringePump, SyringePumpSimulation
 from .control.temperature_controller import TCMController, TCMControllerSimulation
 from .errors import RunControl
 from .experiment_worker import ExperimentWorker
-from .pricing import price_run
+from .time_estimate import estimate_run_time
 from .merfish_operations import MERFISHOperations
 from .open_chamber_operations import OpenChamberOperations
 
@@ -263,14 +263,15 @@ def build_operations(config, devices, on_warning=None):
 
 def build_worker(devices, operations, sequences, callbacks=None):
     """Wire one run's worker to `devices`: the shared run_control, the
-    make_safe callback (which this function owns), and the run's price --
-    replayed against the simulated twin of this config (fluidics.pricing),
-    so the estimate comes from the code that will run the sequences."""
+    make_safe callback (which this function owns), and the run's time
+    estimate -- replayed against the simulated twin of this config
+    (fluidics.time_estimate), so it comes from the code that will run the
+    sequences, one figure per sequence for the display to re-anchor on."""
     callbacks = dict(callbacks or {})
     if "make_safe" in callbacks:
         raise ValueError("build_worker supplies make_safe; do not pass one")
     callbacks["make_safe"] = devices.make_safe
-    seconds, _ = price_run(devices.config, sequences)
+    seconds, durations = estimate_run_time(devices.config, sequences)
     return ExperimentWorker(operations, sequences, devices.config, callbacks,
                             run_control=devices.run_control,
-                            time_to_finish=seconds)
+                            time_to_finish=seconds, durations=durations)

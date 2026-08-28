@@ -109,11 +109,11 @@ class TestEstimate:
         ExperimentWorker(ops, [dict(FLOW, repeat=2), dict(FLOW)], CONFIG,
                          callbacks={
                              "on_estimate":
-                                 lambda t, n: events.append((t, n)),
-                         }, time_to_finish=123.0)
+                                 lambda t, n, durations: events.append((t, n, durations)),
+                         }, time_to_finish=123.0, durations=[41.0, 41.0, 41.0])
         # Fired from the constructor: the GUI sizes its progress bar before
         # the run starts.
-        assert events == [(123.0, 3)]
+        assert events == [(123.0, 3, [41.0, 41.0, 41.0])]
 
 
 class TestRunNarrative:

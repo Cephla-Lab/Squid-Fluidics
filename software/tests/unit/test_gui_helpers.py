@@ -901,3 +901,54 @@ class TestBringupDialogs:
         with pytest.raises(SystemExit):
             gui.FluidicsControlGUI(None, is_simulation=True)
         assert dialogs and "free to rotate" in dialogs[0][1]
+
+
+class TestReAnchoring:
+    """When a sequence completes, what remains is the estimate of the ones
+    not yet run -- whatever the finished ones actually took. Called unbound
+    against stubs."""
+
+    def stub(self, durations, elapsed=100.0):
+        return SimpleNamespace(
+            session=FakeSession(kind="run", elapsed_seconds=elapsed),
+            sequenceLabel=SimpleNamespace(setText=lambda t: None),
+            total_sequences=len(durations), total_time=999.0,
+            _durations=list(durations),
+            _running_rows=[], highlightRow=lambda row: None,
+        )
+
+    def test_a_completed_sequence_reanchors_the_countdown(self):
+        stub = self.stub([60.0, 40.0, 20.0], elapsed=100.0)
+        gui.SequencesWidget._handle_progress(stub, 0, 1, "Completed")
+        assert stub.total_time == pytest.approx(100.0 + 60.0), \
+            "the remainder is the not-yet-run estimates from the clock's now"
+
+    def test_only_a_completion_reanchors(self):
+        stub = self.stub([60.0, 40.0])
+        for status in ("Started", "Incubating", "Paused"):
+            gui.SequencesWidget._handle_progress(stub, 0, 1, status)
+        assert stub.total_time == 999.0
+
+    def test_no_durations_means_no_reanchor(self):
+        stub = self.stub([])
+        gui.SequencesWidget._handle_progress(stub, 0, 1, "Completed")
+        assert stub.total_time == 999.0
+
+
+class TestConfirmStart:
+    def test_the_dialog_carries_the_figures_and_no_means_no(self, monkeypatch):
+        asked = []
+
+        def question(parent, title, text, buttons, default):
+            asked.append(text)
+            return gui.QMessageBox.No
+
+        monkeypatch.setattr(gui.QMessageBox, "question", question)
+        stub = SimpleNamespace()
+        assert gui.SequencesWidget._confirmStart(stub, 3725, 7) is False
+        assert "7 sequence(s)" in asked[0] and "01:02:05" in asked[0]
+
+    def test_yes_starts(self, monkeypatch):
+        monkeypatch.setattr(gui.QMessageBox, "question",
+                            lambda *args: gui.QMessageBox.Yes)
+        assert gui.SequencesWidget._confirmStart(SimpleNamespace(), 60, 1) is True

@@ -10,7 +10,7 @@ _logger = logging.getLogger(__name__)
 
 class ExperimentWorker:
     def __init__(self, experiment_ops, sequences, config, callbacks=None,
-                 run_control=None, time_to_finish=0.0):
+                 run_control=None, time_to_finish=0.0, durations=None):
         """
         Initialize ExperimentWorker with callbacks instead of signals.
 
@@ -24,7 +24,7 @@ class ExperimentWorker:
                 - 'on_error': fn(error_message) -- the run failed, or the
                   instrument stopped it (a flow fault), with its diagnosis
                 - 'on_finished': fn() -- always, last
-                - 'on_estimate': fn(time_to_finish, n_sequences)
+                - 'on_estimate': fn(time_to_finish, n_sequences, durations)
                 - 'make_safe': fn() -> [exceptions it could not act on] --
                   called on the worker thread once a run has ended early,
                   aborted or failed, before on_error; its failures are
@@ -34,9 +34,11 @@ class ExperimentWorker:
                 devices (DeviceSet.run_control) so one abort reaches the
                 operation, the incubation wait, and the check between
                 sequences alike. Private when omitted.
-            time_to_finish: the run's priced duration in seconds, reported
-                through on_estimate; build_worker prices it by replaying the
-                sequences against the simulated rig (fluidics.pricing).
+            time_to_finish: the run's estimated duration in seconds, and
+                durations: one figure per sequence repeat in run order --
+                both reported through on_estimate; build_worker gets them by
+                replaying the sequences against the simulated rig
+                (fluidics.time_estimate).
         """
 
         self.experiment_ops = experiment_ops
@@ -46,13 +48,15 @@ class ExperimentWorker:
         self.run_control = run_control if run_control is not None else RunControl()
 
         self.time_to_finish = time_to_finish
+        self.durations = list(durations or [])
         self.n_sequences = sum(seq.get('repeat', 1) for seq in sequences)
         # The worker narrates its own run: one source feeds the console, the
         # run log, and (via callbacks) whatever UI is attached, so the record
         # exists even when nothing is watching.
         _logger.info("Run of %d sequence(s), estimated %.0f s.",
                      self.n_sequences, self.time_to_finish)
-        self._call_callback('on_estimate', self.time_to_finish, self.n_sequences)
+        self._call_callback('on_estimate', self.time_to_finish, self.n_sequences,
+                            self.durations)
 
     def _call_callback(self, name, *args):
         """Call the callback if one is registered; return what it returns."""

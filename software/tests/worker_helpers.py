@@ -12,7 +12,7 @@ def record_run(ops, sequences, config, run_control=None):
     """
     events = []
     worker = ExperimentWorker(ops, sequences, config, callbacks={
-        "on_estimate": lambda t, n: events.append(("estimate", n)),
+        "on_estimate": lambda t, n, durations: events.append(("estimate", n)),
         "update_progress":
             lambda index, num, status: events.append(("progress", num, status)),
         "make_safe": lambda: events.append(("make_safe",)),
