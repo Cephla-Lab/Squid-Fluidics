@@ -27,6 +27,18 @@ def fixtures_dir():
     return FIXTURES_DIR
 
 
+@pytest.fixture
+def flow_cell_config():
+    from fluidics.control.config import load_config
+    return load_config(str(FIXTURES_DIR / "flow_cell_config.yaml"))
+
+
+@pytest.fixture
+def open_chamber_config():
+    from fluidics.control.config import load_config
+    return load_config(str(FIXTURES_DIR / "open_chamber_config.yaml"))
+
+
 # Captured at import, before _fast_clock patches them.
 _pristine_wait = threading.Event.wait
 _pristine_sleep = _time.sleep

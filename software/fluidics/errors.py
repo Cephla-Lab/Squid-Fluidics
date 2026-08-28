@@ -221,26 +221,24 @@ class RunControl:
         clock, agreeing with what run_for()/delay() charge: a held run
         spends nothing, a pause still in flight still counts. Zero before
         the clock has been started."""
-        with self._lock:
-            return self._running_seconds_locked()
-
-    def _running_seconds_locked(self):
-        if self._clock_started is None:
-            return 0.0
-        now = time.monotonic()
-        parked = self._parked_total
-        if self._parked_since is not None:
-            parked += now - self._parked_since
-        return now - self._clock_started - parked
+        return self.snapshot().running_seconds
 
     def snapshot(self):
         """cancelled, paused, at_rest and running_seconds, read under one
         lock. For displays: read separately, a pre-pause clock can be
-        paired with a post-pause label -- one read, one instant."""
+        paired with a post-pause label -- one read, one instant. The flags
+        come from the properties, so at_rest keeps its one composition."""
         with self._lock:
-            return ControlSnapshot(self._cause is not None, self._paused,
-                                   self._paused and self._holding > 0,
-                                   self._running_seconds_locked())
+            if self._clock_started is None:
+                seconds = 0.0
+            else:
+                now = time.monotonic()
+                parked = self._parked_total
+                if self._parked_since is not None:
+                    parked += now - self._parked_since
+                seconds = now - self._clock_started - parked
+            return ControlSnapshot(self.cancelled, self.paused, self.at_rest,
+                                   seconds)
 
     @property
     def paused(self):

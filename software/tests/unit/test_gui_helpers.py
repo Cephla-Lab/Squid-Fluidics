@@ -22,6 +22,7 @@ def _bind(name, stub, cls=None):
     cls = cls or gui.SequencesWidget
     return lambda *args: getattr(cls, name)(stub, *args)
 from fluidics.flow_monitor import FlowFault
+from fluidics.run_session import SessionSnapshot
 from fluidics.subscribers import Subscribers
 
 
@@ -73,7 +74,9 @@ class FakeSession:
         self.state = Subscribers("fake session state")
 
     def snapshot(self):
-        return SimpleNamespace(kind=self.kind, cancelled=self.cancelled,
+        # The real namedtuple, keyword-constructed: a renamed or added
+        # field fails here instead of silently drifting from the widget.
+        return SessionSnapshot(kind=self.kind, cancelled=self.cancelled,
                                paused=self.paused, at_rest=self.at_rest,
                                elapsed_seconds=self.elapsed_seconds)
 
@@ -190,11 +193,13 @@ class TestIncludedRows:
     def test_returns_included_rows_in_model_order(self):
         stub = SimpleNamespace(_sequences=[
             {"include": True}, {"include": False}, {"include": True},
-            {}, {"include": False}])
+            {}, {"include": False}],
+            _isIncluded=gui.SequencesWidget._isIncluded)
         assert gui.SequencesWidget._includedRows(stub) == [0, 2, 3]
 
     def test_nothing_included_gives_no_rows(self):
-        stub = SimpleNamespace(_sequences=[{"include": False}, {"include": False}])
+        stub = SimpleNamespace(_sequences=[{"include": False}, {"include": False}],
+                               _isIncluded=gui.SequencesWidget._isIncluded)
         assert gui.SequencesWidget._includedRows(stub) == []
 
 
@@ -421,10 +426,7 @@ class TestAbortSequences:
     so Abort needs no resume first. Called unbound against a stub."""
 
     def test_abort_goes_through_the_session_and_kills_the_controls(self):
-        stub = SimpleNamespace(session=FakeSession(kind="run"),
-                               runButton=Button(), pauseButton=Button(), abortButton=Button(),
-                               _blockingError=lambda: None)
-        stub._renderRunControls = _bind("_renderRunControls", stub)
+        stub = run_widget()
         gui.SequencesWidget.abortSequences(stub)
         assert stub.session.calls == ["abort"]
         # The run is over; there is nothing left to hold or to abort.
@@ -486,18 +488,28 @@ class TestRunFinished:
         gui.SequencesWidget._handle_state(stub, "manual")
         assert stopped == []
 
+    def test_a_manual_jobs_start_deadens_this_tabs_controls(self):
+        """Every state transition redraws the buttons: a manual move must
+        deaden Run here without the main window's tab guard helping."""
+        stub = run_widget()
+        stub.session.kind = "manual"
+        gui.SequencesWidget._handle_state(stub, "manual")
+        assert stub.runButton.enabled is False
+        assert stub.moveUpButton.enabled is False
 
-def run_widget(paused=False, at_rest=False, total_time=100, elapsed=0,
-               worker=True):
+
+def run_widget(paused=False, at_rest=False, total_time=100, elapsed=0):
     """A SequencesWidget stub mid-run, for the clock-and-buttons methods
     called unbound -- constructing the real widget needs a QApplication.
     Module-level beside the fakes it is built from: more than one test class
     paints against it."""
-    session = FakeSession(kind="run" if worker else None, paused=paused,
+    session = FakeSession(kind="run", paused=paused,
                           at_rest=at_rest, elapsed_seconds=elapsed)
     stub = SimpleNamespace(
         session=session,
         runButton=Button(), pauseButton=Button(), abortButton=Button(),
+        loadButton=Button(), addButton=Button(), removeButton=Button(),
+        duplicateButton=Button(), moveUpButton=Button(), moveDownButton=Button(),
         timeLabel=SimpleNamespace(setText=lambda text: None),
         progressBar=SimpleNamespace(setValue=lambda value: None),
         timer=SimpleNamespace(stop=lambda: None),

@@ -124,7 +124,7 @@ class TestARun:
     def test_pause_and_resume_reach_the_run(self, session, ops, real_clock):
         session.start([INCUBATING], ops)
         assert session.pause() is True
-        assert wait_until(lambda: session.at_rest)
+        assert wait_until(lambda: session.snapshot().at_rest)
         assert session.resume() is True
         assert not session.paused
         session.abort()
@@ -342,3 +342,27 @@ class TestSnapshot:
         assert session.wait()      # untimed: a timed wait cannot block under the fake clock
         snap = session.snapshot()
         assert snap.kind is None and not snap.paused and not snap.cancelled
+
+    def test_kind_and_control_are_read_under_one_lock(self, session):
+        """A job must not start or finish between the two reads -- the
+        control is read with the session's lock still held, or the snapshot
+        can pair one job's kind with another's flags."""
+        held = []
+        original = session.control.snapshot
+
+        def probing():
+            # From another thread, a held session lock refuses the acquire.
+            def probe():
+                if session._lock.acquire(blocking=False):
+                    session._lock.release()
+                    held.append(False)
+                else:
+                    held.append(True)
+            prober = threading.Thread(target=probe)
+            prober.start()
+            prober.join()
+            return original()
+
+        session.control.snapshot = probing
+        session.snapshot()
+        assert held == [True], "the session lock was dropped before the control read"
