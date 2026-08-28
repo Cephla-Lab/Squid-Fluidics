@@ -518,15 +518,13 @@ class SequencesWidget(PostsToQtThread, QWidget):
         self.timer.start(1000)
 
     def updateTimeRemaining(self):
-        """The one-second tick: spend a second unless the run is stopped.
-
-        A run at rest spends no time, the way the incubation clock does. A
-        pause that has been asked for but not yet reached still counts -- the
-        move in flight really is running.
+        """The one-second repaint. The session's clock is the truth -- it
+        excludes held time precisely, where a tick counter charged whole
+        seconds by which side of a pause the tick landed on -- so the tick
+        only reads and paints.
         """
         paused, at_rest = self._runState()
-        if not at_rest:
-            self.elapsed_time += 1  # Add one second
+        self.elapsed_time = self.session.elapsed_seconds
         self._showTimeRemaining(self._pauseSuffix(paused, at_rest))
         # Runs until _handle_finished stops it, not until the estimate hits
         # zero: a run can outlive its estimate, and a flow fault cancels

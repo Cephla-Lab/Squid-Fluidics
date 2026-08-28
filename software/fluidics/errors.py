@@ -124,6 +124,8 @@ class RunControl:
         self._cause = None
         self._paused = False
         self._holding = 0
+        self._clock_started = None
+        self._parked_total = 0.0
         self._local = _ThreadState()
 
     def cancel(self, cause=None):
@@ -196,6 +198,22 @@ class RunControl:
             if self._cause is None:
                 self._interrupted.clear()
         return True
+
+    def restart_clock(self):
+        """Start counting this run's running time from now."""
+        with self._lock:
+            self._clock_started = time.monotonic()
+            self._parked_total = 0.0
+
+    def running_seconds(self):
+        """Wall seconds since restart_clock(), minus every span a thread
+        spent parked at a gate: the display's clock, agreeing with what
+        run_for()/delay() charge -- a held run spends nothing, a pause still
+        in flight still counts. Zero before the clock has been started."""
+        with self._lock:
+            if self._clock_started is None:
+                return 0.0
+            return time.monotonic() - self._clock_started - self._parked_total
 
     @property
     def paused(self):
@@ -307,6 +325,7 @@ class RunControl:
         try:
             for on_hold, _ in hooks:
                 on_hold()
+            parked_at = time.monotonic()
             with self._lock:
                 self._holding += 1
             try:
@@ -314,6 +333,8 @@ class RunControl:
             finally:
                 with self._lock:
                     self._holding -= 1
+                    # The held span comes off the running clock.
+                    self._parked_total += time.monotonic() - parked_at
             self.check()
             for _, on_release in reversed(hooks):
                 on_release()

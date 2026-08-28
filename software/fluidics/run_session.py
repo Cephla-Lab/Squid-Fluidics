@@ -62,6 +62,11 @@ class RunSession:
         return self.control.at_rest
 
     @property
+    def elapsed_seconds(self):
+        """This job's running time so far: wall time minus held spans."""
+        return self.control.running_seconds()
+
+    @property
     def cancelled(self):
         """The job is unwinding after an abort or a fault; the rig reads
         busy until it has."""
@@ -127,6 +132,7 @@ class RunSession:
                 raise RuntimeError(f"the rig is busy: a {self._kind} is in progress")
             self._kind = kind
             self._done.clear()
+            self.control.restart_clock()
             self.state.notify(kind)
 
         def job():

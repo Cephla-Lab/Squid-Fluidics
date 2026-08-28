@@ -26,6 +26,7 @@ from .control.syringe_pump import SyringePump, SyringePumpSimulation
 from .control.temperature_controller import TCMController, TCMControllerSimulation
 from .errors import RunControl
 from .experiment_worker import ExperimentWorker
+from .pricing import price_run
 from .merfish_operations import MERFISHOperations
 from .open_chamber_operations import OpenChamberOperations
 
@@ -147,7 +148,7 @@ class DeviceSet:
         return _run_shielded(steps)
 
 
-def build_devices(config, simulation=False, on_issue=None):
+def build_devices(config, simulation=False, on_issue=None, run_control=None):
     """Construct and start the full stack for `config`. Returns a DeviceSet.
 
     Mirrors what the two entry points did, once: construct controller, syringe
@@ -171,7 +172,7 @@ def build_devices(config, simulation=False, on_issue=None):
     tc_cls = TCMControllerSimulation if simulation else TCMController
 
     # One cancellation signal for the whole run -- see RunControl.
-    run_control = RunControl()
+    run_control = run_control if run_control is not None else RunControl()
     controller = controller_cls(config.microcontroller.serial_number)
     syringe_pump = pump_cls(
         sn=config.syringe_pump.serial_number,
@@ -261,11 +262,15 @@ def build_operations(config, devices, on_warning=None):
 
 
 def build_worker(devices, operations, sequences, callbacks=None):
-    """Wire one run's worker to `devices`: the shared run_control, and the
-    make_safe callback, which this function owns."""
+    """Wire one run's worker to `devices`: the shared run_control, the
+    make_safe callback (which this function owns), and the run's price --
+    replayed against the simulated twin of this config (fluidics.pricing),
+    so the estimate comes from the code that will run the sequences."""
     callbacks = dict(callbacks or {})
     if "make_safe" in callbacks:
         raise ValueError("build_worker supplies make_safe; do not pass one")
     callbacks["make_safe"] = devices.make_safe
+    seconds, _ = price_run(devices.config, sequences)
     return ExperimentWorker(operations, sequences, devices.config, callbacks,
-                            run_control=devices.run_control)
+                            run_control=devices.run_control,
+                            time_to_finish=seconds)

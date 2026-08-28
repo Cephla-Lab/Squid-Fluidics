@@ -102,19 +102,18 @@ class TestFailurePath:
 
 class TestEstimate:
     def test_the_estimate_arrives_before_run_and_counts_repeats(self):
+        """The seconds are priced by build_worker (fluidics.pricing) and
+        reported verbatim; the worker only counts the repeats."""
         ops = RecordingOps()
         events = []
         ExperimentWorker(ops, [dict(FLOW, repeat=2), dict(FLOW)], CONFIG,
                          callbacks={
                              "on_estimate":
                                  lambda t, n: events.append((t, n)),
-                         })
+                         }, time_to_finish=123.0)
         # Fired from the constructor: the GUI sizes its progress bar before
         # the run starts.
-        assert len(events) == 1
-        seconds, n = events[0]
-        assert n == 3
-        assert seconds > 0
+        assert events == [(123.0, 3)]
 
 
 class TestRunNarrative:

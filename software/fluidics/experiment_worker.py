@@ -10,7 +10,7 @@ _logger = logging.getLogger(__name__)
 
 class ExperimentWorker:
     def __init__(self, experiment_ops, sequences, config, callbacks=None,
-                 run_control=None):
+                 run_control=None, time_to_finish=0.0):
         """
         Initialize ExperimentWorker with callbacks instead of signals.
 
@@ -34,6 +34,9 @@ class ExperimentWorker:
                 devices (DeviceSet.run_control) so one abort reaches the
                 operation, the incubation wait, and the check between
                 sequences alike. Private when omitted.
+            time_to_finish: the run's priced duration in seconds, reported
+                through on_estimate; build_worker prices it by replaying the
+                sequences against the simulated rig (fluidics.pricing).
         """
 
         self.experiment_ops = experiment_ops
@@ -42,7 +45,8 @@ class ExperimentWorker:
         self.callbacks = callbacks or {}
         self.run_control = run_control if run_control is not None else RunControl()
 
-        self.time_to_finish, self.n_sequences = self.get_time_to_finish()
+        self.time_to_finish = time_to_finish
+        self.n_sequences = sum(seq.get('repeat', 1) for seq in sequences)
         # The worker narrates its own run: one source feeds the console, the
         # run log, and (via callbacks) whatever UI is attached, so the record
         # exists even when nothing is watching.
@@ -56,25 +60,6 @@ class ExperimentWorker:
         if callback:
             return callback(*args)
         return None
-
-    def get_time_to_finish(self):
-        total_time = 0
-        total_sequences = 0
-        for seq in self.sequences:
-            if seq['type'] == "set_temperature":
-                t = seq.get('incubation_time', 0) * 60 + 60
-            else:
-                t = seq.get('volume', 0) / max(seq.get('flow_rate', 1), 1) * 60
-                if seq.get('fill_tubing_with'):
-                    t += self.config.reagent_selection.common_tubing_fluid_amount_ul / max(seq.get('flow_rate', 1), 1) * 60 + 1
-                if seq.get('incubation_time', 0) > 0:
-                    t += seq['incubation_time'] * 60
-                t += 2
-            repeat = seq.get('repeat', 1)
-            t = t * repeat
-            total_time += t
-            total_sequences += repeat
-        return total_time, total_sequences
 
     def wait_for_incubation(self, time_minutes):
         # Running time: a pause stops the incubation clock and the remainder

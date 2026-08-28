@@ -56,11 +56,13 @@ class FakeSession:
     """The RunSession as the widgets see it: a kind, the state that follows
     from it, and the controls recorded."""
 
-    def __init__(self, kind=None, paused=False, at_rest=False, cancelled=False):
+    def __init__(self, kind=None, paused=False, at_rest=False, cancelled=False,
+                 elapsed_seconds=0.0):
         self.kind = kind
         self.paused = paused
         self.at_rest = at_rest
         self.cancelled = cancelled
+        self.elapsed_seconds = elapsed_seconds
         self.calls = []
 
     @property
@@ -488,7 +490,8 @@ class TestPauseControls:
     @staticmethod
     def widget(paused=False, at_rest=False, total_time=100, elapsed=0,
                worker=True):
-        session = FakeSession(kind="run" if worker else None, paused=paused, at_rest=at_rest)
+        session = FakeSession(kind="run" if worker else None, paused=paused,
+                              at_rest=at_rest, elapsed_seconds=elapsed)
         stub = SimpleNamespace(
             session=session,
             runButton=Button(), pauseButton=Button(), abortButton=Button(),
@@ -496,7 +499,7 @@ class TestPauseControls:
             progressBar=SimpleNamespace(setValue=lambda value: None),
             timer=SimpleNamespace(stop=lambda: None),
             total_time=total_time,
-            elapsed_time=elapsed,
+            elapsed_time=0,
             calls=session.calls,
         )
         # The widget's methods call back into self, so an unbound call needs
@@ -507,22 +510,23 @@ class TestPauseControls:
         stub.__dict__["_pauseSuffix"] = gui.SequencesWidget._pauseSuffix
         return stub
 
-    @pytest.mark.parametrize("paused, at_rest, suffix, spends_time", [
-        (False, False, "", True),
-        (True, False, " (pausing\u2026)", True),    # the move in flight still counts
-        (True, True, " (paused)", False),           # stopped: no time passes
+    @pytest.mark.parametrize("paused, at_rest, suffix", [
+        (False, False, ""),
+        (True, False, " (pausing\u2026)"),
+        (True, True, " (paused)"),
         # (False, True) cannot arise: RunControl.at_rest is paused *and*
         # something parked, pinned in test_errors.py.
     ])
-    def test_the_two_moments_and_what_each_costs(self, paused, at_rest, suffix,
-                                                 spends_time):
+    def test_the_two_moments_and_their_label(self, paused, at_rest, suffix):
+        """What each costs is the clock's business now (TestRunningClock in
+        test_errors); the tick paints the session's figure with the suffix."""
         shown = []
-        stub = self.widget(paused=paused, at_rest=at_rest)
+        stub = self.widget(paused=paused, at_rest=at_rest, elapsed=7)
         stub.timeLabel = SimpleNamespace(setText=shown.append)
         assert gui.SequencesWidget._pauseSuffix(paused, at_rest) == suffix
         gui.SequencesWidget.updateTimeRemaining(stub)
-        assert stub.elapsed_time == (1 if spends_time else 0)
-        assert shown == [f"00:01:{40 - int(spends_time):02d} remaining{suffix}"]
+        assert stub.elapsed_time == 7, "the tick counted instead of reading"
+        assert shown == [f"00:01:33 remaining{suffix}"]
 
     def test_the_state_is_read_once_a_tick(self):
         """The clock decision and the label it prints must come from the same
@@ -531,7 +535,7 @@ class TestPauseControls:
         reads = []
 
         class Control:
-            kind, busy, cancelled = "run", True, False
+            kind, busy, cancelled, elapsed_seconds = "run", True, False, 0.0
 
             @property
             def paused(self):
@@ -560,11 +564,13 @@ class TestPauseControls:
         assert stub.calls == ["resume"]
         assert stub.pauseButton.text() == "Pause"
 
-    def test_a_press_costs_the_estimate_nothing(self):
-        """The press refreshes the label; going through the one-second tick to
-        do that would charge a second of the run for every click."""
+    def test_a_press_repaints_the_label_without_touching_the_clock(self):
+        """The press redraws the last-painted state with the new suffix; the
+        clock is the session's and only the tick reads it. (Before the clock
+        moved, a press routed through the tick charged a second per click.)"""
         shown = []
         stub = self.widget(elapsed=10)
+        stub.elapsed_time = 10               # what the last tick painted
         stub.timeLabel = SimpleNamespace(setText=shown.append)
         gui.SequencesWidget.pauseSequences(stub)
         assert stub.elapsed_time == 10
@@ -820,7 +826,7 @@ class TestRunDisplayClocks:
         gui.SequencesWidget.updateTimeRemaining(stub)
         assert stopped == [], "the tick stopped on the estimate, not the run"
         assert shown == ["00:00:00 remaining"]
-        assert stub.elapsed_time == 201
+        assert stub.elapsed_time == 200
 
 
 class TestPickConfig:
