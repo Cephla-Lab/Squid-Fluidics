@@ -19,6 +19,7 @@ names `Cancelled`, the base -- not a tuple of concrete types that someone
 forgets to extend when the next kind of fault arrives.
 """
 
+import collections
 import contextlib
 import logging
 import threading
@@ -69,6 +70,11 @@ class _ThreadState(threading.local):
 
     def __init__(self):
         self.hooks = []
+
+
+# One consistent read of the signal's state, from RunControl.snapshot().
+ControlSnapshot = collections.namedtuple(
+    "ControlSnapshot", "cancelled paused at_rest running_seconds")
 
 
 class RunControl:
@@ -215,14 +221,24 @@ class RunControl:
         clock, agreeing with what run_for()/delay() charge: a held run
         spends nothing, a pause still in flight still counts. Zero before
         the clock has been started."""
+        return self.snapshot().running_seconds
+
+    def snapshot(self):
+        """cancelled, paused, at_rest and running_seconds, read under one
+        lock. For displays: read separately, a pre-pause clock can be
+        paired with a post-pause label -- one read, one instant. The flags
+        come from the properties, so at_rest keeps its one composition."""
         with self._lock:
             if self._clock_started is None:
-                return 0.0
-            now = time.monotonic()
-            parked = self._parked_total
-            if self._parked_since is not None:
-                parked += now - self._parked_since
-            return now - self._clock_started - parked
+                seconds = 0.0
+            else:
+                now = time.monotonic()
+                parked = self._parked_total
+                if self._parked_since is not None:
+                    parked += now - self._parked_since
+                seconds = now - self._clock_started - parked
+            return ControlSnapshot(self.cancelled, self.paused, self.at_rest,
+                                   seconds)
 
     @property
     def paused(self):

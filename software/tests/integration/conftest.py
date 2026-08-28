@@ -1,7 +1,6 @@
 # tests/integration/conftest.py
 import pytest
 
-from fluidics.control.config import load_config
 from fluidics.control.controller import FluidControllerSimulation
 from fluidics.control.disc_pump import DiscPump
 from fluidics.control.selector_valve import SelectorValveSystem
@@ -71,16 +70,6 @@ def built():
     yield _build
     close_errors = [e for d in device_sets for e in d.close()]
     assert close_errors == []
-
-
-@pytest.fixture
-def flow_cell_config(fixtures_dir):
-    return load_config(str(fixtures_dir / "flow_cell_config.yaml"))
-
-
-@pytest.fixture
-def open_chamber_config(fixtures_dir):
-    return load_config(str(fixtures_dir / "open_chamber_config.yaml"))
 
 
 def _make_sim_hardware(config):

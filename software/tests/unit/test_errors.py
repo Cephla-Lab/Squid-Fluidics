@@ -505,3 +505,25 @@ class TestHolding:
         control.resume()
         assert finished.wait(2)
         assert control.holding == 0
+
+
+class TestSnapshot:
+    def test_idle_reads_all_clear(self):
+        control = RunControl()
+        snap = control.snapshot()
+        assert (snap.cancelled, snap.paused, snap.at_rest) == (False, False, False)
+        assert snap.running_seconds == 0.0
+
+    def test_one_read_carries_the_hold_and_its_clock_together(self, real_clock, parks):
+        """The snapshot's clock agrees with its flags: read while parked, it
+        says at_rest and a clock that has already stopped counting."""
+        control = RunControl()
+        control.restart_clock()
+        control.pause()
+        finished, error = parks(control, control.checkpoint)
+        snap = control.snapshot()
+        assert snap.paused and snap.at_rest and not snap.cancelled
+        assert snap.running_seconds == pytest.approx(control.running_seconds(),
+                                                     abs=0.05)
+        control.resume()
+        assert finished.wait(2) and not error

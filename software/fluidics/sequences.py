@@ -226,6 +226,30 @@ def save_sequences_yaml(sequences: list[dict], path: str) -> None:
         yaml.safe_dump({"sequences": reordered}, f, default_flow_style=False, sort_keys=False)
 
 
+def sequence_port_problems(seq: dict, limit: int) -> list[str]:
+    """The out-of-range port fields of one sequence, as "field=value"
+    messages; empty when every port fits within `limit`.
+
+    A falsy fill_tubing_with (None, or the GUI dialog's 0) means "no fill"
+    and is skipped, matching how the operations interpret it.
+
+    The port-valued fields are listed here by hand -- there is no model
+    metadata to derive them from. A new sequence type that carries a port
+    under another name must be added below, or it only fails at run time
+    through open_port's backstop. This is the one copy of that list: the
+    entry points' pre-run check and the GUI's live per-row validation both
+    read it.
+    """
+    problems = []
+    port = seq.get("fluidic_port")
+    if port is not None and not 1 <= port <= limit:
+        problems.append(f"fluidic_port={port}")
+    fill = seq.get("fill_tubing_with")
+    if fill and not 1 <= fill <= limit:
+        problems.append(f"fill_tubing_with={fill}")
+    return problems
+
+
 def check_ports_against_config(sequences: list[dict], config) -> None:
     """Raise ValueError if any sequence names a port the rig does not have.
 
@@ -234,25 +258,13 @@ def check_ports_against_config(sequences: list[dict], config) -> None:
     out-of-range port survived loading and reached SelectorValveSystem at
     run time, hours into an experiment. Both entry points call this before
     anything moves, so a typo fails at time zero with the sequence named.
-
-    A falsy fill_tubing_with (None, or the GUI dialog's 0) means "no fill"
-    and is skipped, matching how the operations interpret it.
-
-    The port-valued fields are listed here by hand -- there is no model
-    metadata to derive them from. A new sequence type that carries a port
-    under another name must be added below, or it only fails at run time
-    through open_port's backstop.
     """
     limit = available_port_count(config)
     problems = []
     for index, seq in enumerate(sequences):
         label = seq.get("name") or seq["type"]
-        port = seq.get("fluidic_port")
-        if port is not None and not 1 <= port <= limit:
-            problems.append(f"sequence {index} ({label}): fluidic_port={port}")
-        fill = seq.get("fill_tubing_with")
-        if fill and not 1 <= fill <= limit:
-            problems.append(f"sequence {index} ({label}): fill_tubing_with={fill}")
+        problems.extend(f"sequence {index} ({label}): {problem}"
+                        for problem in sequence_port_problems(seq, limit))
     if problems:
         raise ValueError(
             f"Ports out of range -- this configuration has ports "
