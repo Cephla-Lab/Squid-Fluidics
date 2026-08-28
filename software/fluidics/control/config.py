@@ -248,9 +248,20 @@ def save_config(config: FluidicsConfig, config_path: str) -> str:
     base, ext = os.path.splitext(config_path)
     if ext == '.json':
         config_path = base + '.yaml'
-    values = config.model_dump(exclude_none=True)
+    # exclude_unset: only what the file provided or the operator assigned.
+    # A full dump would add every unset default to the file and (with
+    # exclude_none) delete an explicit `dispense_port: null` line together
+    # with any comment riding it -- assignment marks a field as set, so a
+    # cleared name_mapping still writes (as an explicit null).
+    values = config.model_dump(exclude_unset=True)
     yaml_rt = ruamel.yaml.YAML()    # round-trip mode: keeps comments
     yaml_rt.preserve_quotes = True
+    # Spell None as `null`, the way the configs write it -- ruamel's default
+    # is an empty scalar, which would restyle every explicit null on save.
+    yaml_rt.representer.add_representer(
+        type(None),
+        lambda representer, _: representer.represent_scalar(
+            'tag:yaml.org,2002:null', 'null'))
     try:
         with open(config_path) as f:
             document = yaml_rt.load(f)
