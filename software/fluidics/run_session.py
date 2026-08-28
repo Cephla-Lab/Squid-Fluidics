@@ -10,6 +10,7 @@ abort from anywhere stops whichever job is running.
 Qt-free. Callbacks run on the job's thread; a GUI posts them across.
 """
 
+import collections
 import logging
 import threading
 import time
@@ -21,6 +22,11 @@ from .subscribers import Subscribers
 from .time_estimate import estimate_run_time
 
 _logger = logging.getLogger(__name__)
+
+
+# What a display needs to draw the run, in one read: RunSession.snapshot().
+SessionSnapshot = collections.namedtuple(
+    "SessionSnapshot", "kind cancelled paused at_rest elapsed_seconds")
 
 
 class RunSession:
@@ -72,6 +78,18 @@ class RunSession:
         """The job is unwinding after an abort or a fault; the rig reads
         busy until it has."""
         return self.control.cancelled
+
+    def snapshot(self):
+        """The display's inputs in one call: the job's kind, and the
+        control's state read under its one lock -- so the clock a label
+        prints and the pause it names come from the same instant. kind is
+        read under the session's own lock; each family is consistent within
+        itself."""
+        with self._lock:
+            kind = self._kind
+        control = self.control.snapshot()
+        return SessionSnapshot(kind, control.cancelled, control.paused,
+                               control.at_rest, control.running_seconds)
 
     # --- starting a job ---
 

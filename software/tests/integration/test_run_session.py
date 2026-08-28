@@ -328,3 +328,17 @@ class TestWait:
                       callbacks={"on_finished": lambda: waited.append(session.wait(1))})
         assert session.wait(5)
         assert waited == [True]
+
+
+class TestSnapshot:
+    def test_the_snapshot_names_the_job_and_ends_with_it(self, session):
+        """One call carries what a display draws: the job's kind and the
+        control's state. Idle before, named during, idle again after."""
+        assert session.snapshot().kind is None
+        gate = threading.Event()
+        session.run_manual(gate.wait)
+        assert wait_until(lambda: session.snapshot().kind == "manual")
+        gate.set()
+        assert session.wait()      # untimed: a timed wait cannot block under the fake clock
+        snap = session.snapshot()
+        assert snap.kind is None and not snap.paused and not snap.cancelled

@@ -22,14 +22,17 @@ def _bind(name, stub, cls=None):
     cls = cls or gui.SequencesWidget
     return lambda *args: getattr(cls, name)(stub, *args)
 from fluidics.flow_monitor import FlowFault
+from fluidics.subscribers import Subscribers
 
 
 class Button:
-    """A QPushButton's text and enabled state, as the widgets use them."""
+    """A QPushButton's text, enabled state and tooltip, as the widgets use
+    them."""
 
     def __init__(self, text="Pause"):
         self._text = text
         self.enabled = None
+        self.tooltip = None
 
     def text(self):
         return self._text
@@ -39,6 +42,9 @@ class Button:
 
     def setEnabled(self, enabled):
         self.enabled = enabled
+
+    def setToolTip(self, text):
+        self.tooltip = text
 
 
 class Quiet:
@@ -64,6 +70,12 @@ class FakeSession:
         self.cancelled = cancelled
         self.elapsed_seconds = elapsed_seconds
         self.calls = []
+        self.state = Subscribers("fake session state")
+
+    def snapshot(self):
+        return SimpleNamespace(kind=self.kind, cancelled=self.cancelled,
+                               paused=self.paused, at_rest=self.at_rest,
+                               elapsed_seconds=self.elapsed_seconds)
 
     @property
     def busy(self):
@@ -169,40 +181,21 @@ class TestHighlightFollowsCheckedRows:
         assert stub.highlighted == [None]
 
 
-class TestCheckedRows:
-    """_checkedRows is both the row filter getSequences(selected_only=True)
-    iterates and the snapshot _handle_progress translates through, so it must
-    list the checked rows in tree order.
+class TestIncludedRows:
+    """_includedRows is both the filter getSequences(selected_only=True)
+    applies and the snapshot _handle_progress translates through, so it must
+    list the included model rows in order.
     """
 
-    class FakeItem:
-        def __init__(self, checked):
-            self._checked = checked
+    def test_returns_included_rows_in_model_order(self):
+        stub = SimpleNamespace(_sequences=[
+            {"include": True}, {"include": False}, {"include": True},
+            {}, {"include": False}])
+        assert gui.SequencesWidget._includedRows(stub) == [0, 2, 3]
 
-        def checkState(self, column):
-            return gui.Qt.Checked if self._checked else gui.Qt.Unchecked
-
-    class FakeTree:
-        def __init__(self, states):
-            self._items = [TestCheckedRows.FakeItem(s) for s in states]
-
-        def topLevelItemCount(self):
-            return len(self._items)
-
-        def topLevelItem(self, i):
-            return self._items[i]
-
-    class Stub:
-        def __init__(self, tree):
-            self.tree = tree
-
-    def test_returns_checked_rows_in_tree_order(self):
-        stub = self.Stub(self.FakeTree([True, False, True, False, True]))
-        assert gui.SequencesWidget._checkedRows(stub) == [0, 2, 4]
-
-    def test_nothing_checked_gives_no_rows(self):
-        stub = self.Stub(self.FakeTree([False, False]))
-        assert gui.SequencesWidget._checkedRows(stub) == []
+    def test_nothing_included_gives_no_rows(self):
+        stub = SimpleNamespace(_sequences=[{"include": False}, {"include": False}])
+        assert gui.SequencesWidget._includedRows(stub) == []
 
 
 class TestRecordingSaveDialog:
@@ -429,7 +422,8 @@ class TestAbortSequences:
 
     def test_abort_goes_through_the_session_and_kills_the_controls(self):
         stub = SimpleNamespace(session=FakeSession(kind="run"),
-                               runButton=Button(), pauseButton=Button(), abortButton=Button())
+                               runButton=Button(), pauseButton=Button(), abortButton=Button(),
+                               _blockingError=lambda: None)
         stub._renderRunControls = _bind("_renderRunControls", stub)
         gui.SequencesWidget.abortSequences(stub)
         assert stub.session.calls == ["abort"]
@@ -444,7 +438,10 @@ class TestAbortSequences:
 
 
 class TestRunFinished:
-    """Called unbound against a stub."""
+    """The session's state change resets the display; the worker's callbacks
+    only report. Driven here in the order the events are posted: the job
+    ends (state None), any early-end report, then on_finished. Called
+    unbound against stubs."""
 
     def _finishing(self, monkeypatch):
         order = []
@@ -459,6 +456,7 @@ class TestRunFinished:
 
     def test_a_completed_run_redraws_the_controls_then_says_finished(self, monkeypatch):
         stub, order = self._finishing(monkeypatch)
+        gui.SequencesWidget._handle_state(stub, None)
         gui.SequencesWidget._handle_finished(stub)
         assert order == ["render", ("info", "Finished")]
 
@@ -466,15 +464,27 @@ class TestRunFinished:
         """The operator pressed Abort: one dialog saying so, not an Error
         followed by a Finished."""
         stub, order = self._finishing(monkeypatch)
+        gui.SequencesWidget._handle_state(stub, None)
         gui.SequencesWidget._handle_stopped(stub)
         gui.SequencesWidget._handle_finished(stub)
-        assert order == [("info", "Stopped"), "render"]
+        assert order == ["render", ("info", "Stopped")]
 
     def test_a_failed_run_says_why_once(self, monkeypatch):
         stub, order = self._finishing(monkeypatch)
+        gui.SequencesWidget._handle_state(stub, None)
         gui.SequencesWidget._handle_error(stub, "pump fault")
         gui.SequencesWidget._handle_finished(stub)
-        assert order == [("error", "Error"), "render"]
+        assert order == ["render", ("error", "Error")]
+
+    def test_a_jobs_start_resets_nothing(self):
+        """Only the end of a job clears the display: a kind announcement
+        must not stop the clock the button handler just started."""
+        stopped = []
+        stub = Quiet()
+        stub.timer = SimpleNamespace(stop=lambda: stopped.append(True))
+        gui.SequencesWidget._handle_state(stub, "run")
+        gui.SequencesWidget._handle_state(stub, "manual")
+        assert stopped == []
 
 
 def run_widget(paused=False, at_rest=False, total_time=100, elapsed=0,
@@ -496,10 +506,11 @@ def run_widget(paused=False, at_rest=False, total_time=100, elapsed=0,
     )
     # The widget's methods call back into self, so an unbound call needs
     # them on the stub too.
-    for name in ("_runState", "_showTimeRemaining", "_renderRunControls"):
+    for name in ("_showTimeRemaining", "_renderRunControls"):
         stub.__dict__[name] = _bind(name, stub)
-    # A static method needs no stub of its own.
+    # A static method needs no stub of its own; a valid list blocks nothing.
     stub.__dict__["_pauseSuffix"] = gui.SequencesWidget._pauseSuffix
+    stub.__dict__["_blockingError"] = lambda: None
     return stub
 
 
@@ -532,29 +543,27 @@ class TestPauseControls:
         # clock rather than counting one of its own.
         assert shown == [f"00:01:33 remaining{suffix}"]
 
-    def test_the_state_is_read_once_a_tick(self):
-        """The clock decision and the label it prints must come from the same
-        instant: another thread owns these, and a tick that read twice could
-        decline to charge a second and then print "(pausing...)"."""
+    def test_the_label_and_its_clock_come_from_one_snapshot(self):
+        """The clock a line prints and the pause it names must come from the
+        same instant: another thread owns them, and a paint that read twice
+        could pair a pre-pause clock with a post-pause label."""
         reads = []
+        session = FakeSession(kind="run", paused=True, at_rest=True,
+                              elapsed_seconds=7)
+        original = session.snapshot
 
-        class Control:
-            kind, busy, cancelled, elapsed_seconds = "run", True, False, 0.0
+        def counting():
+            reads.append(True)
+            return original()
 
-            @property
-            def paused(self):
-                reads.append("paused")
-                return True
-
-            @property
-            def at_rest(self):
-                reads.append("at_rest")
-                return True
-
+        session.snapshot = counting
+        shown = []
         stub = run_widget()
-        stub.session = Control()
-        gui.SequencesWidget.updateTimeRemaining(stub)
-        assert reads.count("at_rest") == 1, reads
+        stub.session = session
+        stub.timeLabel = SimpleNamespace(setText=shown.append)
+        gui.SequencesWidget._showTimeRemaining(stub)
+        assert len(reads) == 1, "the paint read the session more than once"
+        assert shown == ["00:01:33 remaining (paused)"]
 
     def test_the_first_press_pauses_and_offers_a_resume(self):
         stub = run_widget()
@@ -608,15 +617,17 @@ class TestPauseControls:
         assert stub.pauseButton.enabled is False
         assert stub.abortButton.enabled is False
 
-    def test_a_finished_run_puts_the_button_back(self, monkeypatch):
-        monkeypatch.setattr(gui.QMessageBox, "information", lambda *args: None)
+    def test_a_finished_run_puts_the_button_back(self):
+        """The end of the job -- the session's state change, whatever ended
+        it -- restores the controls."""
         stub = Quiet()
         stub.session = FakeSession()
         stub.pauseButton = Button("Resume")
         stub.runButton = Button()
         stub.abortButton = Button()
         stub._renderRunControls = _bind("_renderRunControls", stub)
-        gui.SequencesWidget._handle_finished(stub)
+        stub._blockingError = lambda: None
+        gui.SequencesWidget._handle_state(stub, None)
         assert stub.pauseButton.text() == "Pause"
         assert stub.pauseButton.enabled is False
         assert stub.runButton.enabled is True
