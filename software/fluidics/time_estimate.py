@@ -103,14 +103,14 @@ def _replay(config, sequences):
     control = _MeteredRunControl()
     paced = FluidControllerSimulation.COMMAND_SECONDS
     # The simulation's pacing is for watching it run; an estimate should
-    # take milliseconds. Restored below; nothing else runs a job meanwhile
-    # (the session estimates inside start(), which refuses concurrent jobs).
+    # take milliseconds. Zeroed for the whole replay -- the drain's blocking
+    # commands carry no run_control, so they would really sleep it -- and
+    # restored at the end; nothing else runs a job meanwhile (the session
+    # estimates inside start(), which refuses concurrent jobs).
     FluidControllerSimulation.COMMAND_SECONDS = 0
+    devices = None
     try:
         devices = build_devices(config, simulation=True, run_control=control)
-    finally:
-        FluidControllerSimulation.COMMAND_SECONDS = paced
-    try:
         ops = build_operations(config, devices)
         sp = devices.syringe_pump
         valve_moves = []
@@ -139,4 +139,8 @@ def _replay(config, sequences):
                              + len(valve_moves) * VALVE_MOVE_SECONDS)
         return [mark - previous for mark, previous in zip(marks, [0.0] + marks)]
     finally:
-        devices.close()
+        try:
+            if devices is not None:
+                devices.close()
+        finally:
+            FluidControllerSimulation.COMMAND_SECONDS = paced

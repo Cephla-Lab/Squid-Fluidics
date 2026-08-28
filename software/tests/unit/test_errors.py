@@ -112,6 +112,12 @@ class TestRunningClock:
         control.pause()
         finished, error = parks(control, control.checkpoint)
         time.sleep(0.1)                      # a tenth of a second at rest
+        # Read *while* still parked: the clock must stand still during the
+        # hold, not merely bank it afterwards -- the countdown repaints
+        # every second of a pause.
+        during = control.running_seconds()
+        assert during < time.monotonic() - started - 0.05, \
+            f"the clock ran on during the hold: {during:.3f}"
         control.resume()
         assert finished.wait(2) and not error
         wall = time.monotonic() - started

@@ -126,6 +126,7 @@ class RunControl:
         self._holding = 0
         self._clock_started = None
         self._parked_total = 0.0
+        self._parked_since = None    # set while any thread is parked
         self._local = _ThreadState()
 
     def cancel(self, cause=None):
@@ -204,16 +205,24 @@ class RunControl:
         with self._lock:
             self._clock_started = time.monotonic()
             self._parked_total = 0.0
+            if self._parked_since is not None:
+                self._parked_since = self._clock_started
 
     def running_seconds(self):
         """Wall seconds since restart_clock(), minus every span a thread
-        spent parked at a gate: the display's clock, agreeing with what
-        run_for()/delay() charge -- a held run spends nothing, a pause still
-        in flight still counts. Zero before the clock has been started."""
+        spent parked at a gate -- the one still open included, so the clock
+        stands still *during* a hold, not only after it. The display's
+        clock, agreeing with what run_for()/delay() charge: a held run
+        spends nothing, a pause still in flight still counts. Zero before
+        the clock has been started."""
         with self._lock:
             if self._clock_started is None:
                 return 0.0
-            return time.monotonic() - self._clock_started - self._parked_total
+            now = time.monotonic()
+            parked = self._parked_total
+            if self._parked_since is not None:
+                parked += now - self._parked_since
+            return now - self._clock_started - parked
 
     @property
     def paused(self):
@@ -325,16 +334,21 @@ class RunControl:
         try:
             for on_hold, _ in hooks:
                 on_hold()
-            parked_at = time.monotonic()
             with self._lock:
                 self._holding += 1
+                # The union of the held spans comes off the running clock:
+                # the first park opens it, the last one to leave banks it,
+                # so overlapping parks cannot be subtracted twice.
+                if self._parked_since is None:
+                    self._parked_since = time.monotonic()
             try:
                 self._running.wait()
             finally:
                 with self._lock:
                     self._holding -= 1
-                    # The held span comes off the running clock.
-                    self._parked_total += time.monotonic() - parked_at
+                    if self._holding == 0:
+                        self._parked_total += time.monotonic() - self._parked_since
+                        self._parked_since = None
             self.check()
             for _, on_release in reversed(hooks):
                 on_release()

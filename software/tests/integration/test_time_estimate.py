@@ -86,10 +86,18 @@ class TestTheReplayIsSafe:
         seconds, _ = estimate_run_time(flow_cell_config, [FLOW_CELL_STEP])
         assert seconds > 0
 
-    def test_it_estimates_in_milliseconds_not_run_time(self, open_chamber_config, real_clock):
+    def test_it_estimates_in_milliseconds_not_run_time(self, open_chamber_config,
+                                                       real_clock, monkeypatch):
         """The drain's ten-second aspiration and a 30-minute incubation are
-        metered, never slept; the simulation's pacing is switched off for
-        the replay and restored after."""
+        metered, never slept, and the pacing stays off for the *whole*
+        replay -- the drain's blocking commands carry no run_control, so a
+        paced replay would really sleep a second per command. Restored
+        after. The controller's own sleep binding is made real here:
+        real_clock restores time.sleep but not the module's from-import."""
+        import time as time_module
+
+        import fluidics.control.controller as controller_module
+        monkeypatch.setattr(controller_module, "sleep", time_module.sleep)
         seq = {"type": "add_reagent", "fluidic_port": 3, "flow_rate": 1000,
                "volume": 500, "incubation_time": 30}
         started = time.monotonic()
