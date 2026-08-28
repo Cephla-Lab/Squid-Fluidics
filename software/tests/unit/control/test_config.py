@@ -1,5 +1,6 @@
 # tests/unit/control/test_config.py
 import json
+import re
 
 import pytest
 
@@ -10,6 +11,7 @@ from fluidics.control.config import (
     FluidicsConfig,
     SelectorValvesConfig,
     load_config,
+    save_config,
     convert_legacy_config,
 )
 
@@ -355,3 +357,95 @@ class TestDefaultConfigPath:
     def test_none_when_the_directory_has_neither(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         assert default_config_path() is None
+
+
+class TestSaveConfig:
+    """save_config writes renames back to the rig's own file, preserving
+    what the operator wrote there by hand."""
+
+    @pytest.fixture
+    def rig_yaml(self, tmp_path, fixtures_dir):
+        """The flow-cell fixture with a hand-written comment planted in it,
+        the way per-rig configs carry plumbing notes."""
+        text = (fixtures_dir / "flow_cell_config.yaml").read_text()
+        assert "ramp_up_seconds" not in text, "fixture grew the default; re-plant"
+        text = text.replace("  dispense_port: null",
+                            "  dispense_port: null   # not plumbed on this rig")
+        path = tmp_path / "config.yaml"
+        path.write_text("# reagent shelf A, re-plumbed 2026-08\n" + text)
+        return str(path)
+
+    def test_a_rename_lands_and_the_comments_survive(self, rig_yaml):
+        config = load_config(rig_yaml)
+        sv = config.reagent_selection.selector_valves
+        sv.name_mapping = {"port_1": "DAPI"}
+        written = save_config(config, rig_yaml)
+        assert written == rig_yaml
+        text = open(rig_yaml).read()
+        assert "# reagent shelf A, re-plumbed 2026-08" in text, \
+            "the operator's own notes were lost on save"
+        reloaded = load_config(rig_yaml)
+        assert reloaded.reagent_selection.selector_valves.name_mapping == \
+            {"port_1": "DAPI"}
+
+    def test_everything_else_survives_the_round_trip(self, rig_yaml):
+        before = load_config(rig_yaml)
+        before.reagent_selection.selector_valves.name_mapping = {"port_2": "wash"}
+        save_config(before, rig_yaml)
+        after = load_config(rig_yaml)
+        assert after == before, "a rename changed something other than the names"
+
+    def test_clearing_every_name_clears_the_mapping(self, rig_yaml):
+        config = load_config(rig_yaml)
+        config.reagent_selection.selector_valves.name_mapping = None
+        save_config(config, rig_yaml)
+        assert load_config(rig_yaml).reagent_selection.selector_valves.name_mapping is None
+
+    def test_a_rename_writes_only_what_the_file_or_the_operator_set(self, rig_yaml):
+        """The dump is exclude_unset: unset defaults must not creep into the
+        file, and an explicit null line keeps its comment -- a full dump
+        added the unset flow-sensor defaults and deleted the null line."""
+        config = load_config(rig_yaml)
+        config.reagent_selection.selector_valves.name_mapping = {"port_1": "DAPI"}
+        save_config(config, rig_yaml)
+        after = open(rig_yaml).read()
+        assert "ramp_up_seconds" not in after, "an unset default crept into the file"
+        assert re.search(r"dispense_port: null\s+# not plumbed on this rig", after), \
+            "the explicit null line (or its comment) was dropped"
+
+    def test_a_first_rename_adds_the_mapping_where_none_existed(self, rig_yaml):
+        """Assignment marks the field as set: a rig whose config never named
+        a port can still start."""
+        lines = open(rig_yaml).read().splitlines()
+        start = next(i for i, line in enumerate(lines) if "name_mapping:" in line)
+        end = start + 1
+        while end < len(lines) and lines[end].startswith("      port_"):
+            end += 1     # only the mapping's own block, nothing that follows
+        del lines[start:end]
+        open(rig_yaml, "w").write("\n".join(lines) + "\n")
+        config = load_config(rig_yaml)
+        assert config.reagent_selection.selector_valves.name_mapping is None
+        config.reagent_selection.selector_valves.name_mapping = {"port_2": "wash"}
+        save_config(config, rig_yaml)
+        assert load_config(rig_yaml).reagent_selection.selector_valves \
+            .name_mapping == {"port_2": "wash"}
+
+    def test_a_config_built_in_memory_refuses_to_save(self):
+        with pytest.raises(ValueError, match="not loaded from a file"):
+            save_config(FluidicsConfig(**_make_config_dict()))
+
+    def test_a_json_path_writes_the_sibling_yaml_and_leaves_the_json(
+            self, tmp_path, fixtures_dir):
+        """Loading a legacy JSON already wrote and used the sibling YAML;
+        saving edits that file. The JSON stays as the operator's fallback."""
+        import shutil
+        json_path = str(tmp_path / "config.json")
+        shutil.copy(fixtures_dir / "legacy_flow_cell_config.json", json_path)
+        json_before = open(json_path).read()
+        config = load_config(json_path)     # converts and writes config.yaml
+        config.reagent_selection.selector_valves.name_mapping = {"port_3": "TCEP"}
+        written = save_config(config)       # to source_path: the sibling YAML
+        assert written == str(tmp_path / "config.yaml")
+        assert open(json_path).read() == json_before
+        assert load_config(written).reagent_selection.selector_valves \
+            .name_mapping == {"port_3": "TCEP"}

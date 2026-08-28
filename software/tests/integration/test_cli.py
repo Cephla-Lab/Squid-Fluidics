@@ -6,6 +6,7 @@ bring-up and moves instant; the run log and crash hook are stubbed out."""
 
 import shutil
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -65,3 +66,15 @@ def test_without_a_config_flag_the_rigs_own_legacy_json_serves(cli, monkeypatch,
     monkeypatch.chdir(tmp_path)
     assert cli("--path", str(SOFTWARE / "sample_sequences" / "merfish-experiment.yaml"),
                "--simulation") == 0
+
+
+def test_a_wrong_application_sequence_file_fails_at_time_zero(cli_pair, monkeypatch):
+    """An Open Chamber sequence file against a Flow Cell rig must exit
+    before anything moves. The exit code alone cannot pin that -- the run
+    would fail mid-experiment too -- so the pin is that the rig is never
+    even built."""
+    built = []
+    monkeypatch.setattr(run_sequences, "FluidicsSystem",
+                        SimpleNamespace(build=lambda *a, **k: built.append(True)))
+    assert cli_pair("open-chamber-experiment.yaml", "flow_cell_config.yaml") == 1
+    assert built == [], "the rig was built for a file the check should have refused"

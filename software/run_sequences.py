@@ -2,7 +2,7 @@ import argparse
 import logging
 import sys
 from fluidics.sequences import (
-    check_ports_against_config, get_included_sequences, load_sequences,
+    get_included_sequences, load_sequences, validate_sequences,
 )
 from fluidics.control.config import default_config_path, load_config
 from fluidics.system import FluidicsSystem
@@ -54,8 +54,9 @@ def main():
                           "./config.json here.")
             sys.exit(2)
         config = load_config(config_path)
-        # Fail on a mistyped port before any hardware is touched.
-        check_ports_against_config(included, config)
+        # Fail on a mistyped port or a wrong-application sequence type
+        # before any hardware is touched.
+        validate_sequences(included, config)
 
         system = FluidicsSystem.build(config, args.simulation)
 
