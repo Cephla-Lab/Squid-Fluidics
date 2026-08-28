@@ -4,7 +4,7 @@ import sys
 from fluidics.sequences import (
     check_ports_against_config, get_included_sequences, load_sequences,
 )
-from fluidics.control.config import load_config
+from fluidics.control.config import default_config_path, load_config
 from fluidics.system import FluidicsSystem
 from fluidics.run_log import (
     setup_uncaught_exception_logging, start_log_file, stop_log_file,
@@ -22,8 +22,9 @@ def parse_args():
         help='Path to the sequence file (YAML or CSV)'
     )
     parser.add_argument(
-        '--config', default='config.yaml',
-        help='Path to configuration file (YAML or JSON)'
+        '--config', default=None,
+        help='Path to configuration file (YAML or JSON); defaults to the '
+             "rig's own ./config.yaml or ./config.json"
     )
     parser.add_argument(
         '--simulation',
@@ -47,7 +48,12 @@ def main():
         sequences = load_sequences(args.path)
         included = get_included_sequences(sequences)
         # Load config
-        config = load_config(args.config)
+        config_path = args.config or default_config_path()
+        if config_path is None:
+            _logger.error("No --config given and no ./config.yaml or "
+                          "./config.json here.")
+            sys.exit(2)
+        config = load_config(config_path)
         # Fail on a mistyped port before any hardware is touched.
         check_ports_against_config(included, config)
 

@@ -11,14 +11,9 @@ than a traceback, so the search and its error live here, once.
 
 from serial.tools import list_ports
 
-
-class DeviceNotFoundError(Exception):
-    """A configured device is not on the bus.
-
-    The message carries what the operator needs: which device, which serial
-    number the config names, and what is actually plugged in. (Re-parent
-    under fluidics/errors.py when the cancellation redesign lands it.)
-    """
+# Re-exported: it was born here, and the drivers and entry points import it
+# from here; its family (DeviceError) lives in fluidics.errors now.
+from ..errors import DeviceNotFoundError  # noqa: F401
 
 
 def find_serial_port(serial_number, device_name):

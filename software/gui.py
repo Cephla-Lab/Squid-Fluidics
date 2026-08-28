@@ -12,13 +12,13 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QTabWidget, QWidget, QVB
                              QSpinBox, QLabel, QProgressBar, QLineEdit,
                              QGroupBox, QGridLayout, QSizePolicy, QDialog, QFormLayout,
                              QDoubleSpinBox, QDialogButtonBox)
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QEvent, QCoreApplication
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QEvent, QCoreApplication, QSettings
 from PyQt5.QtGui import QColor, QBrush
 
 from serial import SerialException
 
-from fluidics.control.config import load_config
-from fluidics.control.discovery import DeviceNotFoundError
+from fluidics.control.config import DEFAULT_CONFIG_PATHS, default_config_path, load_config
+from fluidics.errors import DeviceError
 from fluidics.devices import (
     ISSUE_FLOW_SENSORS,
     ISSUE_TEMPERATURE_CONTROLLER,
@@ -41,14 +41,34 @@ warnings.filterwarnings('ignore')
 
 _logger = logging.getLogger("fluidics.gui")
 
-def load_config_file(config_path=None):
-    if config_path is None:
-        # Try YAML first, fall back to JSON (which auto-converts)
-        if os.path.exists('./config.yaml'):
-            config_path = './config.yaml'
+def pick_config(cli_path=None):
+    """The rig config to run with, loaded: the --config path if given, else
+    the rig's own local config (default_config_path), else the last file an
+    operator picked; when none of those exists, or one fails to load, a
+    dialog asks instead of a traceback. Returns the loaded config, or None
+    if the operator cancelled. The conventional local file outranks the
+    remembered one on purpose: a rig's ./config.yaml is the rig's.
+    """
+    settings = QSettings()
+    remembered = settings.value("config_path")
+    path = cli_path or default_config_path() or (
+        remembered if remembered and os.path.exists(remembered) else None)
+    while True:
+        if path is None:
+            path, _ = QFileDialog.getOpenFileName(
+                None, "Select a rig config", "", "Config files (*.yaml *.json)")
+            if not path:
+                return None
+        try:
+            config = load_config(path)
+        except Exception as e:
+            QMessageBox.critical(None, "Config Error", f"Could not load {path}:\n\n{e}")
+            path = None
         else:
-            config_path = './config.json'
-    return load_config(config_path)
+            # Absolute, or the memory means "whatever directory I am run
+            # from next time" -- inert exactly when it is needed.
+            settings.setValue("config_path", os.path.abspath(path))
+            return config
 
 
 class WorkerEvent(QEvent):
@@ -485,6 +505,14 @@ class SequencesWidget(PostsToQtThread, QWidget):
             # A manual move got in first; the tabs normally prevent this.
             QMessageBox.warning(self, "Rig busy", str(e))
             return
+        self._beginRunDisplay()
+
+    def _beginRunDisplay(self):
+        """A fresh run's clocks. The previous run's seconds must not leak in,
+        and its estimate must not price this one while the new estimate is
+        still in the post."""
+        self.elapsed_time = 0
+        self.total_time = None
         self._renderRunControls()
         self.sequenceLabel.setText(f"0/{self.total_sequences} sequences")
         self.timer.start(1000)
@@ -500,12 +528,10 @@ class SequencesWidget(PostsToQtThread, QWidget):
         if not at_rest:
             self.elapsed_time += 1  # Add one second
         self._showTimeRemaining(self._pauseSuffix(paused, at_rest))
-        # A run can also end while the tick is what is watching: a flow fault
-        # cancels from the reader thread.
+        # Runs until _handle_finished stops it, not until the estimate hits
+        # zero: a run can outlive its estimate, and a flow fault cancels
+        # from the reader thread with only this tick watching.
         self._renderRunControls()
-        if (self.total_time is not None
-                and self.total_time - self.elapsed_time <= 0 and not paused):
-            self.timer.stop()
 
     def _showTimeRemaining(self, suffix=None):
         """Draw the label and the bar from the elapsed time as it stands.
@@ -1387,9 +1413,9 @@ class FlowSensorControlWidget(SensorTabWidget):
 
 
 class FluidicsControlGUI(PostsToQtThread, QMainWindow):
-    def __init__(self, is_simulation):
+    def __init__(self, config, is_simulation):
         super().__init__()
-        self.config = load_config_file()
+        self.config = config
         self.simulation = is_simulation
         # Tabs that own CSV recordings. closeEvent flushes them on exit, since
         # Qt never delivers a close event to a tab-embedded child widget.
@@ -1398,10 +1424,11 @@ class FluidicsControlGUI(PostsToQtThread, QMainWindow):
         try:
             self.system = FluidicsSystem.build(self.config, self.simulation,
                                                on_issue=self._report_bringup_issue)
-        except (DeviceNotFoundError, SerialException) as e:
+        except (DeviceError, SerialException) as e:
             # Nothing works without the controller or the pump, so there is
-            # no window worth showing -- just the message. DeviceNotFoundError
-            # is "not plugged in / wrong serial"; SerialException is the
+            # no window worth showing -- just the message. DeviceError covers
+            # "not plugged in / wrong serial" and "present but stuck";
+            # SerialException is the
             # sibling "plugged in but the port won't open" (permissions, a
             # stale process holding it) -- same operator problem, same dialog.
             QMessageBox.critical(self, "Device Unavailable", str(e))
@@ -1526,9 +1553,18 @@ if __name__ == '__main__':
     start_log_file()
     parser = argparse.ArgumentParser()
     parser.add_argument("--simulation", help="Run the GUI with simulated hardware.", action='store_true')
+    parser.add_argument("--config", help="Rig config, YAML or legacy JSON (default: "
+                        f"{' then '.join(DEFAULT_CONFIG_PATHS)}, then the last "
+                        "file picked; asks otherwise).")
     args = parser.parse_args()
 
     app = QApplication(sys.argv)
-    gui = FluidicsControlGUI(args.simulation)
+    # The identity every QSettings() in the process stores under.
+    QCoreApplication.setOrganizationName("Cephla")
+    QCoreApplication.setApplicationName("FluidicsControl")
+    config = pick_config(args.config)
+    if config is None:
+        sys.exit(1)
+    gui = FluidicsControlGUI(config, args.simulation)
     gui.show()
     sys.exit(app.exec_())

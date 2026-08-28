@@ -10,6 +10,18 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
+DEFAULT_CONFIG_PATHS = ("./config.yaml", "./config.json")
+
+
+def default_config_path():
+    """The rig's conventional local config, if one exists: ./config.yaml,
+    then the legacy ./config.json (which load_config auto-converts)."""
+    for path in DEFAULT_CONFIG_PATHS:
+        if os.path.exists(path):
+            return path
+    return None
+
+
 # --- Pydantic Models ---
 
 class _StrictModel(BaseModel):

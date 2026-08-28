@@ -1,6 +1,6 @@
 import logging
 
-from ..errors import RunControl
+from ..errors import DeviceError, RunControl
 from ._def import CMD_SET
 from .config import available_port_count
 
@@ -34,7 +34,10 @@ class SelectorValve():
         self.fc.wait_for_completion(run_control=run_control)
         current_position = self.get_current_position()
         if current_position != port:
-            raise RuntimeError(f"current position is {current_position}; expected {port}")
+            self.position = current_position    # the truth the readback gave
+            raise DeviceError(f"Selector valve {self.id}: at position "
+                              f"{current_position}, expected {port} -- check "
+                              "the valve is free to rotate")
         self.position = port
 
     def get_current_position(self):

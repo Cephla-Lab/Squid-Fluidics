@@ -44,3 +44,24 @@ def test_a_thread_that_fails_to_start_exits_promptly(cli, thread_cannot_start):
     """A start() that raises lands in main()'s except Exception with the
     session left free -- nothing to wait on: teardown and exit 1, promptly."""
     assert cli(*QUICKSTART_PAIRS[0]) == 1
+
+
+def test_without_a_config_flag_the_rigs_own_legacy_json_serves(cli, monkeypatch, tmp_path):
+    """The GUI and the CLI share one convention (default_config_path): a
+    legacy JSON-only rig must not launch under one and traceback in the
+    other."""
+    import shutil
+    import sys as _sys
+    shutil.copy(SOFTWARE / "tests" / "fixtures" / "legacy_flow_cell_config.json",
+                tmp_path / "config.json")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(_sys, "argv", [
+        "run_sequences.py",
+        "--path", str(SOFTWARE / "sample_sequences" / "merfish-experiment.yaml"),
+        "--simulation"])
+    try:
+        run_sequences.main()
+        code = 0
+    except SystemExit as exit_info:
+        code = exit_info.code
+    assert code == 0
