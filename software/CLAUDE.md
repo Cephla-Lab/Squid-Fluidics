@@ -10,7 +10,7 @@ Python control software for the Fluidics v2 microfluidics system. Provides a PyQ
 
 ```bash
 # GUI
-python gui.py    # --config <yaml>; defaults to ./config.yaml, then the last file picked
+python gui.py    # --config <yaml|json>; defaults to ./config.yaml then ./config.json, then the last file picked
 
 # CLI experiment runner
 python run_sequences.py --path sample_sequences/merfish-experiment.yaml --config sample_config/flow_cell_config.yaml

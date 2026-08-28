@@ -1553,8 +1553,9 @@ if __name__ == '__main__':
     start_log_file()
     parser = argparse.ArgumentParser()
     parser.add_argument("--simulation", help="Run the GUI with simulated hardware.", action='store_true')
-    parser.add_argument("--config", help="Rig config YAML (default: ./config.yaml, "
-                        "then the last file picked; asks otherwise).")
+    parser.add_argument("--config", help="Rig config, YAML or legacy JSON (default: "
+                        "./config.yaml then ./config.json, then the last file "
+                        "picked; asks otherwise).")
     args = parser.parse_args()
 
     app = QApplication(sys.argv)
