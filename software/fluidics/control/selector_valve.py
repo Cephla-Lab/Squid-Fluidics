@@ -2,7 +2,7 @@ import logging
 
 from ..errors import DeviceError, RunControl
 from ._def import CMD_SET
-from .config import available_port_count
+from .config import available_port_count, port_key
 
 _logger = logging.getLogger(__name__)
 
@@ -67,7 +67,7 @@ class SelectorValveSystem():
         name_mapping = self.config.reagent_selection.selector_valves.name_mapping
         if name_mapping is None:
             return None
-        return name_mapping.get('port_' + str(port_index))
+        return name_mapping.get(port_key(port_index))
 
     def open_port(self, port_index):
         # The operator-meaningful boundary: a paused run holds before the
@@ -115,7 +115,7 @@ class SelectorValveSystem():
     def get_tubing_fluid_amount_to_port(self, port_index):
         # Return the tubing fluid amount from reagent to selector valve port.
         return self.config.reagent_selection.selector_valves.tubing_fluid_amount_ul.get(
-            'port_' + str(port_index))
+            port_key(port_index))
 
     def get_port_names(self):
         names = []
@@ -123,7 +123,7 @@ class SelectorValveSystem():
         for i in range(1, self.available_port_number + 1):
             name = ''
             if name_mapping is not None:
-                name = name_mapping.get('port_' + str(i), '')
+                name = name_mapping.get(port_key(i), '')
             names.append('Port ' + str(i) + ': ' + name)
         return names
 

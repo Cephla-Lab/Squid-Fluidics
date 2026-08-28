@@ -20,7 +20,7 @@ from serial import SerialException
 
 from fluidics.control.config import (
     DEFAULT_CONFIG_PATHS, available_port_count, default_config_path,
-    load_config, save_config,
+    load_config, port_key, save_config,
 )
 from fluidics.errors import DeviceError
 from fluidics.devices import (
@@ -32,10 +32,9 @@ from fluidics.experiment_worker import SEQUENCE_COMPLETED
 from fluidics.run_log import setup_uncaught_exception_logging, start_log_file
 from fluidics.sequences import (
     load_sequences, save_sequences_yaml,
-    get_fields_for_type, check_ports_against_config,
-    check_types_against_application, sequence_port_problems,
-    sequence_type_problem,
-    SEQUENCE_TYPES, SEQUENCE_TYPE_LABELS, APPLICATION_SEQUENCES,
+    get_fields_for_type, validate_sequences, sequence_port_problems,
+    sequence_type_problem, types_for_application,
+    SEQUENCE_TYPES, SEQUENCE_TYPE_LABELS,
     SequenceListAdapter,
 )
 from pydantic import ValidationError
@@ -53,8 +52,8 @@ def pick_config(cli_path=None):
     """The rig config to run with, loaded: the --config path if given, else
     the rig's own local config (default_config_path), else the last file an
     operator picked; when none of those exists, or one fails to load, a
-    dialog asks instead of a traceback. Returns (config, path) -- the path
-    for save_config to write renames back to -- or (None, None) if the
+    dialog asks instead of a traceback. Returns the loaded config (whose
+    source_path is where save_config writes renames back), or None if the
     operator cancelled. The conventional local file outranks the remembered
     one on purpose: a rig's ./config.yaml is the rig's.
     """
@@ -67,7 +66,7 @@ def pick_config(cli_path=None):
             path, _ = QFileDialog.getOpenFileName(
                 None, "Select a rig config", "", "Config files (*.yaml *.json)")
             if not path:
-                return None, None
+                return None
         try:
             config = load_config(path)
         except Exception as e:
@@ -77,7 +76,7 @@ def pick_config(cli_path=None):
             # Absolute, or the memory means "whatever directory I am run
             # from next time" -- inert exactly when it is needed.
             settings.setValue("config_path", os.path.abspath(path))
-            return config, os.path.abspath(path)
+            return config
 
 
 class WorkerEvent(QEvent):
@@ -124,7 +123,7 @@ class AddSequenceDialog(QDialog):
         type_layout = QHBoxLayout()
         type_layout.addWidget(QLabel("Type:"))
         self.typeCombo = QComboBox()
-        available_types = APPLICATION_SEQUENCES.get(self.application, list(SEQUENCE_TYPES.keys()))
+        available_types = types_for_application(self.application)
         for seq_type in available_types:
             self.typeCombo.addItem(SEQUENCE_TYPE_LABELS.get(seq_type, seq_type), seq_type)
         type_layout.addWidget(self.typeCombo)
@@ -214,11 +213,12 @@ class PortNamesDialog(QDialog):
         self.result_mapping = None
         self._edits = []
 
+        names = name_mapping or {}
         form_host = QWidget()
         form = QFormLayout(form_host)
         for port in range(1, port_count + 1):
             edit = QLineEdit()
-            edit.setText((name_mapping or {}).get(f"port_{port}", ""))
+            edit.setText(names.get(port_key(port), ""))
             self._edits.append(edit)
             form.addRow(f"Port {port}", edit)
 
@@ -239,10 +239,9 @@ class PortNamesDialog(QDialog):
 
     def accept(self):
         self.result_mapping = {
-            f"port_{port}": text
-            for port, text in ((i + 1, edit.text().strip())
-                               for i, edit in enumerate(self._edits))
-            if text}
+            port_key(port): name
+            for port, edit in enumerate(self._edits, start=1)
+            if (name := edit.text().strip())}
         super().accept()
 
 
@@ -654,8 +653,7 @@ class SequencesWidget(PostsToQtThread, QWidget):
             # A port this rig does not have, or a wrong-application type,
             # must fail here, at the button, not hours in -- live
             # validation paints the same verdicts, but this is the gate.
-            check_ports_against_config(selected, self.config)
-            check_types_against_application(selected, self.config)
+            validate_sequences(selected, self.config)
         except Exception as e:
             QMessageBox.critical(self, "Invalid Sequence", f"Failed to validate sequences: {str(e)}")
             return
@@ -876,10 +874,9 @@ class SequencesWidget(PostsToQtThread, QWidget):
 class ManualControlWidget(PostsToQtThread, QWidget):
     """The operator's hand on the rig, one move at a time -- see _run."""
 
-    def __init__(self, config, system, config_path=None):
+    def __init__(self, config, system):
         super().__init__()
         self.config = config
-        self.config_path = config_path   # where port renames are written back
         self.system = system
         self.session = system.session
         self.manual = system.manual
@@ -1021,7 +1018,11 @@ class ManualControlWidget(PostsToQtThread, QWidget):
 
     def editPortNames(self):
         """Rename the reagent ports and write the rig's config back. Idle
-        only: the names feed port lists a running job may be reading."""
+        only: the names feed port lists a running job may be reading.
+
+        Names live on the config object; consumers read them fresh at each
+        paint or dialog-open. Only a widget that holds items (this tab's
+        combo) needs an explicit refresh on rename."""
         if self.session.busy:
             QMessageBox.warning(self, "Rig busy",
                                 "Port names can be edited when the rig is idle.")
@@ -1033,13 +1034,8 @@ class ManualControlWidget(PostsToQtThread, QWidget):
             return
         sv.name_mapping = dialog.result_mapping or None
         self._refreshPortNames()
-        if self.config_path is None:
-            QMessageBox.warning(self, "Not saved",
-                                "No config file is known for this session; "
-                                "the names apply until the app closes.")
-            return
         try:
-            save_config(self.config, self.config_path)
+            save_config(self.config)    # to the file the config came from
         except Exception as e:
             QMessageBox.critical(self, "Error",
                                  "The names apply for this session, but "
@@ -1659,10 +1655,9 @@ class FlowSensorControlWidget(SensorTabWidget):
 
 
 class FluidicsControlGUI(PostsToQtThread, QMainWindow):
-    def __init__(self, config, is_simulation, config_path=None):
+    def __init__(self, config, is_simulation):
         super().__init__()
         self.config = config
-        self.config_path = config_path   # where save_config writes renames
         self.simulation = is_simulation
         # Tabs that own CSV recordings. closeEvent flushes them on exit, since
         # Qt never delivers a close event to a tab-embedded child widget.
@@ -1697,8 +1692,7 @@ class FluidicsControlGUI(PostsToQtThread, QMainWindow):
 
         # "Settings and Manual Control" tab
         runExperimentsTab = SequencesWidget(self.config, self.system)
-        manualControlTab = ManualControlWidget(self.config, self.system,
-                                               config_path=self.config_path)
+        manualControlTab = ManualControlWidget(self.config, self.system)
         # TODO: integrate temperature controller ui
 
         self.tabWidget.addTab(runExperimentsTab, "Run Experiments")
@@ -1810,9 +1804,9 @@ if __name__ == '__main__':
     # The identity every QSettings() in the process stores under.
     QCoreApplication.setOrganizationName("Cephla")
     QCoreApplication.setApplicationName("FluidicsControl")
-    config, config_path = pick_config(args.config)
+    config = pick_config(args.config)
     if config is None:
         sys.exit(1)
-    gui = FluidicsControlGUI(config, args.simulation, config_path=config_path)
+    gui = FluidicsControlGUI(config, args.simulation)
     gui.show()
     sys.exit(app.exec_())

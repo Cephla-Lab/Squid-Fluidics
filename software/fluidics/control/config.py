@@ -6,9 +6,8 @@ import json
 import os
 from typing import Dict, List, Literal, Optional
 
-import ruamel.yaml
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 
 DEFAULT_CONFIG_PATHS = ("./config.yaml", "./config.json")
@@ -135,6 +134,15 @@ class FluidicsConfig(_StrictModel):
     flow_sensors: Optional[List[FlowSensorConfig]] = Field(default=None, min_length=1)
     application: Literal["Flow Cell", "Open Chamber"]
 
+    # The resolved file this config was loaded from (always the YAML, even
+    # when the operator pointed at a legacy JSON) -- what save_config writes
+    # back to. Stamped by load_config; None on a config built in memory.
+    _source_path: Optional[str] = PrivateAttr(default=None)
+
+    @property
+    def source_path(self):
+        return self._source_path
+
     @model_validator(mode='after')
     def _check_flow_sensors(self):
         if self.flow_sensors is None:
@@ -234,25 +242,32 @@ def convert_legacy_config(old: dict) -> dict:
     return new
 
 
-def save_config(config: FluidicsConfig, config_path: str) -> str:
-    """Write `config` back to its YAML file; returns the path written.
+def port_key(port: int) -> str:
+    """The name_mapping key for fluidic port `port` -- the one spelling,
+    read by the valve system and written by the GUI's rename dialog."""
+    return f"port_{port}"
+
+
+def save_config(config: FluidicsConfig, config_path: str = None) -> str:
+    """Write `config` back to the file it was loaded from (or an explicit
+    `config_path`); returns the path written.
 
     Round-tripped with ruamel.yaml so the file's own comments and layout
     survive -- a per-rig config is hand-maintained, and renaming a port
-    must not cost the plumbing notes. Only the values change; keys the
-    model no longer carries leave the file. A .json path is normalized to
-    the sibling .yaml exactly as load_config does: loading a legacy JSON
-    already wrote and used that file, so it is the one being edited -- the
-    JSON itself is never rewritten.
+    must not cost the plumbing notes. The dump is exclude_unset: only what
+    the file provided or the operator assigned is written. Two consequences
+    for future editors: to persist a field the file never had, assign it --
+    in-place mutation of a defaulted value is silently not written; and
+    every assignment made to the config since load rides along with any
+    save, so keep runtime state off the config object.
     """
-    base, ext = os.path.splitext(config_path)
-    if ext == '.json':
-        config_path = base + '.yaml'
-    # exclude_unset: only what the file provided or the operator assigned.
-    # A full dump would add every unset default to the file and (with
-    # exclude_none) delete an explicit `dispense_port: null` line together
-    # with any comment riding it -- assignment marks a field as set, so a
-    # cleared name_mapping still writes (as an explicit null).
+    import ruamel.yaml      # deferred: ~7 ms of import for a rare operation
+
+    if config_path is None:
+        config_path = config.source_path
+    if config_path is None:
+        raise ValueError("this config was not loaded from a file; "
+                         "pass config_path to save it")
     values = config.model_dump(exclude_unset=True)
     yaml_rt = ruamel.yaml.YAML()    # round-trip mode: keeps comments
     yaml_rt.preserve_quotes = True
@@ -262,15 +277,9 @@ def save_config(config: FluidicsConfig, config_path: str) -> str:
         type(None),
         lambda representer, _: representer.represent_scalar(
             'tag:yaml.org,2002:null', 'null'))
-    try:
-        with open(config_path) as f:
-            document = yaml_rt.load(f)
-    except FileNotFoundError:
-        document = None
-    if document is None:
-        document = values
-    else:
-        _update_yaml_node(document, values)
+    with open(config_path) as f:
+        document = yaml_rt.load(f)
+    _update_yaml_node(document, values)
     with open(config_path, 'w') as f:
         yaml_rt.dump(document, f)
     return config_path
@@ -282,6 +291,9 @@ def _update_yaml_node(node, values):
     A value that did not change is left entirely alone -- the file's own
     text (quoting included) is authoritative for what was not edited, so a
     quoted `monitor: "off"` cannot come back as a bare YAML boolean."""
+    # A key gone from a dict-valued field leaves the file: this is how a
+    # cleared port name leaves name_mapping. (Model fields themselves cannot
+    # disappear -- extra="forbid" means an unknown file key never loads.)
     for key in [k for k in node if k not in values]:
         del node[key]
     for key, value in values.items():
@@ -301,7 +313,8 @@ def _yaml_faithful(value):
         except yaml.YAMLError:
             reread = None
         if reread != value:
-            return ruamel.yaml.scalarstring.DoubleQuotedScalarString(value)
+            from ruamel.yaml.scalarstring import DoubleQuotedScalarString
+            return DoubleQuotedScalarString(value)
         return value
     if isinstance(value, dict):
         return {key: _yaml_faithful(inner) for key, inner in value.items()}
@@ -345,4 +358,7 @@ def load_config(config_path: str) -> FluidicsConfig:
     with open(config_path) as f:
         data = yaml.safe_load(f)
 
-    return FluidicsConfig(**data)
+    config = FluidicsConfig(**data)
+    # The resolved YAML, absolute: what save_config writes back to.
+    config._source_path = os.path.abspath(config_path)
+    return config

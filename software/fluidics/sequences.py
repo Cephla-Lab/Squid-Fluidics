@@ -250,6 +250,13 @@ def sequence_port_problems(seq: dict, limit: int) -> list[str]:
     return problems
 
 
+def types_for_application(application: str) -> list[str]:
+    """The sequence types a rig with `application` offers -- one policy for
+    an unknown application (nothing), shared by the gate, the live paint,
+    and the Add dialog."""
+    return APPLICATION_SEQUENCES.get(application, [])
+
+
 def sequence_type_problem(seq: dict, application: str) -> Optional[str]:
     """The type complaint for one sequence under `application`, or None.
 
@@ -257,7 +264,7 @@ def sequence_type_problem(seq: dict, application: str) -> Optional[str]:
     which subset a rig offers lives in the config's application. One copy,
     read by the entry points' pre-run check and the GUI's live per-row
     validation, like sequence_port_problems for ports."""
-    allowed = APPLICATION_SEQUENCES.get(application, [])
+    allowed = types_for_application(application)
     if seq.get("type") in allowed:
         return None
     return (f"{seq.get('type')}: not a {application} sequence type "
@@ -282,6 +289,15 @@ def check_types_against_application(sequences: list[dict], config) -> None:
             problems.append(f"sequence {index} ({label}): {problem}")
     if problems:
         raise ValueError("; ".join(problems))
+
+
+def validate_sequences(sequences: list[dict], config) -> None:
+    """Everything a run must pass at time zero, in one call: ports within
+    the rig's range, types the rig's application offers. The one gate for
+    both entry points -- and any future one -- so a check added here cannot
+    be missing from one of them (types were, until #36)."""
+    check_ports_against_config(sequences, config)
+    check_types_against_application(sequences, config)
 
 
 def check_ports_against_config(sequences: list[dict], config) -> None:

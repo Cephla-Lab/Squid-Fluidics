@@ -261,37 +261,31 @@ class TestCheckPortsAgainstConfig:
 
 
 class TestCheckTypesAgainstApplication:
-    """Which sequence types a rig offers lives in the config's application;
-    the pydantic union admits them all. Until this check, only the GUI's
-    Add dialog knew -- a wrong-application file failed at run time,
-    mid-experiment."""
+    """The types a rig offers live in the config's application; the union
+    admits them all, so this gate runs at time zero."""
 
-    @pytest.fixture
-    def flow_cell(self, flow_cell_config):
-        return flow_cell_config
-
-    def test_the_applications_own_types_pass(self, flow_cell):
+    def test_the_applications_own_types_pass(self, flow_cell_config):
         check_types_against_application(
             [{"type": "flow_reagent", "fluidic_port": 1, "flow_rate": 500,
               "volume": 100},
-             {"type": "set_temperature", "temperature": 37}], flow_cell)
+             {"type": "set_temperature", "temperature": 37}], flow_cell_config)
 
-    def test_a_wrong_application_type_is_named_at_time_zero(self, flow_cell):
+    def test_a_wrong_application_type_is_named_at_time_zero(self, flow_cell_config):
         with pytest.raises(ValueError) as caught:
             check_types_against_application(
                 [{"type": "flow_reagent", "fluidic_port": 1, "flow_rate": 500,
                   "volume": 100},
                  {"type": "add_reagent", "fluidic_port": 2, "flow_rate": 500,
-                  "volume": 100, "name": "stain"}], flow_cell)
+                  "volume": 100, "name": "stain"}], flow_cell_config)
         message = str(caught.value)
         assert "sequence 1 (stain)" in message
         assert "add_reagent" in message and "Flow Cell" in message
 
-    def test_the_per_sequence_verdict_serves_the_live_paint(self, flow_cell):
+    def test_the_per_sequence_verdict_serves_the_live_paint(self, flow_cell_config):
         ok = {"type": "priming", "fluidic_port": 1, "flow_rate": 500,
               "volume": 100}
-        assert sequence_type_problem(ok, flow_cell.application) is None
+        assert sequence_type_problem(ok, flow_cell_config.application) is None
         wrong = sequence_type_problem({"type": "wash_constant_flow"},
-                                      flow_cell.application)
+                                      flow_cell_config.application)
         assert "not a Flow Cell sequence type" in wrong
         assert "flow_reagent" in wrong, "the message should say what is offered"

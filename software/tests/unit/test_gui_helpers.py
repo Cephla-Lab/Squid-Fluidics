@@ -879,10 +879,10 @@ class TestPickConfig:
     def test_the_rigs_own_config_wins_and_is_remembered_absolutely(self, picking):
         picking.write("config.yaml")
         picking.settings["config_path"] = picking.write("elsewhere.yaml")
-        config, path = gui.pick_config()
+        config = gui.pick_config()
         assert config is not None
-        assert path == picking.settings["config_path"], \
-            "the returned path is the one save_config must write back to"
+        assert config.source_path == picking.settings["config_path"], \
+            "the config's source is the file save_config must write back to"
         remembered = picking.settings["config_path"]
         assert remembered.endswith("config.yaml"), "the remembered file outranked the rig's own"
         assert os.path.isabs(remembered), \
@@ -891,26 +891,24 @@ class TestPickConfig:
     def test_the_cli_path_outranks_everything(self, picking):
         picking.write("config.yaml")
         given = picking.write("given.yaml")
-        config, path = gui.pick_config(given)
-        assert config is not None and path == os.path.abspath(given)
+        config = gui.pick_config(given)
+        assert config is not None and config.source_path == os.path.abspath(given)
         assert picking.settings["config_path"] == os.path.abspath(given)
 
     def test_the_last_picked_file_serves_when_the_rig_has_none(self, picking):
         picking.settings["config_path"] = picking.write("elsewhere.yaml")
-        config, _ = gui.pick_config()
-        assert config is not None
+        assert gui.pick_config() is not None
         assert picking.errors == []
         assert picking.settings["config_path"].endswith("elsewhere.yaml")
 
     def test_nothing_found_asks_and_cancel_means_none(self, picking):
-        assert gui.pick_config() == (None, None)
+        assert gui.pick_config() is None
         assert picking.errors == []
 
     def test_a_file_that_fails_to_load_gets_a_dialog_then_asks_again(self, picking):
         (picking.tmp / "config.yaml").write_text("application: 'No Such Application'\n")
         picking.asked.append(picking.write("good.yaml"))
-        config, _ = gui.pick_config()
-        assert config is not None
+        assert gui.pick_config() is not None
         assert len(picking.errors) == 1 and "config.yaml" in picking.errors[0]
         assert picking.settings["config_path"].endswith("good.yaml")
 
@@ -1011,7 +1009,6 @@ class TestPortNames:
         monkeypatch.setattr(gui, "PortNamesDialog", FakeDialog)
         refreshed = []
         stub = SimpleNamespace(session=FakeSession(), config=config,
-                               config_path=config_path,
                                _refreshPortNames=lambda: refreshed.append(True))
         gui.ManualControlWidget.editPortNames(stub)
         assert config.reagent_selection.selector_valves.name_mapping == \

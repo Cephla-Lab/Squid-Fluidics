@@ -368,6 +368,9 @@ class TestSaveConfig:
         """The flow-cell fixture with a hand-written comment planted in it,
         the way per-rig configs carry plumbing notes."""
         text = (fixtures_dir / "flow_cell_config.yaml").read_text()
+        assert "ramp_up_seconds" not in text, "fixture grew the default; re-plant"
+        text = text.replace("  dispense_port: null",
+                            "  dispense_port: null   # not plumbed on this rig")
         path = tmp_path / "config.yaml"
         path.write_text("# reagent shelf A, re-plumbed 2026-08\n" + text)
         return str(path)
@@ -400,14 +403,8 @@ class TestSaveConfig:
 
     def test_a_rename_writes_only_what_the_file_or_the_operator_set(self, rig_yaml):
         """The dump is exclude_unset: unset defaults must not creep into the
-        file, and an explicit null line keeps its comment. (A full dump
-        added ramp_up_seconds/tolerance_fraction to every flow sensor and
-        deleted `dispense_port: null` -- found by review on #36.)"""
-        text = open(rig_yaml).read()
-        assert "ramp_up_seconds" not in text, "fixture grew the default; re-plant"
-        text = text.replace("  dispense_port: null",
-                            "  dispense_port: null   # not plumbed on this rig")
-        open(rig_yaml, "w").write(text)
+        file, and an explicit null line keeps its comment -- a full dump
+        added the unset flow-sensor defaults and deleted the null line."""
         config = load_config(rig_yaml)
         config.reagent_selection.selector_valves.name_mapping = {"port_1": "DAPI"}
         save_config(config, rig_yaml)
@@ -433,6 +430,10 @@ class TestSaveConfig:
         assert load_config(rig_yaml).reagent_selection.selector_valves \
             .name_mapping == {"port_2": "wash"}
 
+    def test_a_config_built_in_memory_refuses_to_save(self):
+        with pytest.raises(ValueError, match="not loaded from a file"):
+            save_config(FluidicsConfig(**_make_config_dict()))
+
     def test_a_json_path_writes_the_sibling_yaml_and_leaves_the_json(
             self, tmp_path, fixtures_dir):
         """Loading a legacy JSON already wrote and used the sibling YAML;
@@ -443,7 +444,7 @@ class TestSaveConfig:
         json_before = open(json_path).read()
         config = load_config(json_path)     # converts and writes config.yaml
         config.reagent_selection.selector_valves.name_mapping = {"port_3": "TCEP"}
-        written = save_config(config, json_path)
+        written = save_config(config)       # to source_path: the sibling YAML
         assert written == str(tmp_path / "config.yaml")
         assert open(json_path).read() == json_before
         assert load_config(written).reagent_selection.selector_valves \
