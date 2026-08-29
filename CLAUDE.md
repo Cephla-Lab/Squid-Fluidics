@@ -70,7 +70,8 @@ These must stay in sync. Same applies to `VALVE_POSITIONS`/`ValvesStates_t` and 
 - **`fluidics/merfish_operations.py`** — MERFISH experiment sequence logic
 - **`fluidics/open_chamber_operations.py`** — Open chamber experiment sequence logic
 - **`fluidics/manual_operations.py`** — `ManualOperations(devices)`: the manual tab's verbs (open port, extract, dispense, empty to waste, aspirate) as blocking, Qt-free methods; the GUI runs them off-thread, scripts call them directly
-- **`fluidics/experiment_worker.py`** — The run loop: iterates the sequences, reports through callbacks
+- **`fluidics/events.py`** — The run's boundary vocabulary: `PlanEntry` (the run plan — one entry per sequence repeat, priced, carrying its source row) and the typed events (`RunStarted`…`RunEnded`) published on `session.events`
+- **`fluidics/experiment_worker.py`** — The run loop: iterates the run plan, publishes the boundary events, records its outcome for the session's RunEnded
 - **`fluidics/usage.py`** — `ReagentUsage`: per-port reagent totals, fed by the pump's `draws` channel joined with the valve system's open port; resets at each run's start, logs totals at its end; `system.usage`
 - **`fluidics/subscribers.py`** — `Subscribers`: the callback list with isolated dispatch that the MCU packet stream, the flow sensors, the TCM and the run session all publish through
 - **`fluidics/time_estimate.py`** — `estimate_run_time(config, sequences)`: the run-time estimate, computed by replaying the sequences against a simulated twin of the config and totalling the chains the operations actually queue; one figure per sequence, never touches hardware, falls back rather than blocking a run

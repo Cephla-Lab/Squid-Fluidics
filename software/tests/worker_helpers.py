@@ -1,29 +1,52 @@
 # tests/worker_helpers.py
-"""Run an ExperimentWorker synchronously and record what it reports."""
+"""Run an ExperimentWorker synchronously and record what it publishes."""
 
+from fluidics.events import (Incubating, RunStarted, SequenceCompleted,
+                             SequenceStarted)
 from fluidics.experiment_worker import ExperimentWorker
+from fluidics.subscribers import Subscribers
+from fluidics.time_estimate import plan_run
+
+
+def plan_for(sequences, config=None, seconds=1.0):
+    """A plan for `sequences` without a rig: every entry priced flat --
+    worker tests exercise the loop, not the estimate."""
+    from fluidics.events import PlanEntry
+    plan = []
+    for row, seq in enumerate(sequences):
+        repeats = seq.get("repeat", 1)
+        for repeat in range(1, repeats + 1):
+            plan.append(PlanEntry(row, seq, repeat, repeats,
+                                  seq.get("name") or seq["type"], seconds))
+    return tuple(plan)
 
 
 def record_run(ops, sequences, config, run_control=None):
-    """Construct and run, returning the flat callback record:
-    ("estimate",), ("progress", num, status), ("make_safe",), ("stopped",),
-    ("error", message), ("finished",). The CLI runs the loop on a thread
-    only to keep its console alive; the loop itself is synchronous.
+    """Construct and run, returning (worker, events): the worker (whose
+    outcome/message/ended_position say how it ended) and the flat list of
+    published events -- ("started",), ("sequence", position, kind) for
+    SequenceStarted ("started") / Incubating ("incubating") /
+    SequenceCompleted ("completed") -- plus ("make_safe",) when the safety
+    hook ran. The CLI runs the loop on a thread only to keep its console
+    alive; the loop itself is synchronous.
     """
     events = []
-    worker = ExperimentWorker(ops, sequences, config, callbacks={
-        "on_estimate": lambda durations: events.append(("estimate",)),
-        "update_progress":
-            lambda index, num, status: events.append(("progress", num, status)),
-        "make_safe": lambda: events.append(("make_safe",)),
-        "on_stopped": lambda: events.append(("stopped",)),
-        "on_error": lambda message: events.append(("error", message)),
-        "on_finished": lambda: events.append(("finished",)),
-    }, run_control=run_control)
+    channel = Subscribers("test run events")
+
+    def note(event):
+        if isinstance(event, RunStarted):
+            events.append(("started",))
+        elif isinstance(event, SequenceStarted):
+            events.append(("sequence", event.position + 1, "started"))
+        elif isinstance(event, Incubating):
+            events.append(("sequence", event.position + 1, "incubating"))
+        elif isinstance(event, SequenceCompleted):
+            events.append(("sequence", event.position + 1, "completed"))
+
+    channel.subscribe(note)
+    worker = ExperimentWorker(ops, plan_for(sequences), config,
+                              events=channel,
+                              make_safe=lambda: events.append(("make_safe",)) or [],
+                              run_control=run_control)
     worker.run()
-    return events
-
-
-def errors_in(events):
-    """The on_error messages in a record_run event list."""
-    return [message for kind, *rest in events if kind == "error" for message in rest]
+    return worker, events

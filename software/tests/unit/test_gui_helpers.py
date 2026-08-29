@@ -22,6 +22,8 @@ def _bind(name, stub, cls=None):
     cls = cls or gui.SequencesWidget
     return lambda *args: getattr(cls, name)(stub, *args)
 from fluidics.flow_monitor import FlowFault
+from fluidics.events import (PlanEntry, RunEnded, RunStarted,
+                             SequenceCompleted, SequenceStarted)
 from fluidics.run_session import SessionSnapshot
 from fluidics.subscribers import Subscribers
 
@@ -72,6 +74,7 @@ class FakeSession:
         self.elapsed_seconds = elapsed_seconds
         self.calls = []
         self.state = Subscribers("fake session state")
+        self.events = Subscribers("fake run events")
 
     def snapshot(self):
         # The real namedtuple, keyword-constructed: a renamed or added
@@ -138,50 +141,33 @@ class TestSafeFilenamePart:
         assert gui._safe_filename_part("waste line") == "waste_line"
 
 
-class TestHighlightFollowsCheckedRows:
-    """The worker runs only the checked sequences, so the index it reports is a
+def plan_of(durations, rows=None):
+    """A plan stub: one entry per duration; rows default 0..n-1 (a run over
+    every model row)."""
+    rows = rows if rows is not None else range(len(durations))
+    return tuple(PlanEntry(row, {}, 1, 1, f"step {row}", seconds)
+                 for row, seconds in zip(rows, durations))
+
+
+class TestHighlightFollowsThePlan:
+    """The run covers only the checked sequences, so a plan entry's row is a
     position in that filtered list -- not a tree row. With a non-contiguous
-    selection, highlighting the raw index lights up the wrong sequence.
-
-    _handle_progress must translate through the rows snapshotted at run start.
-    Called unbound against a stub, since constructing SequencesWidget needs a
-    QApplication.
-    """
-
-    class Label:
-        def setText(self, text):
-            pass
-
-    class Stub:
-        def __init__(self, running_rows):
-            self._running_rows = running_rows
-            self.total_sequences = len(running_rows)
-            self.sequenceLabel = TestHighlightFollowsCheckedRows.Label()
-            self.highlighted = []
-
-        def highlightRow(self, row):
-            self.highlighted.append(row)
+    selection, highlighting it raw lights up the wrong sequence:
+    SequenceStarted must translate through the model rows snapshotted at run
+    start. Called unbound against a stub."""
 
     def test_a_sparse_selection_lights_each_checked_row_in_turn(self):
-        stub = self.Stub(running_rows=[0, 2, 4])
-        for index in range(3):
-            gui.SequencesWidget._handle_progress(stub, index, index + 1, "Started")
+        stub = SimpleNamespace(
+            _plan=plan_of([1.0, 1.0, 1.0]),
+            _model_rows=[0, 2, 4],
+            sequenceLabel=SimpleNamespace(setText=lambda t: None),
+            highlighted=[],
+        )
+        stub.highlightRow = stub.highlighted.append
+        for position in range(3):
+            gui.SequencesWidget._handle_run_event(
+                stub, SequenceStarted("run-1", position))
         assert stub.highlighted == [0, 2, 4]
-
-    def test_an_out_of_range_index_clears_the_highlight(self):
-        # Defensive: an index past the snapshot can only come from a worker
-        # bug; better no highlight than a wrong one. (A tree that shrank
-        # mid-run is caught separately, by highlightRow's own bounds check.)
-        stub = self.Stub(running_rows=[0])
-        gui.SequencesWidget._handle_progress(stub, 5, 6, "Started")
-        assert stub.highlighted == [None]
-
-    def test_a_negative_index_clears_the_highlight_too(self):
-        # Python indexing would wrap -1 to the last checked row -- the guard
-        # must treat it like any other impossible index.
-        stub = self.Stub(running_rows=[0, 2])
-        gui.SequencesWidget._handle_progress(stub, -1, 0, "Started")
-        assert stub.highlighted == [None]
 
 
 class TestIncludedRows:
@@ -439,43 +425,50 @@ class TestAbortSequences:
         assert stub.session.calls == []
 
 
-class TestRunFinished:
-    """The session's state change resets the display; the worker's callbacks
-    only report. Driven here in the order the events are posted: the job
-    ends (state None), any early-end report, then on_finished. Called
-    unbound against stubs."""
+class TestRunEnded:
+    """The session's state change resets the display; RunEnded only reports.
+    Driven here in the order the events are posted: the job ends (state
+    None), then RunEnded. Called unbound against stubs."""
 
-    def _finishing(self, monkeypatch):
+    def _ending(self, monkeypatch):
         order = []
         monkeypatch.setattr(gui.QMessageBox, "information",
                             lambda *args: order.append(("info", args[1])))
         monkeypatch.setattr(gui.QMessageBox, "critical",
                             lambda *args: order.append(("error", args[1])))
         stub = Quiet()
-        stub._ended_early = False
         stub._renderRunControls = lambda: order.append("render")
         return stub, order
 
     def test_a_completed_run_redraws_the_controls_then_says_finished(self, monkeypatch):
-        stub, order = self._finishing(monkeypatch)
+        stub, order = self._ending(monkeypatch)
         gui.SequencesWidget._handle_state(stub, None)
-        gui.SequencesWidget._handle_finished(stub)
+        gui.SequencesWidget._reportRunEnded(
+            stub, RunEnded("run-1", "finished", None, 5.0, None))
         assert order == ["render", ("info", "Finished")]
 
-    def test_a_stopped_run_says_stopped_once_not_finished(self, monkeypatch):
+    def test_a_stopped_run_says_stopped_not_finished(self, monkeypatch):
         """The operator pressed Abort: one dialog saying so, not an Error
         followed by a Finished."""
-        stub, order = self._finishing(monkeypatch)
+        stub, order = self._ending(monkeypatch)
+        offered = []
+        stub._offerResume = offered.append
+        stub._plan = plan_of([1.0])
+        stub._model_rows = [0]
         gui.SequencesWidget._handle_state(stub, None)
-        gui.SequencesWidget._handle_stopped(stub)
-        gui.SequencesWidget._handle_finished(stub)
+        gui.SequencesWidget._reportRunEnded(
+            stub, RunEnded("run-1", "stopped", None, 5.0, position=0))
         assert order == ["render", ("info", "Stopped")]
+        assert offered == [0], "the resume offer must follow the dialog"
 
     def test_a_failed_run_says_why_once(self, monkeypatch):
-        stub, order = self._finishing(monkeypatch)
+        stub, order = self._ending(monkeypatch)
+        stub._offerResume = lambda cutoff: None
+        stub._plan = plan_of([1.0])
+        stub._model_rows = [0]
         gui.SequencesWidget._handle_state(stub, None)
-        gui.SequencesWidget._handle_error(stub, "pump fault")
-        gui.SequencesWidget._handle_finished(stub)
+        gui.SequencesWidget._reportRunEnded(
+            stub, RunEnded("run-1", "failed", "pump fault", 5.0, position=0))
         assert order == ["render", ("error", "Error")]
 
     def test_a_jobs_start_resets_nothing(self):
@@ -933,35 +926,28 @@ class TestBringupDialogs:
 
 
 class TestReAnchoring:
-    """When a sequence completes, what remains is the estimate of the ones
-    not yet run -- whatever the finished ones actually took. Called unbound
-    against stubs."""
+    """When a sequence completes, what remains is the estimate of the plan
+    entries not yet run -- whatever the finished ones actually took. Called
+    unbound against stubs."""
 
     def stub(self, durations, elapsed=100.0):
         return SimpleNamespace(
             session=FakeSession(kind="run", elapsed_seconds=elapsed),
-            sequenceLabel=SimpleNamespace(setText=lambda t: None),
-            total_sequences=len(durations), total_time=999.0,
-            _durations=list(durations),
-            _running_rows=[], highlightRow=lambda row: None,
+            _plan=plan_of(durations), total_time=999.0,
         )
 
     def test_a_completed_sequence_reanchors_the_countdown(self):
         stub = self.stub([60.0, 40.0, 20.0], elapsed=100.0)
-        gui.SequencesWidget._handle_progress(stub, 0, 1, "Completed")
+        gui.SequencesWidget._handle_run_event(
+            stub, SequenceCompleted("run-1", position=0))
         assert stub.total_time == pytest.approx(100.0 + 60.0), \
             "the remainder is the not-yet-run estimates from the clock's now"
 
-    def test_only_a_completion_reanchors(self):
-        stub = self.stub([60.0, 40.0])
-        for status in ("Started", "Incubating", "Paused"):
-            gui.SequencesWidget._handle_progress(stub, 0, 1, status)
-        assert stub.total_time == 999.0
-
-    def test_no_durations_means_no_reanchor(self):
-        stub = self.stub([])
-        gui.SequencesWidget._handle_progress(stub, 0, 1, "Completed")
-        assert stub.total_time == 999.0
+    def test_the_last_completion_anchors_to_the_clock_alone(self):
+        stub = self.stub([60.0, 40.0], elapsed=95.0)
+        gui.SequencesWidget._handle_run_event(
+            stub, SequenceCompleted("run-1", position=1))
+        assert stub.total_time == pytest.approx(95.0)
 
 
 class TestConfirmStart:
@@ -1089,11 +1075,12 @@ class TestHeldVolumePaint:
 
 
 class TestResumeOffer:
-    """After an early end, the operator is offered the checkboxes set to run
-    again from the row that was in flight. Called unbound against stubs."""
+    """After an early end, RunEnded names the plan entry in flight; the
+    offer sets the checkboxes to run again from its model row. Called
+    unbound against stubs."""
 
     def _stub(self, monkeypatch, answer=gui.QMessageBox.No, sequences=None,
-              running=None, resume_index=None):
+              model_rows=None):
         asked = []
 
         def question(*args):
@@ -1104,60 +1091,80 @@ class TestResumeOffer:
         refreshed = []
         stub = SimpleNamespace(
             _sequences=sequences if sequences is not None else [],
-            _running_rows=running or [],
-            _resume_index=resume_index,
+            _model_rows=model_rows or [],
             _refresh=lambda: refreshed.append(True),
             asked=asked, refreshed=refreshed,
         )
         return stub
 
-    def test_no_leaves_the_checkboxes_and_consumes_the_offer(self, monkeypatch):
+    def test_no_leaves_the_checkboxes_alone(self, monkeypatch):
         sequences = [{"include": True, "type": "flow_reagent"},
                      {"include": True, "type": "priming"}]
-        stub = self._stub(monkeypatch, sequences=sequences, running=[0, 1],
-                          resume_index=1)
-        gui.SequencesWidget._offerResume(stub)
+        stub = self._stub(monkeypatch, sequences=sequences, model_rows=[0, 1])
+        gui.SequencesWidget._offerResume(stub, 1)
         assert [s["include"] for s in sequences] == [True, True]
-        gui.SequencesWidget._offerResume(stub)
-        assert len(stub.asked) == 1, "the offer must not repeat"
+        assert stub.refreshed == []
 
-    def test_nothing_started_means_no_offer(self, monkeypatch):
-        stub = self._stub(monkeypatch, resume_index=None)
-        gui.SequencesWidget._offerResume(stub)
-        assert stub.asked == []
-
-    def test_stopped_and_error_both_offer(self, monkeypatch):
-        monkeypatch.setattr(gui.QMessageBox, "information", lambda *a: None)
-        monkeypatch.setattr(gui.QMessageBox, "critical", lambda *a: None)
+    def test_a_finished_run_offers_nothing(self, monkeypatch):
+        """RunEnded carries position=None when the run finished; there is
+        nowhere to resume from and no question to ask."""
+        monkeypatch.setattr(gui.QMessageBox, "information", lambda *args: None)
         offered = []
-        stub = SimpleNamespace(_ended_early=False,
-                               _offerResume=lambda: offered.append(True))
-        gui.SequencesWidget._handle_stopped(stub)
-        gui.SequencesWidget._handle_error(stub, "pump fault")
-        assert offered == [True, True]
-
-    def test_a_fresh_run_clears_the_stale_offer(self):
-        stub = SimpleNamespace(
-            total_time=1.0, _resume_index=3, total_sequences=1,
-            sequenceLabel=SimpleNamespace(setText=lambda t: None),
-            timer=SimpleNamespace(start=lambda ms: None),
-            _renderRunControls=lambda: None,
-        )
-        gui.SequencesWidget._beginRunDisplay(stub)
-        assert stub._resume_index is None
+        stub = SimpleNamespace(_offerResume=lambda cutoff: offered.append(cutoff))
+        gui.SequencesWidget._reportRunEnded(
+            stub, RunEnded("run-1", "finished", None, 5.0, position=None))
+        assert offered == []
 
     def test_yes_rechecks_a_run_row_unchecked_mid_run(self, monkeypatch):
         """The checkboxes stay live during a run: a remaining row the
         operator unchecked while it ran must still come back checked, or
-        the offer's "that row and the ones after it" reads false. (The
-        never-in-the-run case rides the real-widget test.)"""
+        the offer's "that row and the ones after it" reads false."""
         sequences = [{"include": True, "type": "flow_reagent"},
                      {"include": True, "type": "priming", "name": "wash A"},
                      {"include": False, "type": "clean_up"}]
         stub = self._stub(monkeypatch, answer=gui.QMessageBox.Yes,
-                          sequences=sequences, running=[0, 1, 2],
-                          resume_index=1)
-        gui.SequencesWidget._offerResume(stub)
+                          sequences=sequences, model_rows=[0, 1, 2])
+        gui.SequencesWidget._offerResume(stub, 1)
         assert "wash A" in stub.asked[0]
         assert [s["include"] for s in sequences] == [False, True, True]
         assert stub.refreshed == [True]
+
+
+class TestUsageTable:
+    """The run tab's per-port table: painted from the ledger's snapshot,
+    names read fresh from the config at each paint, hidden when empty."""
+
+    def _stub(self, rows):
+        from PyQt5.QtWidgets import QTableWidget
+        table = QTableWidget(0, 3)
+        stub = SimpleNamespace(
+            usageTable=table,
+            system=SimpleNamespace(
+                usage=SimpleNamespace(rows=lambda: list(rows))),
+        )
+        return stub, table
+
+    def test_totals_paint_with_fresh_names(self, qapp):
+        stub, table = self._stub([(1, None, 500.0), (3, "DAPI", 1500.0)])
+        gui.SequencesWidget._renderUsage(stub)
+        assert not table.isHidden()
+        assert table.rowCount() == 2
+        rows = [(table.item(r, 0).text(), table.item(r, 1).text(),
+                 table.item(r, 2).text()) for r in range(2)]
+        assert rows == [("1", "", "500"), ("3", "DAPI", "1500")]
+
+    def test_nothing_drawn_hides_the_table(self, qapp):
+        stub, table = self._stub([])
+        table.setVisible(True)
+        gui.SequencesWidget._renderUsage(stub)
+        assert table.isHidden()
+
+
+class TestHeldVolumePaint:
+    def test_the_bar_paints_the_published_reading(self, qapp):
+        from PyQt5.QtWidgets import QProgressBar
+        bar = QProgressBar()
+        bar.setRange(0, 5000)
+        stub = SimpleNamespace(plungerPositionBar=bar)
+        gui.ManualControlWidget._handle_held_volume(stub, 2600.0)
+        assert bar.value() == 2600

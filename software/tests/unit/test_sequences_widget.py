@@ -210,11 +210,15 @@ class TestResumePreparesTheModel:
         the run, keeps its own unchecked state."""
         monkeypatch.setattr(gui.QMessageBox, "question",
                             lambda *args: gui.QMessageBox.Yes)
+        monkeypatch.setattr(gui.QMessageBox, "information", lambda *args: None)
         widget.setSequences([FLOW, dict(FLOW, include=False), FLOW, TEMP])
-        widget.total_sequences = 3
-        widget._running_rows = [0, 2, 3]
-        widget._handle_progress(1, 2, gui.SEQUENCE_STARTED)
-        widget._offerResume()
+        from fluidics.time_estimate import plan_run
+        widget._plan = plan_run(widget.config, widget.getSequences(selected_only=True))
+        widget._model_rows = widget._includedRows()
+        # The plan's rows index the run's own selection (0,1,2 here); the
+        # tree's model rows are 0,2,3 -- RunEnded's entry must translate.
+        ended = gui.RunEnded("run-1", "stopped", None, 0.0, position=1)
+        widget._handle_run_event(ended)
         assert widget._includedRows() == [2, 3]
         assert widget.tree.topLevelItem(0).checkState(0) == gui.Qt.Unchecked, \
             "the tree did not repaint from the model"

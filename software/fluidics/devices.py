@@ -273,15 +273,12 @@ def build_operations(config, devices, on_warning=None):
     raise ValueError(f"Unsupported application: {config.application!r}")
 
 
-def build_worker(devices, operations, sequences, callbacks=None, durations=None):
-    """Wire one run's worker to `devices`: the shared run_control, the
-    make_safe callback (which this function owns), and the run's time
-    estimate -- `durations`, one figure per sequence for the display to
-    re-anchor on, replayed by whoever starts the run (RunSession.start)."""
-    callbacks = dict(callbacks or {})
-    if "make_safe" in callbacks:
-        raise ValueError("build_worker supplies make_safe; do not pass one")
-    callbacks["make_safe"] = devices.make_safe
-    return ExperimentWorker(operations, sequences, devices.config, callbacks,
-                            run_control=devices.run_control,
-                            durations=durations)
+def build_worker(devices, operations, plan, run_id, events):
+    """Wire one run's worker to `devices`: the shared run_control and the
+    make_safe hook (which this function owns). The plan, the run's id and
+    the events channel come from whoever starts the run
+    (RunSession.start)."""
+    return ExperimentWorker(operations, plan, devices.config,
+                            run_id=run_id, events=events,
+                            make_safe=devices.make_safe,
+                            run_control=devices.run_control)

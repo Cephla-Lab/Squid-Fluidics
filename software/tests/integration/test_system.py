@@ -37,10 +37,14 @@ class TestBuild:
 
 class TestTheJob:
     def test_run_goes_through_the_session_with_the_systems_operations(self, system, real_clock):
+        from fluidics.events import RunEnded
         reports = []
-        system.run([FLOW_CELL_STEP], callbacks={"on_finished": lambda: reports.append("finished")})
+        system.session.events.subscribe(
+            lambda event: reports.append(event.outcome)
+            if isinstance(event, RunEnded) else None)
+        system.run([FLOW_CELL_STEP])
         assert system.wait(5)
-        assert reports == ["finished"]
+        assert wait_until(lambda: reports == ["finished"]), reports
         assert system.devices.syringe_pump.executed, "nothing moved"
 
     def test_run_manual_goes_through_the_session(self, system, real_clock):

@@ -27,18 +27,19 @@ nothing was watching.
 import logging
 import threading
 
+from .events import RunEnded, RunStarted
+
 _logger = logging.getLogger(__name__)
 
 
 class ReagentUsage:
-    def __init__(self, config, syringe_pump, selector_valves, session_state):
+    def __init__(self, config, syringe_pump, selector_valves, run_events):
         self._extract_port = config.syringe_pump.extract_port
         self._valves = selector_valves
         self._lock = threading.Lock()
         self._used_ul = {}
-        self._running = False    # a run is in progress; log totals at its end
         syringe_pump.draws.subscribe(self._on_draw)
-        session_state.subscribe(self._on_state)
+        run_events.subscribe(self._on_event)
 
     def snapshot(self):
         """{fluidic port: uL drawn} since the last reset, a copy."""
@@ -66,22 +67,21 @@ class ReagentUsage:
         with self._lock:
             self._used_ul[port] = self._used_ul.get(port, 0) + volume_ul
 
-    def _on_state(self, kind):
-        if kind == "run":
-            # Notified on the starter's thread before the worker exists, so
-            # the reset cannot race the run's first draw.
+    def _on_event(self, event):
+        if isinstance(event, RunStarted):
+            # RunStarted fires from the worker's constructor, on the
+            # starter's thread before the run's thread exists, so the reset
+            # cannot race the run's first draw.
             self.reset()
-            self._running = True
-        elif kind is None and self._running:
-            self._running = False
-            self._log_totals()
+        elif isinstance(event, RunEnded):
+            self._log_totals(event.run_id)
 
-    def _log_totals(self):
+    def _log_totals(self, run_id):
         rows = self.rows()
         if not rows:
-            _logger.info("Reagent used this run: none drawn.")
+            _logger.info("Reagent used (%s): none drawn.", run_id)
             return
         parts = [(f"port {port} ({name})" if name else f"port {port}")
                  + f": {used:.0f} uL"
                  for port, name, used in rows]
-        _logger.info("Reagent used this run: %s.", "; ".join(parts))
+        _logger.info("Reagent used (%s): %s.", run_id, "; ".join(parts))

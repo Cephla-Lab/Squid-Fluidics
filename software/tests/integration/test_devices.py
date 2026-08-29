@@ -175,17 +175,13 @@ class TestBuildWorker:
     def test_the_worker_waits_on_the_set_s_signal_and_makes_it_safe(self, flow_cell_config, built):
         """So neither entry point can forget half of the wiring: an abort that
         cannot reach the worker, or a TEC left on."""
+        from fluidics.subscribers import Subscribers
         devices = built(flow_cell_config, simulation=True)
-        on_error = lambda message: None
-        worker = build_worker(devices, object(), [], callbacks={"on_error": on_error})
+        events = Subscribers("test events")
+        worker = build_worker(devices, object(), (), "run-1", events)
         assert worker.run_control is devices.run_control
-        assert worker.callbacks["make_safe"] == devices.make_safe
-        assert worker.callbacks["on_error"] is on_error
-
-    def test_a_caller_s_make_safe_is_refused_not_silently_replaced(self, flow_cell_config, built):
-        devices = built(flow_cell_config, simulation=True)
-        with pytest.raises(ValueError, match="make_safe"):
-            build_worker(devices, object(), [], callbacks={"make_safe": lambda: []})
+        assert worker.make_safe == devices.make_safe
+        assert worker.events is events
 
 
 class TestBuildOperations:

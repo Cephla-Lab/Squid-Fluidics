@@ -5,6 +5,7 @@ from fluidics.sequences import (
     get_included_sequences, load_sequences, validate_sequences,
 )
 from fluidics.control.config import default_config_path, load_config
+from fluidics.events import RunEnded
 from fluidics.system import FluidicsSystem
 from fluidics.run_log import (
     setup_uncaught_exception_logging, start_log_file, stop_log_file,
@@ -61,9 +62,13 @@ def main():
         system = FluidicsSystem.build(config, args.simulation)
 
         # The worker narrates its own run through the fluidics logger, so
-        # the CLI needs no rendering callbacks -- but a failed run must not
-        # exit 0, and the worker reports failure only through on_error.
-        system.run(included, callbacks={"on_error": run_errors.append})
+        # the CLI renders nothing -- but a failed run must not exit 0, and
+        # the run reports its outcome only through the events channel.
+        system.session.events.subscribe(
+            lambda event: run_errors.append(event.message or event.outcome)
+            if isinstance(event, RunEnded) and event.outcome != "finished"
+            else None)
+        system.run(included)
         system.wait()
 
     except KeyboardInterrupt:
