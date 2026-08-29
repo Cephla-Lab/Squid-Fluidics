@@ -102,6 +102,28 @@ class TestTheCollectionMoment:
         assert [w["message"] for w in report["warnings"]] == ["during"]
 
 
+class TestTheWait:
+    def test_the_timeout_bounds_the_whole_wait_not_each_write(
+            self, tmp_path, real_clock):
+        """Three writes stuck at once must not each be granted the full
+        timeout in turn. real_clock: under the fake clock this elapsed
+        assertion would pass against the per-writer bug too."""
+        import time
+        r = rig(tmp_path)
+        gate = threading.Event()
+        r.reports._write = lambda report: gate.wait()
+        try:
+            for n in range(3):
+                r.reports._write_off_thread({"run_id": f"run-w{n}"})
+            began = time.monotonic()
+            assert r.reports.wait(0.2) is False
+            assert time.monotonic() - began < 0.45, \
+                "the timeout was spent per writer, not once"
+        finally:
+            gate.set()      # a failure must not strand non-daemon writers
+        assert r.reports.wait(5)
+
+
 class TestTheEdges:
     def test_an_ending_nobody_announced_is_still_recorded(self, tmp_path, caplog):
         r = rig(tmp_path)
@@ -119,4 +141,26 @@ class TestTheEdges:
         with caplog.at_level(logging.ERROR, logger="fluidics"):
             r.events.notify(RunEnded("run-7", "finished", None, 1.0, None))
             assert r.reports.wait(5)
+        assert "could not be written" in caplog.text
+
+    def test_a_write_that_dies_midway_wrecks_nothing(self, tmp_path, caplog,
+                                                     monkeypatch):
+        """The record already at the name -- a same-second collision from
+        another process, say -- must survive a write that fails after the
+        file is open, and no half-written temp may remain."""
+        r = rig(tmp_path)
+        standing = tmp_path / "run-8.json"
+        standing.write_text('{"outcome": "the earlier record"}')
+
+        def dies_midway(report, f, **kwargs):
+            f.write('{"partial":')
+            raise OSError("disk full")
+
+        monkeypatch.setattr("fluidics.reports.json.dump", dies_midway)
+        r.events.notify(RunStarted("run-8", ()))
+        with caplog.at_level(logging.ERROR, logger="fluidics"):
+            r.events.notify(RunEnded("run-8", "finished", None, 1.0, None))
+            assert r.reports.wait(5)
+        assert standing.read_text() == '{"outcome": "the earlier record"}'
+        assert list(tmp_path.glob("*.part")) == [], "temp wreckage left behind"
         assert "could not be written" in caplog.text

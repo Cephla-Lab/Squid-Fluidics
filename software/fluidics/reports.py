@@ -25,6 +25,8 @@ shared across processes.
 
 import json
 import logging
+import os
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -59,11 +61,14 @@ class RunReports:
     def wait(self, timeout=None):
         """Block until every started write has finished; True when none is
         still running. For a caller about to read the files -- a test, or
-        a script collecting its own record."""
+        a script collecting its own record. `timeout` bounds the whole
+        wait, not each write."""
+        deadline = None if timeout is None else time.monotonic() + timeout
         with self._lock:
             writers = list(self._writers)
         for writer in writers:
-            writer.join(timeout)
+            writer.join(None if deadline is None else
+                        max(0.0, deadline - time.monotonic()))
         return not any(writer.is_alive() for writer in writers)
 
     # --- subscribers (the starter's thread, the job's thread) ---
@@ -132,10 +137,12 @@ class RunReports:
     def _write_off_thread(self, report):
         writer = threading.Thread(target=self._write, args=(report,),
                                   name="run-report", daemon=False)
+        # Started before it is listed: wait() joins whatever it snapshots,
+        # and joining a thread that never started raises.
+        writer.start()
         with self._lock:
             self._writers = [w for w in self._writers if w.is_alive()]
             self._writers.append(writer)
-        writer.start()
 
     def _write(self, report):
         directory = (Path(self._directory) if self._directory is not None
@@ -143,10 +150,19 @@ class RunReports:
         path = directory / f"{report['run_id']}.json"
         try:
             directory.mkdir(parents=True, exist_ok=True)
-            with open(path, "w", encoding="utf-8") as f:
-                # default=str: a report is a record -- an unforeseen value
-                # lands as its string, never costs the whole file.
-                json.dump(report, f, indent=2, default=str)
+            # Dump to a sibling temp file and swap it in whole: a write
+            # that dies midway must not leave a truncated record at the
+            # destination -- or destroy one already there.
+            fd, tmp = tempfile.mkstemp(dir=directory, suffix=".part")
+            try:
+                with open(fd, "w", encoding="utf-8") as f:
+                    # default=str: a report is a record -- an unforeseen
+                    # value lands as its string, never costs the file.
+                    json.dump(report, f, indent=2, default=str)
+            except BaseException:
+                os.unlink(tmp)
+                raise
+            os.replace(tmp, path)
             _logger.info("Run report: %s", path)
         except OSError:
             _logger.exception("The run report %s could not be written.", path)
