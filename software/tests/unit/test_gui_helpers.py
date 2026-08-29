@@ -445,7 +445,7 @@ class TestRunEnded:
         stub, order = self._ending(monkeypatch)
         gui.SequencesWidget._reportRunEnded(
             stub, RunEnded("run-1", "finished", None, 5.0, None))
-        gui.SequencesWidget._handle_state(stub, None)
+        gui.SequencesWidget._handle_state(stub)
         assert order == [("info", "Finished"), "render"]
 
     def test_a_stopped_run_says_stopped_not_finished(self, monkeypatch):
@@ -457,27 +457,29 @@ class TestRunEnded:
         stub._plan = plan_of([1.0])
         gui.SequencesWidget._reportRunEnded(
             stub, RunEnded("run-1", "stopped", None, 5.0, position=0))
-        gui.SequencesWidget._handle_state(stub, None)
+        gui.SequencesWidget._handle_state(stub)
         assert order == [("info", "Stopped"), "render"]
         assert offered == [0], "the resume offer must follow the dialog"
 
     def test_a_failed_run_says_why_once(self, monkeypatch):
         stub, order = self._ending(monkeypatch)
-        stub._offerResume = lambda cutoff: None
+        stub._offerResume = lambda position: None
         stub._plan = plan_of([1.0])
         gui.SequencesWidget._reportRunEnded(
             stub, RunEnded("run-1", "failed", "pump fault", 5.0, position=0))
-        gui.SequencesWidget._handle_state(stub, None)
+        gui.SequencesWidget._handle_state(stub)
         assert order == [("error", "Error"), "render"]
 
     def test_a_jobs_start_resets_nothing(self):
-        """Only the end of a job clears the display: a kind announcement
-        must not stop the clock the button handler just started."""
+        """Only the end of a job clears the display: a state change with
+        the rig busy must not stop the clock the button handler just
+        started."""
         stopped = []
         stub = Quiet()
         stub.timer = SimpleNamespace(stop=lambda: stopped.append(True))
-        gui.SequencesWidget._handle_state(stub, "run")
-        gui.SequencesWidget._handle_state(stub, "manual")
+        for kind in ("run", "manual"):
+            stub.session = FakeSession(kind=kind)
+            gui.SequencesWidget._handle_state(stub)
         assert stopped == []
 
     def test_a_manual_jobs_start_deadens_this_tabs_controls(self):
@@ -485,7 +487,7 @@ class TestRunEnded:
         deaden Run here without the main window's tab guard helping."""
         stub = run_widget()
         stub.session.kind = "manual"
-        gui.SequencesWidget._handle_state(stub, "manual")
+        gui.SequencesWidget._handle_state(stub)
         assert stub.runButton.enabled is False
         assert stub.moveUpButton.enabled is False
 
@@ -633,7 +635,7 @@ class TestPauseControls:
         stub.abortButton = Button()
         stub._renderRunControls = _bind("_renderRunControls", stub)
         stub._blockingError = lambda: None
-        gui.SequencesWidget._handle_state(stub, None)
+        gui.SequencesWidget._handle_state(stub)
         assert stub.pauseButton.text() == "Pause"
         assert stub.pauseButton.enabled is False
         assert stub.runButton.enabled is True
@@ -1092,22 +1094,27 @@ class TestResumeOffer:
         started = []
         stub = SimpleNamespace(
             _plan=plan,
-            _sequences=(sequences if sequences is not None else
-                        [{"include": True, "type": "flow_reagent"}] * 4),
+            _sequences=[] if sequences is None else sequences,
             system=SimpleNamespace(
                 run=lambda seqs, plan=None: started.append(plan)),
             _beginRunDisplay=lambda count: started.append(("display", count)),
             asked=asked, started=started,
         )
+        stub._startRun = lambda seqs, plan: gui.SequencesWidget._startRun(
+            stub, seqs, plan)
         return stub
 
     def test_yes_runs_exactly_the_tail(self, monkeypatch):
         plan = plan_of([10.0, 20.0, 30.0], rows=[0, 2, 3])
-        stub = self._stub(monkeypatch, answer=gui.QMessageBox.Yes, plan=plan)
+        # One dict per tree row 0..3, so a regression back to writing
+        # _sequences[entry.row] lands on a row and trips the pin below.
+        checked = [{"include": True, "type": "flow_reagent"} for _ in range(4)]
+        stub = self._stub(monkeypatch, answer=gui.QMessageBox.Yes, plan=plan,
+                          sequences=checked)
         gui.SequencesWidget._offerResume(stub, 1)
         assert stub.started == [plan[1:], ("display", 2)], \
             "the run must be the interrupted plan's tail, nothing else"
-        assert all(s["include"] for s in stub._sequences), \
+        assert all(s["include"] for s in checked), \
             "the checkboxes are not the offer's to touch"
 
     def test_no_runs_nothing(self, monkeypatch):
@@ -1145,8 +1152,6 @@ class TestResumeOffer:
         assert offered == []
 
 
-
-
 class TestStaleStateNone:
     def test_a_stale_none_does_not_clear_a_run_already_started(self):
         """The resume offer starts the tail from inside the old run's
@@ -1157,7 +1162,7 @@ class TestStaleStateNone:
         stub.session = FakeSession(kind="run")     # the tail is already going
         stub.timer = SimpleNamespace(stop=lambda: stopped.append(True))
         stub._renderRunControls = lambda: None
-        gui.SequencesWidget._handle_state(stub, None)
+        gui.SequencesWidget._handle_state(stub)
         assert stopped == [], "a stale state(None) stopped the new run's clock"
 
     def test_a_current_none_still_resets(self):
@@ -1166,5 +1171,5 @@ class TestStaleStateNone:
         stub.session = FakeSession()               # idle: the reset is real
         stub.timer = SimpleNamespace(stop=lambda: stopped.append(True))
         stub._renderRunControls = lambda: None
-        gui.SequencesWidget._handle_state(stub, None)
+        gui.SequencesWidget._handle_state(stub)
         assert stopped == [True]

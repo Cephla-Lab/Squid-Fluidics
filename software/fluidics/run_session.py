@@ -46,7 +46,11 @@ class RunSession:
         # The run's boundary facts (fluidics.events): the worker publishes
         # the in-run ones; the session publishes RunEnded once the rig is
         # free, so a dialog painted on it sees an idle rig -- the same
-        # deferral the early-end report has always had.
+        # deferral the early-end report has always had. Subscription order
+        # is delivery order, and a subscriber may chain the next run from
+        # RunEnded (the GUI's resume offer) while later subscribers still
+        # wait for theirs -- so system-level bookkeeping (usage, reports)
+        # must subscribe before any widget that can chain.
         self.events = Subscribers("run events")
         self._run_ids = itertools.count(1)     # atomic under the GIL
         self._lock = threading.RLock()

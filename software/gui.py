@@ -30,7 +30,7 @@ from fluidics.devices import (
 )
 from fluidics.system import FluidicsSystem
 from fluidics.events import (RunEnded, RunStarted, SequenceCompleted,
-                             SequenceStarted, plan_seconds)
+                             SequenceStarted, plan_seconds, repeat_suffix)
 from fluidics.run_log import setup_uncaught_exception_logging, start_log_file
 from fluidics.sequences import (
     load_sequences, save_sequences_yaml,
@@ -697,11 +697,17 @@ class SequencesWidget(PostsToQtThread, QWidget):
 
         self._warnings.clear()
         self.warningLabel.setVisible(False)
+        self._startRun(selected, plan)
 
+    def _startRun(self, sequences, plan):
+        """Hand the job to the rig and open this tab's display -- the one
+        ending shared by the Run button and the resume offer, so the two
+        start sites cannot drift. The tabs (and, for the offer, the modal
+        chain) make a busy rig unreachable in practice; the dialog beats a
+        traceback if it ever is not."""
         try:
-            self.system.run(selected, plan=plan)
+            self.system.run(sequences, plan=plan)
         except RuntimeError as e:
-            # A manual move got in first; the tabs normally prevent this.
             QMessageBox.warning(self, "Rig busy", str(e))
             return
         self._beginRunDisplay(len(plan))
@@ -864,10 +870,10 @@ class SequencesWidget(PostsToQtThread, QWidget):
         is the interrupted experiment's remainder, whatever the tree says
         by then.
 
-        The model still matches the plan's rows (relabeled to tree rows at
-        run start): edits are frozen during the run, and from the RunEnded
+        Structural edits are disabled during the run, so `entry.row`
+        still names the tree row the operator sees; and from the RunEnded
         dialog through this question the Qt thread never leaves the modal
-        chain, so nothing can edit between.
+        chain, so the rig stays free until Yes claims it.
         """
         tail = self._plan[position:]
         entry = tail[0]
@@ -875,8 +881,7 @@ class SequencesWidget(PostsToQtThread, QWidget):
         # run, and the offer must name what will actually execute, not
         # what the tree says by now.
         label = entry.label
-        which = (f", repeat {entry.repeat}/{entry.repeats}"
-                 if entry.repeats > 1 else "")
+        which = repeat_suffix(entry)
         if not _ask_yes_no(
                 self, "Resume from here?",
                 f"The run ended at sequence {entry.row + 1} ({label}{which}).\n\n"
@@ -885,33 +890,29 @@ class SequencesWidget(PostsToQtThread, QWidget):
             return
         _logger.info("Resume accepted: %d sequence(s) from row %d (%s%s).",
                      len(tail), entry.row + 1, label, which)
-        try:
-            self.system.run(None, plan=tail)
-        except RuntimeError as e:
-            # The tabs and the modal chain make this unreachable in
-            # practice; the message beats a traceback if it ever is not.
-            QMessageBox.warning(self, "Rig busy", str(e))
-            return
-        self._beginRunDisplay(len(tail))
+        self._startRun(None, tail)
 
     def _onSessionState(self, kind):
-        # On the session's thread; the display change crosses to Qt.
-        self._post_event('_handle_state', kind)
+        # On the session's thread; the display change crosses to Qt. The
+        # payload stays behind: the repaint reads the session as it stands
+        # at delivery, so no queued notification can be stale.
+        self._post_event('_handle_state')
 
-    def _handle_state(self, kind):
+    def _handle_state(self):
         """The run display follows the session, not any one callback: the
         job ending -- finished, aborted, or a fault's self-cancel -- is what
         stops the clock and clears the run's furniture. RunEnded's dialog
         lands first (over the still-painted run, highlight included); this
         reset follows it in the posted order. Every transition redraws the
         buttons, so a manual job deadens this tab's controls without
-        leaning on the main window's tab guard."""
-        if kind is None and self.session.snapshot().kind is None:
-            # Reset only if the rig is still idle when this lands: the
-            # resume offer starts the tail from inside the old run's
-            # RunEnded dialog chain, and the old state(None) can still be
-            # queued behind it -- a stale reset would stop the new run's
-            # clock and clear its display.
+        leaning on the main window's tab guard.
+
+        Repaints from the session's current state, never from what was
+        announced: the resume offer starts the tail from inside the old
+        run's RunEnded dialog chain, and the old run's state(None) can
+        still be queued behind it -- a reset keyed to the delivery would
+        stop the new run's clock and clear its display."""
+        if self.session.kind is None:
             self.timer.stop()
             self.progressBar.setValue(0)
             self.timeLabel.setText("00:00:00 remaining")
