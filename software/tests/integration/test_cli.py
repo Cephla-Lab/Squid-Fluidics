@@ -16,12 +16,14 @@ from .test_sample_files import QUICKSTART_PAIRS, SOFTWARE
 
 
 @pytest.fixture
-def cli(monkeypatch):
+def cli(monkeypatch, tmp_path):
     """main()'s exit code for the given argv: a clean run returns, everything
     else exits."""
     monkeypatch.setattr(run_sequences, "start_log_file", lambda directory=None: None)
     monkeypatch.setattr(run_sequences, "stop_log_file", lambda: None)
     monkeypatch.setattr(run_sequences, "setup_uncaught_exception_logging", lambda: None)
+    monkeypatch.setattr("fluidics.reports.default_report_directory",
+                        lambda: tmp_path / "reports")
 
     def run(*argv):
         monkeypatch.setattr(sys, "argv", ["run_sequences.py", *argv])

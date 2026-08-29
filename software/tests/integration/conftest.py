@@ -36,11 +36,13 @@ def instant_devices(built):
 
 
 @pytest.fixture
-def system(flow_cell_config, instant_devices):
+def system(flow_cell_config, instant_devices, tmp_path):
     """A FluidicsSystem on the instant simulated DeviceSet, torn down clean
-    -- the shape test_system and test_usage share."""
+    -- the shape test_system and test_usage share. Run reports land in the
+    test's own tmp_path, never the user's log directory."""
     from fluidics.system import FluidicsSystem
-    built = FluidicsSystem(flow_cell_config, instant_devices(flow_cell_config))
+    built = FluidicsSystem(flow_cell_config, instant_devices(flow_cell_config),
+                           report_dir=tmp_path)
     yield built
     assert built.close() == []
 
