@@ -869,9 +869,14 @@ class SequencesWidget(PostsToQtThread, QWidget):
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if answer != QMessageBox.Yes:
             return
+        # Every row of the run snapshot is set from the cutoff -- not just
+        # completed rows unchecked: the checkboxes stay live during a run,
+        # and a row unchecked mid-run must still come back checked, or the
+        # offer's promise ("that row and the ones after it") reads false.
+        # Rows that were never part of the run keep their own state.
         for row in self._running_rows:
-            if row < cutoff and row < len(self._sequences):
-                self._sequences[row]['include'] = False
+            if row < len(self._sequences):
+                self._sequences[row]['include'] = row >= cutoff
         self._refresh()
 
     def _onSessionState(self, kind):

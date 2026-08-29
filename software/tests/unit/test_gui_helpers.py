@@ -1163,3 +1163,14 @@ class TestResumeOffer:
         )
         gui.SequencesWidget._beginRunDisplay(stub)
         assert stub._resume_index is None
+
+    def test_yes_rechecks_a_run_row_unchecked_mid_run(self, monkeypatch):
+        """The checkboxes stay live during a run: a remaining row the
+        operator unchecked while it ran must still come back checked, or
+        the offer's "that row and the ones after it" reads false."""
+        sequences = [{"include": True}, {"include": True}, {"include": False}]
+        stub = self._stub(monkeypatch, answer=gui.QMessageBox.Yes,
+                          sequences=sequences, running=[0, 1, 2],
+                          resume_index=1)
+        gui.SequencesWidget._offerResume(stub)
+        assert [s["include"] for s in sequences] == [False, True, True]
