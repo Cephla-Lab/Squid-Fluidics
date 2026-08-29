@@ -1,6 +1,7 @@
 import logging
 
 from .errors import AbortRequested, Cancelled, RunControl
+from .sequences import sequence_label
 # Re-exported: defined here before fluidics.errors existed, and scripts
 # outside this package may still import it from here.
 from .errors import OperationError  # noqa: F401
@@ -115,7 +116,7 @@ class ExperimentWorker:
         tag = None
         try:
             for index, seq in enumerate(self.sequences):
-                label = seq.get('name') or seq['type']
+                label = sequence_label(seq)
                 for repeat in range(1, seq.get('repeat', 1) + 1):
                     current_sequence += 1
                     tag = f"Sequence {current_sequence}/{self.n_sequences} ({label})"

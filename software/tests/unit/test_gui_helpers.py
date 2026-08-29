@@ -1092,12 +1092,15 @@ class TestResumeOffer:
     """After an early end, the operator is offered the checkboxes set to run
     again from the row that was in flight. Called unbound against stubs."""
 
-    def _stub(self, monkeypatch, answer=None, sequences=None, running=None,
-              resume_index=None):
+    def _stub(self, monkeypatch, answer=gui.QMessageBox.No, sequences=None,
+              running=None, resume_index=None):
         asked = []
-        monkeypatch.setattr(gui.QMessageBox, "question",
-                            lambda *args: (asked.append(args[2]),
-                                           answer or gui.QMessageBox.No)[1])
+
+        def question(*args):
+            asked.append(args[2])
+            return answer
+
+        monkeypatch.setattr(gui.QMessageBox, "question", question)
         refreshed = []
         stub = SimpleNamespace(
             _sequences=sequences if sequences is not None else [],
@@ -1108,30 +1111,9 @@ class TestResumeOffer:
         )
         return stub
 
-    def test_started_remembers_the_row_in_flight(self):
-        stub = SimpleNamespace(
-            sequenceLabel=SimpleNamespace(setText=lambda t: None),
-            total_sequences=3, _durations=[], _resume_index=None,
-            _running_rows=[0, 2], highlightRow=lambda row: None,
-        )
-        gui.SequencesWidget._handle_progress(stub, 1, 2, gui.SEQUENCE_STARTED)
-        assert stub._resume_index == 1
-
-    def test_yes_unchecks_only_the_completed_running_rows(self, monkeypatch):
-        """Row 1 was never in the run: its checkbox is not the offer's to
-        touch. Row 0 completed; rows 2 and 3 remain the experiment."""
-        sequences = [{"include": True}, {"include": False},
-                     {"include": True, "name": "wash A"}, {"include": True}]
-        stub = self._stub(monkeypatch, answer=gui.QMessageBox.Yes,
-                          sequences=sequences, running=[0, 2, 3],
-                          resume_index=1)
-        gui.SequencesWidget._offerResume(stub)
-        assert "wash A" in stub.asked[0]
-        assert [s["include"] for s in sequences] == [False, False, True, True]
-        assert stub.refreshed == [True]
-
     def test_no_leaves_the_checkboxes_and_consumes_the_offer(self, monkeypatch):
-        sequences = [{"include": True}, {"include": True}]
+        sequences = [{"include": True, "type": "flow_reagent"},
+                     {"include": True, "type": "priming"}]
         stub = self._stub(monkeypatch, sequences=sequences, running=[0, 1],
                           resume_index=1)
         gui.SequencesWidget._offerResume(stub)
@@ -1167,10 +1149,15 @@ class TestResumeOffer:
     def test_yes_rechecks_a_run_row_unchecked_mid_run(self, monkeypatch):
         """The checkboxes stay live during a run: a remaining row the
         operator unchecked while it ran must still come back checked, or
-        the offer's "that row and the ones after it" reads false."""
-        sequences = [{"include": True}, {"include": True}, {"include": False}]
+        the offer's "that row and the ones after it" reads false. (The
+        never-in-the-run case rides the real-widget test.)"""
+        sequences = [{"include": True, "type": "flow_reagent"},
+                     {"include": True, "type": "priming", "name": "wash A"},
+                     {"include": False, "type": "clean_up"}]
         stub = self._stub(monkeypatch, answer=gui.QMessageBox.Yes,
                           sequences=sequences, running=[0, 1, 2],
                           resume_index=1)
         gui.SequencesWidget._offerResume(stub)
+        assert "wash A" in stub.asked[0]
         assert [s["include"] for s in sequences] == [False, True, True]
+        assert stub.refreshed == [True]

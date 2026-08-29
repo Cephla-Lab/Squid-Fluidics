@@ -246,6 +246,14 @@ class PortNamesDialog(QDialog):
         super().accept()
 
 
+def _ask_yes_no(parent, title, text, default=QMessageBox.No):
+    """One spelling of the Yes/No question the GUI asks three ways --
+    start a run, resume one, abort on exit."""
+    answer = QMessageBox.question(parent, title, text,
+                                  QMessageBox.Yes | QMessageBox.No, default)
+    return answer == QMessageBox.Yes
+
+
 def _hms(seconds):
     """Seconds as hh:mm:ss, for the estimate dialog and the countdown."""
     seconds = int(seconds)
@@ -709,11 +717,10 @@ class SequencesWidget(PostsToQtThread, QWidget):
     def _confirmStart(self, seconds, n_sequences):
         """The operator sees the bill before the run starts: how many
         sequences, how long they should take. True to go ahead."""
-        answer = QMessageBox.question(
+        return _ask_yes_no(
             self, "Start run?",
             f"{n_sequences} sequence(s), estimated {_hms(seconds)}.\n\nStart the run?",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
-        return answer == QMessageBox.Yes
+            default=QMessageBox.Yes)
 
     def _beginRunDisplay(self):
         """A fresh run's display. The previous run's estimate must not price
@@ -813,7 +820,7 @@ class SequencesWidget(PostsToQtThread, QWidget):
     def _handle_progress(self, index, sequence_num, status):
         self.sequenceLabel.setText(f"{sequence_num}/{self.total_sequences} sequences")
         if status == SEQUENCE_STARTED:
-            self._resume_index = index   # the row in flight, if this run ends early
+            self._resume_index = index
         if status == SEQUENCE_COMPLETED and self._durations:
             # Re-anchor: whatever the finished sequences actually took, what
             # remains is the estimate of the ones not yet run, from now.
@@ -853,30 +860,33 @@ class SequencesWidget(PostsToQtThread, QWidget):
         repeat, and a run stopped exactly at a row boundary re-offers the
         row that just finished; the operator sees the checkboxes (and the
         fresh estimate behind the Run button) before anything moves.
-        Exact-repeat resume needs the shared run plan and comes with it.
+
+        The model still matches _running_rows here: edits are frozen during
+        the run, and from the early-end dialog through this question the Qt
+        thread never leaves the modal chain, so nothing can edit between.
         """
-        index, self._resume_index = self._resume_index, None
-        if index is None or not 0 <= index < len(self._running_rows):
+        index = self._resume_index
+        self._resume_index = None       # one offer per early end
+        if index is None:
             return
         cutoff = self._running_rows[index]
-        seq = self._sequences[cutoff] if cutoff < len(self._sequences) else {}
-        label = seq.get('name') or seq.get('type', '?')
-        answer = QMessageBox.question(
-            self, "Resume from here?",
-            f"The run ended at sequence {cutoff + 1} ({label}).\n\n"
-            "Check only that row and the ones after it, ready to run again "
-            "from there?",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if answer != QMessageBox.Yes:
+        seq = self._sequences[cutoff]
+        label = seq.get('name') or SEQUENCE_TYPE_LABELS.get(seq['type'], seq['type'])
+        if not _ask_yes_no(
+                self, "Resume from here?",
+                f"The run ended at sequence {cutoff + 1} ({label}).\n\n"
+                "Check only that row and the ones after it, ready to run "
+                "again from there?"):
             return
+        _logger.info("Resume accepted: rows re-checked from sequence %d (%s).",
+                     cutoff + 1, label)
         # Every row of the run snapshot is set from the cutoff -- not just
         # completed rows unchecked: the checkboxes stay live during a run,
         # and a row unchecked mid-run must still come back checked, or the
         # offer's promise ("that row and the ones after it") reads false.
         # Rows that were never part of the run keep their own state.
         for row in self._running_rows:
-            if row < len(self._sequences):
-                self._sequences[row]['include'] = row >= cutoff
+            self._sequences[row]['include'] = row >= cutoff
         self._refresh()
 
     def _onSessionState(self, kind):
@@ -1825,10 +1835,8 @@ class FluidicsControlGUI(PostsToQtThread, QMainWindow):
         if not self.session.busy:
             return True
         what = "run" if self.session.kind == "run" else "manual move"
-        answer = QMessageBox.question(
-            self, "Still running", f"A {what} is in progress. Abort it and exit?",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        return answer == QMessageBox.Yes
+        return _ask_yes_no(self, "Still running",
+                           f"A {what} is in progress. Abort it and exit?")
 
     def closeEvent(self, event):
         if not self._quiesce():

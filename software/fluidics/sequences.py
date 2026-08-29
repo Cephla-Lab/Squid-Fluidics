@@ -257,6 +257,12 @@ def types_for_application(application: str) -> list[str]:
     return APPLICATION_SEQUENCES.get(application, [])
 
 
+def sequence_label(seq: dict) -> Optional[str]:
+    """How a sequence is named to the operator in messages and logs: its
+    own name, else its type -- the one spelling of that fallback."""
+    return seq.get("name") or seq.get("type")
+
+
 def sequence_type_problem(seq: dict, application: str) -> Optional[str]:
     """The type complaint for one sequence under `application`, or None.
 
@@ -285,8 +291,7 @@ def check_types_against_application(sequences: list[dict], config) -> None:
     for index, seq in enumerate(sequences):
         problem = sequence_type_problem(seq, config.application)
         if problem is not None:
-            label = seq.get("name") or seq.get("type")
-            problems.append(f"sequence {index} ({label}): {problem}")
+            problems.append(f"sequence {index} ({sequence_label(seq)}): {problem}")
     if problems:
         raise ValueError("; ".join(problems))
 
@@ -312,8 +317,7 @@ def check_ports_against_config(sequences: list[dict], config) -> None:
     limit = available_port_count(config)
     problems = []
     for index, seq in enumerate(sequences):
-        label = seq.get("name") or seq["type"]
-        problems.extend(f"sequence {index} ({label}): {problem}"
+        problems.extend(f"sequence {index} ({sequence_label(seq)}): {problem}"
                         for problem in sequence_port_problems(seq, limit))
     if problems:
         raise ValueError(
