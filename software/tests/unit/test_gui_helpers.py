@@ -1052,20 +1052,18 @@ class TestUsageTable:
     """The run tab's per-port table: painted from the ledger's snapshot,
     names read fresh from the config at each paint, hidden when empty."""
 
-    def _stub(self, qapp, totals, names=None):
+    def _stub(self, rows):
         from PyQt5.QtWidgets import QTableWidget
         table = QTableWidget(0, 3)
         stub = SimpleNamespace(
             usageTable=table,
             system=SimpleNamespace(
-                usage=SimpleNamespace(snapshot=lambda: dict(totals)),
-                devices=SimpleNamespace(selector_valves=SimpleNamespace(
-                    port_to_reagent=lambda port: (names or {}).get(port)))),
+                usage=SimpleNamespace(rows=lambda: list(rows))),
         )
         return stub, table
 
     def test_totals_paint_with_fresh_names(self, qapp):
-        stub, table = self._stub(qapp, {3: 1500.0, 1: 500.0}, {3: "DAPI"})
+        stub, table = self._stub([(1, None, 500.0), (3, "DAPI", 1500.0)])
         gui.SequencesWidget._renderUsage(stub)
         assert not table.isHidden()
         assert table.rowCount() == 2
@@ -1074,7 +1072,7 @@ class TestUsageTable:
         assert rows == [("1", "", "500"), ("3", "DAPI", "1500")]
 
     def test_nothing_drawn_hides_the_table(self, qapp):
-        stub, table = self._stub(qapp, {})
+        stub, table = self._stub([])
         table.setVisible(True)
         gui.SequencesWidget._renderUsage(stub)
         assert table.isHidden()

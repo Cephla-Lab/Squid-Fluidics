@@ -736,17 +736,15 @@ class SequencesWidget(PostsToQtThread, QWidget):
         self._renderUsage()
 
     def _renderUsage(self):
-        """The per-port totals as they stand -- names read fresh from the
-        config at each paint, so a rename shows on the next tick."""
-        totals = self.system.usage.snapshot()
-        self.usageTable.setVisible(bool(totals))
-        self.usageTable.setRowCount(len(totals))
-        valves = self.system.devices.selector_valves
-        for row, port in enumerate(sorted(totals)):
-            name = valves.port_to_reagent(port) or ""
-            for column, text in enumerate((str(port), name,
-                                           f"{totals[port]:.0f}")):
-                self.usageTable.setItem(row, column, QTableWidgetItem(text))
+        """The per-port totals as they stand; the ledger's rows carry the
+        names, read fresh per call, so a rename shows on the next tick."""
+        rows = self.system.usage.rows()
+        self.usageTable.setVisible(bool(rows))
+        self.usageTable.setRowCount(len(rows))
+        for index, (port, name, used) in enumerate(rows):
+            for column, text in enumerate((str(port), name or "",
+                                           f"{used:.0f}")):
+                self.usageTable.setItem(index, column, QTableWidgetItem(text))
 
     def _showTimeRemaining(self):
         """Draw the label and the bar from one session snapshot: the clock a
@@ -912,9 +910,7 @@ class ManualControlWidget(PostsToQtThread, QWidget):
         self.progress_timer = QTimer(self)
         self.progress_timer.timeout.connect(self.updateProgress)
         # The plunger bar paints what the pump publishes after each of its
-        # own readings -- no more polling the serial line from the GUI
-        # thread, which contended with a move in flight and sometimes
-        # errored (the reads the pump makes itself are the truth anyway).
+        # own readings; the GUI thread never touches the serial line.
         system.devices.syringe_pump.held_volume.subscribe(self._onHeldVolume)
 
         self.initUI()

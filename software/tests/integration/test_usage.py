@@ -4,20 +4,7 @@ actually queue land on the right port, from a run's beginning."""
 
 import pytest
 
-from fluidics.system import FluidicsSystem
-
 from .conftest import FLOW_CELL_STEP
-
-
-@pytest.fixture
-def system(flow_cell_config):
-    built = FluidicsSystem.build(flow_cell_config, simulation=True)
-    built.devices.controller.COMMAND_SECONDS = 0
-    built.devices.syringe_pump.ESTIMATE_SECONDS = 0
-    for sensor in built.devices.flow_sensors:
-        sensor.close()      # the publish loop has nothing to say here
-    yield built
-    assert built.close() == []
 
 
 class TestUsageThroughARun:
@@ -26,8 +13,8 @@ class TestUsageThroughARun:
         assert system.wait()
         totals = system.usage.snapshot()
         assert set(totals) == {1}, f"drawn from unexpected ports: {totals}"
-        # The step's own 500 uL, plus whatever tubing turnover the
-        # operations add -- bounded, not re-derived (the estimate's lesson).
+        # The step's own 500 uL plus whatever tubing turnover the
+        # operations add: bounded, so the tariff is not copied back out.
         assert 500 <= totals[1] <= 3500
 
     def test_a_fill_tubing_draw_is_charged_to_its_own_port(self, system):

@@ -9,7 +9,7 @@ import pytest
 
 from fluidics.errors import Cancelled
 
-from .pump_helpers import sim_pump
+from .pump_helpers import ScriptedSyringe, bare_pump, sim_pump
 
 
 @pytest.fixture
@@ -67,7 +67,6 @@ class TestHeldVolume:
         """_start and _resume read the plunger directly (under the serial
         lock); those readings must reach the channel like any other, or a
         display goes stale between the ops of a chain."""
-        from .pump_helpers import ScriptedSyringe, bare_pump
         pump = bare_pump(ScriptedSyringe(position=1500))
         heard = []
         pump.held_volume.subscribe(heard.append)

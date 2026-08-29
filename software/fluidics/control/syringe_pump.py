@@ -59,6 +59,11 @@ class Interruptible:
         self.draws = Subscribers("syringe draws")
         self.held_volume = Subscribers("syringe held volume")
 
+    def _publish_reading(self):
+        # One payload site for both pumps: every recorded reading reaches
+        # held_volume as the held uL.
+        self.held_volume.notify(self.get_current_volume())
+
     # --- queueing ---
 
     def extract(self, port, volume, speed_code):
@@ -148,21 +153,20 @@ class Interruptible:
         """Run one op to the end, however many pauses that takes."""
         self.run_control.checkpoint()   # a cancel here dispatched nothing
         estimate = self._start(op)
+        # A dispatched extract is charged in full, here, once: a failed
+        # dispatch (raised from _start) was never charged, and whatever
+        # happens after it -- pauses, a cancel mid-draw, a driver fault --
+        # keeps the charge. Generous on a cut-short draw by design: a total
+        # that reads slightly high beats one that silently undercounts.
+        if op[0] == "extract":
+            self.draws.notify(op[1], op[2])
         self.moving = True
-        try:
-            while self.wait_for_stop(estimate):
-                self._halted(op)
-                self.run_control.checkpoint()
-                estimate = self._resume(op)
-                self.moving = True
-            self._finished(op)
-        finally:
-            # A dispatched extract is charged in full, finished or cancelled
-            # mid-draw: a generous total beats a silent undercount, and the
-            # queued volume is exact whenever the op ran to its end --
-            # pauses included, since this publishes once, at the true end.
-            if op[0] == "extract":
-                self.draws.notify(op[1], op[2])
+        while self.wait_for_stop(estimate):
+            self._halted(op)
+            self.run_control.checkpoint()
+            estimate = self._resume(op)
+            self.moving = True
+        self._finished(op)
 
     def wait_for_stop(self, t=0):
         """Block until the move finishes or the run stops. Returns False when
@@ -334,7 +338,7 @@ class SyringePump(SpeedCodes, Interruptible):
         serial line. Called after the serial lock is released: no
         subscriber ever runs under it."""
         self.plunger_pos = position / self.range
-        self.held_volume.notify(self.get_current_volume())
+        self._publish_reading()
 
     def get_current_volume(self):
         return self.volume * self.plunger_pos  # ul
@@ -513,7 +517,7 @@ class SyringePumpSimulation(SpeedCodes, Interruptible):
 
     def get_plunger_position(self):
         self.plunger_pos = self._held_ul / self.volume
-        self.held_volume.notify(self.get_current_volume())
+        self._publish_reading()
         return self.plunger_pos
 
     def get_current_volume(self):

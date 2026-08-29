@@ -18,14 +18,13 @@ def rig():
     state = Subscribers("state")
     valves = SimpleNamespace(
         current=3,
-        get_current_port=lambda: rig_.valves.current,
         port_to_reagent=lambda port: {3: "DAPI"}.get(port),
     )
+    valves.get_current_port = lambda: valves.current
     config = SimpleNamespace(syringe_pump=SimpleNamespace(extract_port=2))
     pump = SimpleNamespace(draws=draws)
     usage = ReagentUsage(config, pump, valves, state)
-    rig_ = SimpleNamespace(draws=draws, state=state, valves=valves, usage=usage)
-    return rig_
+    return SimpleNamespace(draws=draws, state=state, valves=valves, usage=usage)
 
 
 class TestTheLedger:

@@ -14,13 +14,6 @@ from ..conftest import wait_until
 from .conftest import FLOW_CELL_STEP
 
 
-@pytest.fixture
-def system(flow_cell_config, instant_devices):
-    system = FluidicsSystem(flow_cell_config, instant_devices(flow_cell_config))
-    yield system
-    assert system.close() == []
-
-
 class TestBuild:
     def test_one_rig_assembled_around_one_signal(self, system):
         assert isinstance(system.operations, MERFISHOperations)
