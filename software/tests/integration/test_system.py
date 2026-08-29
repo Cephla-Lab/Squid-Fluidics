@@ -97,7 +97,9 @@ class TestClose:
         with pytest.raises(KeyboardInterrupt):
             system.close()
         assert closed == [True], "the devices were not released"
+        del system.session.wait     # the real wait is back for the teardown
         release.set()
+        assert system.session.wait(5), "the job must end before teardown"
 
     def test_abort_and_busy_are_the_facades_too(self, system, real_clock):
         """A script's signal handler holds the system, not its session."""
