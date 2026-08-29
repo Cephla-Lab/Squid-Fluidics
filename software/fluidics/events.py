@@ -15,7 +15,8 @@ identity for the entry's source sequence: plan_run sets it to the
 sequence's index in the list it was handed, and a caller whose own list
 is larger may relabel before starting the run -- the GUI remaps rows to
 its model (which holds unchecked rows too) so highlight and resume land
-on the right tree row.
+on the right tree row. Anyone else -- a report, a log -- keys on
+`position` or `label`, never `row`: it is the caller's coordinate.
 """
 
 from collections import namedtuple
@@ -48,3 +49,11 @@ RunEnded = namedtuple(
 def plan_seconds(entries):
     """The summed estimate of `entries` -- the whole plan, or its tail."""
     return sum(entry.duration_seconds for entry in entries)
+
+
+def repeat_suffix(entry):
+    """`", repeat k/n"` when the entry is one repeat of several, else "".
+    The one spelling for naming an entry's repeat to the operator -- the
+    worker's log tag and the GUI's resume offer must say the same thing."""
+    return (f", repeat {entry.repeat}/{entry.repeats}"
+            if entry.repeats > 1 else "")

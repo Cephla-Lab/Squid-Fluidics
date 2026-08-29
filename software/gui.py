@@ -30,7 +30,7 @@ from fluidics.devices import (
 )
 from fluidics.system import FluidicsSystem
 from fluidics.events import (RunEnded, RunStarted, SequenceCompleted,
-                             SequenceStarted, plan_seconds)
+                             SequenceStarted, plan_seconds, repeat_suffix)
 from fluidics.run_log import setup_uncaught_exception_logging, start_log_file
 from fluidics.sequences import (
     load_sequences, save_sequences_yaml,
@@ -697,11 +697,17 @@ class SequencesWidget(PostsToQtThread, QWidget):
 
         self._warnings.clear()
         self.warningLabel.setVisible(False)
+        self._startRun(selected, plan)
 
+    def _startRun(self, sequences, plan):
+        """Hand the job to the rig and open this tab's display -- the one
+        ending shared by the Run button and the resume offer, so the two
+        start sites cannot drift. The tabs (and, for the offer, the modal
+        chain) make a busy rig unreachable in practice; the dialog beats a
+        traceback if it ever is not."""
         try:
-            self.system.run(selected, plan=plan)
+            self.system.run(sequences, plan=plan)
         except RuntimeError as e:
-            # A manual move got in first; the tabs normally prevent this.
             QMessageBox.warning(self, "Rig busy", str(e))
             return
         self._beginRunDisplay(len(plan))
@@ -841,7 +847,7 @@ class SequencesWidget(PostsToQtThread, QWidget):
             QMessageBox.information(self, "Finished",
                                     "Sequence execution finished.")
         if event.position is not None:
-            self._offerResume(self._plan[event.position].row)
+            self._offerResume(event.position)
 
     def _handle_warning(self, message):
         self._warnings.append(message)
@@ -855,54 +861,58 @@ class SequencesWidget(PostsToQtThread, QWidget):
         The system's channel logs it; this only shows it."""
         self._post_event('_handle_warning', message)
 
-    def _offerResume(self, cutoff):
-        """After an early end: offer to check only the row that was in
-        flight (RunEnded named its plan entry; `cutoff` is that entry's
-        model row) and the ones after it, so Run restarts the experiment
-        there.
+    def _offerResume(self, position):
+        """After an early end: offer to run the plan's tail -- the entry
+        that was in flight (its repeat re-run whole, never skipped) and
+        everything after it -- as a new run. The offer names the resume
+        point and carries the tail's own bill, so it is the confirm dialog
+        too; Yes starts the run. The checkboxes are not touched: the tail
+        is the interrupted experiment's remainder, whatever the tree says
+        by then.
 
-        Row-level on purpose -- the interrupted row restarts from its first
-        repeat, and a run stopped exactly at a row boundary re-offers the
-        row that just finished; the operator sees the checkboxes (and the
-        fresh estimate behind the Run button) before anything moves.
-
-        The model still matches the plan's rows (relabeled to tree rows at
-        run start): edits are frozen during the run, and from the RunEnded
+        Structural edits are disabled during the run, so `entry.row`
+        still names the tree row the operator sees; and from the RunEnded
         dialog through this question the Qt thread never leaves the modal
-        chain, so nothing can edit between.
+        chain, so the rig stays free until Yes claims it.
         """
-        seq = self._sequences[cutoff]
-        label = seq.get('name') or SEQUENCE_TYPE_LABELS.get(seq['type'], seq['type'])
+        tail = self._plan[position:]
+        entry = tail[0]
+        # The plan's own captured label: field edits stay live during a
+        # run, and the offer must name what will actually execute, not
+        # what the tree says by now.
+        label = entry.label
+        which = repeat_suffix(entry)
         if not _ask_yes_no(
                 self, "Resume from here?",
-                f"The run ended at sequence {cutoff + 1} ({label}).\n\n"
-                "Check only that row and the ones after it, ready to run "
-                "again from there?"):
+                f"The run ended at sequence {entry.row + 1} ({label}{which}).\n\n"
+                f"Resume from there? {len(tail)} sequence(s) remain, "
+                f"estimated {_hms(plan_seconds(tail))}."):
             return
-        _logger.info("Resume accepted: rows re-checked from sequence %d (%s).",
-                     cutoff + 1, label)
-        # Every row of the run's plan is set from the cutoff -- not just
-        # completed rows unchecked: the checkboxes stay live during a run,
-        # and a row unchecked mid-run must still come back checked, or the
-        # offer's promise ("that row and the ones after it") reads false.
-        # Rows that were never part of the run keep their own state.
-        for row in {entry.row for entry in self._plan}:
-            self._sequences[row]['include'] = row >= cutoff
-        self._refresh()
+        _logger.info("Resume accepted: %d sequence(s) from row %d (%s%s).",
+                     len(tail), entry.row + 1, label, which)
+        self._startRun(None, tail)
 
     def _onSessionState(self, kind):
-        # On the session's thread; the display change crosses to Qt.
-        self._post_event('_handle_state', kind)
+        # On the session's thread; the display change crosses to Qt. The
+        # payload stays behind: the repaint reads the session as it stands
+        # at delivery, so no queued notification can be stale.
+        self._post_event('_handle_state')
 
-    def _handle_state(self, kind):
+    def _handle_state(self):
         """The run display follows the session, not any one callback: the
         job ending -- finished, aborted, or a fault's self-cancel -- is what
         stops the clock and clears the run's furniture. RunEnded's dialog
         lands first (over the still-painted run, highlight included); this
         reset follows it in the posted order. Every transition redraws the
         buttons, so a manual job deadens this tab's controls without
-        leaning on the main window's tab guard."""
-        if kind is None:
+        leaning on the main window's tab guard.
+
+        Repaints from the session's current state, never from what was
+        announced: the resume offer starts the tail from inside the old
+        run's RunEnded dialog chain, and the old run's state(None) can
+        still be queued behind it -- a reset keyed to the delivery would
+        stop the new run's clock and clear its display."""
+        if self.session.kind is None:
             self.timer.stop()
             self.progressBar.setValue(0)
             self.timeLabel.setText("00:00:00 remaining")

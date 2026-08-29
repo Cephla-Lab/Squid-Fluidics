@@ -2,7 +2,7 @@ import logging
 
 from .errors import AbortRequested, Cancelled, RunControl
 from .events import (Incubating, RunStarted, SequenceCompleted,
-                     SequenceStarted, plan_seconds)
+                     SequenceStarted, plan_seconds, repeat_suffix)
 from .subscribers import Subscribers
 # Re-exported: defined here before fluidics.errors existed, and scripts
 # outside this package may still import it from here.
@@ -90,8 +90,7 @@ class ExperimentWorker:
         tag = None                       # names the entry in hand for the log
         try:
             for position, entry in enumerate(self.plan):
-                which = (f", repeat {entry.repeat}/{entry.repeats}"
-                         if entry.repeats > 1 else "")
+                which = repeat_suffix(entry)
                 tag = (f"Sequence {position + 1}/{len(self.plan)} "
                        f"({entry.label}{which})")
                 # A cancel that landed between sequences must not start the
