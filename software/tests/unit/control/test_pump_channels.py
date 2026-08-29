@@ -62,3 +62,17 @@ class TestHeldVolume:
         pump.execute()
         assert heard, "no reading was published for the move"
         assert heard[-1] == pump.get_current_volume()
+
+    def test_the_real_pumps_mid_chain_readings_are_published_too(self):
+        """_start and _resume read the plunger directly (under the serial
+        lock); those readings must reach the channel like any other, or a
+        display goes stale between the ops of a chain."""
+        from .pump_helpers import ScriptedSyringe, bare_pump
+        pump = bare_pump(ScriptedSyringe(position=1500))
+        heard = []
+        pump.held_volume.subscribe(heard.append)
+        pump.extract(2, 300, 10)
+        pump.dispense(1, 100, 10)
+        pump.execute()
+        # One reading per op start plus the chain-end reading.
+        assert len(heard) >= 3, heard

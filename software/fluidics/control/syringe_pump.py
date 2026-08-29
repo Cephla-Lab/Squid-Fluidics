@@ -324,11 +324,17 @@ class SyringePump(SpeedCodes, Interruptible):
     def get_plunger_position(self):
         with self._serial_lock:
             position = self.syringe.getPlungerPos()
-        self.plunger_pos = position / self.range
-        # Every fresh reading is published: displays paint what the pump
-        # last recorded instead of polling the serial line themselves.
-        self.held_volume.notify(self.get_current_volume())
+        self._record_reading(position)
         return self.plunger_pos
+
+    def _record_reading(self, position):
+        """A raw plunger reading becomes the recorded truth, published --
+        every reading, the mid-chain ones from _start/_resume included, so
+        displays paint what the pump last recorded instead of polling the
+        serial line. Called after the serial lock is released: no
+        subscriber ever runs under it."""
+        self.plunger_pos = position / self.range
+        self.held_volume.notify(self.get_current_volume())
 
     def get_current_volume(self):
         return self.volume * self.plunger_pos  # ul
@@ -381,7 +387,7 @@ class SyringePump(SpeedCodes, Interruptible):
             self._op_target = self.syringe.sim_state["plunger_pos"]
             self._op_port = self.syringe.sim_state["port"]
             t = self.syringe.executeChain(minimal_reset=True)
-        self.plunger_pos = start / self.range
+        self._record_reading(start)
         return t
 
     def _resume(self, op):
@@ -397,7 +403,7 @@ class SyringePump(SpeedCodes, Interruptible):
             self.syringe.changePort(self._op_port)
             self.syringe.movePlungerAbs(self._op_target)
             t = self.syringe.executeChain(minimal_reset=True)
-        self.plunger_pos = start / self.range
+        self._record_reading(start)
         return t
 
     def _halted(self, op):
