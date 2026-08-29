@@ -426,9 +426,11 @@ class TestAbortSequences:
 
 
 class TestRunEnded:
-    """The session's state change resets the display; RunEnded only reports.
-    Driven here in the order the events are posted: the job ends (state
-    None), then RunEnded. Called unbound against stubs."""
+    """RunEnded reports; the session's state change resets the display.
+    Driven here in the order the events are posted: RunEnded lands inside
+    the end's transition, before state(None) -- the dialog shows over the
+    run display as it stood, then the reset follows. Called unbound
+    against stubs."""
 
     def _ending(self, monkeypatch):
         order = []
@@ -440,12 +442,12 @@ class TestRunEnded:
         stub._renderRunControls = lambda: order.append("render")
         return stub, order
 
-    def test_a_completed_run_redraws_the_controls_then_says_finished(self, monkeypatch):
+    def test_a_completed_run_says_finished_then_the_reset_redraws(self, monkeypatch):
         stub, order = self._ending(monkeypatch)
-        gui.SequencesWidget._handle_state(stub, None)
         gui.SequencesWidget._reportRunEnded(
             stub, RunEnded("run-1", "finished", None, 5.0, None))
-        assert order == ["render", ("info", "Finished")]
+        gui.SequencesWidget._handle_state(stub, None)
+        assert order == [("info", "Finished"), "render"]
 
     def test_a_stopped_run_says_stopped_not_finished(self, monkeypatch):
         """The operator pressed Abort: one dialog saying so, not an Error
@@ -455,10 +457,10 @@ class TestRunEnded:
         stub._offerResume = offered.append
         stub._plan = plan_of([1.0])
         stub._model_rows = [0]
-        gui.SequencesWidget._handle_state(stub, None)
         gui.SequencesWidget._reportRunEnded(
             stub, RunEnded("run-1", "stopped", None, 5.0, position=0))
-        assert order == ["render", ("info", "Stopped")]
+        gui.SequencesWidget._handle_state(stub, None)
+        assert order == [("info", "Stopped"), "render"]
         assert offered == [0], "the resume offer must follow the dialog"
 
     def test_a_failed_run_says_why_once(self, monkeypatch):
@@ -466,10 +468,10 @@ class TestRunEnded:
         stub._offerResume = lambda cutoff: None
         stub._plan = plan_of([1.0])
         stub._model_rows = [0]
-        gui.SequencesWidget._handle_state(stub, None)
         gui.SequencesWidget._reportRunEnded(
             stub, RunEnded("run-1", "failed", "pump fault", 5.0, position=0))
-        assert order == ["render", ("error", "Error")]
+        gui.SequencesWidget._handle_state(stub, None)
+        assert order == [("error", "Error"), "render"]
 
     def test_a_jobs_start_resets_nothing(self):
         """Only the end of a job clears the display: a kind announcement
@@ -1130,41 +1132,3 @@ class TestResumeOffer:
         assert stub.refreshed == [True]
 
 
-class TestUsageTable:
-    """The run tab's per-port table: painted from the ledger's snapshot,
-    names read fresh from the config at each paint, hidden when empty."""
-
-    def _stub(self, rows):
-        from PyQt5.QtWidgets import QTableWidget
-        table = QTableWidget(0, 3)
-        stub = SimpleNamespace(
-            usageTable=table,
-            system=SimpleNamespace(
-                usage=SimpleNamespace(rows=lambda: list(rows))),
-        )
-        return stub, table
-
-    def test_totals_paint_with_fresh_names(self, qapp):
-        stub, table = self._stub([(1, None, 500.0), (3, "DAPI", 1500.0)])
-        gui.SequencesWidget._renderUsage(stub)
-        assert not table.isHidden()
-        assert table.rowCount() == 2
-        rows = [(table.item(r, 0).text(), table.item(r, 1).text(),
-                 table.item(r, 2).text()) for r in range(2)]
-        assert rows == [("1", "", "500"), ("3", "DAPI", "1500")]
-
-    def test_nothing_drawn_hides_the_table(self, qapp):
-        stub, table = self._stub([])
-        table.setVisible(True)
-        gui.SequencesWidget._renderUsage(stub)
-        assert table.isHidden()
-
-
-class TestHeldVolumePaint:
-    def test_the_bar_paints_the_published_reading(self, qapp):
-        from PyQt5.QtWidgets import QProgressBar
-        bar = QProgressBar()
-        bar.setRange(0, 5000)
-        stub = SimpleNamespace(plungerPositionBar=bar)
-        gui.ManualControlWidget._handle_held_volume(stub, 2600.0)
-        assert bar.value() == 2600

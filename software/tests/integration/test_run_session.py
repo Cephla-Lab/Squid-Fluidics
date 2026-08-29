@@ -68,7 +68,9 @@ class TestARun:
     def test_run_ended_arrives_with_the_rig_free_and_the_signal_clean(
             self, session, ops, seen, real_clock):
         """A GUI paints its dialogs on RunEnded; it must see an idle rig
-        and a signal the next job can use."""
+        and a signal the next job can use. The state(None) notification
+        follows the terminal event -- that ordering is what stops a chained
+        start from sliding in front of it."""
         at_end = []
         session.events.subscribe(
             lambda event: at_end.append(
@@ -78,7 +80,44 @@ class TestARun:
         session.abort()
         assert session.wait(5)
         assert wait_until(lambda: at_end != [])
-        assert at_end[0][1:] == (False, False, ["run", None])
+        assert at_end[0][1:] == (False, False, ["run"])
+        assert seen == ["run", None]
+
+    def test_a_chained_start_cannot_precede_the_old_runs_ending(
+            self, session, ops, real_clock):
+        """A state(None) subscriber may start the next job synchronously;
+        the old run's RunEnded must already be out, or the new RunStarted
+        pairs with the old ending."""
+        history = []
+        session.events.subscribe(
+            lambda event: history.append(type(event).__name__))
+        chained = []
+
+        def chain(kind):
+            if kind is None and not chained:
+                chained.append(True)
+                session.start([FLOW_CELL_STEP], ops)
+
+        session.state.subscribe(chain)
+        session.start([FLOW_CELL_STEP], ops)
+        assert session.wait(5)
+        assert wait_until(lambda: history.count("RunEnded") == 2)
+        first_end = history.index("RunEnded")
+        second_start = history.index("RunStarted", 1)
+        assert first_end < second_start, history
+
+    def test_a_launch_that_fails_still_ends_the_run_it_announced(
+            self, session, ops, thread_cannot_start):
+        """RunStarted goes out from the worker's constructor; a thread that
+        will not start must not leave it unpaired."""
+        history = []
+        session.events.subscribe(lambda event: history.append(event))
+        with pytest.raises(RuntimeError, match="can't start"):
+            session.start([FLOW_CELL_STEP], ops)
+        kinds = [type(event).__name__ for event in history]
+        assert kinds == ["RunStarted", "RunEnded"]
+        assert history[1].outcome == "failed"
+        assert not session.busy
 
     def test_a_runs_early_end_is_reported_after_the_rig_is_free(self, session, ops, real_clock):
         """As a manual move's report is: the worker records stop or error
@@ -331,14 +370,16 @@ class TestWait:
         release.set()
         assert session.wait(5) is True
 
-    def test_wait_from_inside_the_jobs_own_callback_does_not_raise(self, session, ops, real_clock):
-        """A subscriber that wants to know the job is over may ask; it cannot
-        join the job's own thread, and is not asked to."""
+    def test_wait_from_inside_a_manual_moves_on_finished_does_not_raise(
+            self, session, real_clock):
+        """on_finished runs after the end's one transition, so a callback
+        that wants to know the job is over may ask; it cannot join the
+        job's own thread, and is not asked to. (An events subscriber may
+        NOT wait -- reports land inside the transition, before the waiters
+        are woken.)"""
         waited = []
-        session.events.subscribe(
-            lambda event: waited.append(session.wait(1))
-            if isinstance(event, RunEnded) else None)
-        session.start([FLOW_CELL_STEP], ops)
+        session.run_manual(lambda: None,
+                           callbacks={"on_finished": lambda: waited.append(session.wait(1))})
         assert session.wait(5)
         assert wait_until(lambda: waited == [True])
 

@@ -131,7 +131,15 @@ class RunSession:
                                     worker.elapsed_seconds,
                                     worker.ended_position))
 
-        self._launch("run", body, None)
+        try:
+            self._launch("run", body, None)
+        except BaseException as e:
+            # The worker's RunStarted already went out (from its
+            # constructor); a launch that failed must not leave it
+            # unpaired -- consumers pairing starts with endings (the usage
+            # ledger's totals, a display's lifecycle) would wait forever.
+            self.events.notify(RunEnded(run_id, "failed", str(e), 0.0, None))
+            raise
 
     def run_manual(self, verb, callbacks=None):
         """Run one manual verb -- a callable -- on a new thread. Refused with
@@ -153,9 +161,10 @@ class RunSession:
         self._launch("manual", body, callbacks.get("on_finished"))
 
     def _launch(self, kind, body, on_finished):
-        """Start `body` on the job's thread. It returns how the job ended
-        early -- a callable to report it, or None -- and once the rig is free
-        that report runs, then on_finished."""
+        """Start `body` on the job's thread. It returns how the job ended --
+        a callable that reports it (a run's RunEnded, a manual move's held
+        callback), delivered by _finish once the rig reads free -- then
+        on_finished runs."""
         with self._lock:
             if self._kind is not None:
                 raise RuntimeError(f"the rig is busy: a {self._kind} is in progress")
@@ -165,12 +174,11 @@ class RunSession:
             self.state.notify(kind)
 
         def job():
+            report = None
             try:
                 report = body()
             finally:
-                self._finish()          # whatever happened, the rig is free
-            if report is not None:
-                report()
+                self._finish(report)    # whatever happened, the rig is free
             if on_finished is not None:
                 on_finished()
 
@@ -183,16 +191,27 @@ class RunSession:
             raise
         self._thread = thread       # only ever a started thread, for wait() to join
 
-    def _finish(self):
+    def _finish(self, report=None):
         """The job has ended. One transition, under the lock: the rig is
-        free, the signal is clean, the subscribers know, the waiters wake --
-        and nothing can start in between, or the ending job's tail would
-        land on the new one."""
+        free, the signal is clean, the job's own report lands, the
+        subscribers know, the waiters wake -- and nothing can start in
+        between, or the ending job's tail would land on the new one.
+
+        The report (a run's RunEnded, a manual move's held callback) runs
+        after kind and signal are cleared -- whoever hears it sees an idle
+        rig -- and *before* state.notify(None), so a state subscriber that
+        chains the next job cannot slide a new RunStarted in front of the
+        old run's ending. The price is a rule the channel already carries:
+        a report subscriber must not block on the session (the waiters are
+        woken only at the end of this transition).
+        """
         with self._lock:
             self._kind = None
             # The cancellation -- or pause -- belonged to the job that just
             # ended; the next one must not raise on a stale abort.
             self.control.reset()
+            if report is not None:
+                report()
             self.state.notify(None)
             # Done means no job is current. A subscriber may have started the
             # next one just now, in which case waiters keep waiting for it --

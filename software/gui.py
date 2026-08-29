@@ -834,9 +834,10 @@ class SequencesWidget(PostsToQtThread, QWidget):
 
     def _reportRunEnded(self, event):
         """The run's last word, delivered with the rig already free (the
-        session defers RunEnded exactly for this): one dialog for how it
-        ended, then the resume offer when there is somewhere to resume
-        from."""
+        session clears kind and signal before publishing): one dialog for
+        how it ended -- shown over the run display as it stood, the state
+        reset follows -- then the resume offer when there is somewhere to
+        resume from."""
         if event.outcome == "stopped":
             QMessageBox.information(self, "Stopped", "The run was stopped.")
         elif event.outcome == "failed":
@@ -901,9 +902,11 @@ class SequencesWidget(PostsToQtThread, QWidget):
     def _handle_state(self, kind):
         """The run display follows the session, not any one callback: the
         job ending -- finished, aborted, or a fault's self-cancel -- is what
-        stops the clock and clears the run's furniture. Every transition
-        redraws the buttons, so a manual job deadens this tab's controls
-        without leaning on the main window's tab guard."""
+        stops the clock and clears the run's furniture. RunEnded's dialog
+        lands first (over the still-painted run, highlight included); this
+        reset follows it in the posted order. Every transition redraws the
+        buttons, so a manual job deadens this tab's controls without
+        leaning on the main window's tab guard."""
         if kind is None:
             self.timer.stop()
             self.progressBar.setValue(0)

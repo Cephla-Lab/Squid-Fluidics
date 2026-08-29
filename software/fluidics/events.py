@@ -11,8 +11,10 @@ estimate produces it, the worker iterates it, and events refer to its
 entries by position -- so the count the display shows, the durations the
 countdown re-anchors on, and the rows the highlight lands on cannot
 drift apart, because they are the same object. `row` is the entry's
-index in the sequence list the run was started with (the GUI's model
-rows), which is what makes highlight and resume identity-based.
+index in the sequence list the plan was built from -- for a GUI run
+that is the *filtered* selection, not the tree: a consumer that owns a
+larger list (the GUI's model, with unchecked rows) must translate
+through its own snapshot of which rows ran before touching it.
 """
 
 from collections import namedtuple

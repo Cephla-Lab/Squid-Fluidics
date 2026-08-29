@@ -9,7 +9,7 @@ abort mechanics, so internals can be rewritten against these tests.
 from types import SimpleNamespace
 
 from fluidics.errors import AbortRequested, RunControl, SafetyFault
-from fluidics.events import RunStarted, SequenceCompleted
+from fluidics.events import RunStarted, SequenceCompleted, SequenceStarted
 from fluidics.experiment_worker import ExperimentWorker
 from fluidics.subscribers import Subscribers
 
@@ -164,8 +164,8 @@ class TestTheSharedSignal:
         worker = ExperimentWorker(RecordingOps(), plan_for([dict(FLOW), dict(FLOW)]),
                                   CONFIG, events=channel, run_control=control)
         worker.run()
-        assert not any(isinstance(e, SequenceCompleted) and e.position == 1
-                       for e in heard)
+        assert not any(isinstance(e, SequenceStarted) and e.position == 1
+                       for e in heard), "the next sequence started after the cancel"
         assert worker.outcome == "stopped"
 
     def test_a_safety_fault_is_recorded_with_its_diagnosis_not_as_an_abort(self):
