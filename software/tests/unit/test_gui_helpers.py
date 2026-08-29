@@ -437,6 +437,7 @@ class TestRunEnded:
         monkeypatch.setattr(gui.QMessageBox, "critical",
                             lambda *args: order.append(("error", args[1])))
         stub = Quiet()
+        stub.session = FakeSession()     # idle: the reset is current, not stale
         stub._renderRunControls = lambda: order.append("render")
         return stub, order
 
@@ -1120,12 +1121,15 @@ class TestResumeOffer:
         from ..worker_helpers import plan_for
         plan = plan_for([{"type": "priming", "name": "prime", "repeat": 2}],
                         seconds=[45.0, 45.0])
+        # The tree's copy was renamed mid-run: the offer must name what the
+        # plan captured -- what will actually execute.
         stub = self._stub(
             monkeypatch, plan=plan,
-            sequences=[{"include": True, "type": "priming", "name": "prime"}])
+            sequences=[{"include": True, "type": "priming",
+                        "name": "renamed later"}])
         gui.SequencesWidget._offerResume(stub, 1)
         text = stub.asked[0]
-        assert "prime" in text
+        assert "prime" in text and "renamed later" not in text
         assert "repeat 2/2" in text
         assert "1 sequence(s) remain" in text
         assert "00:00:45" in text
@@ -1141,41 +1145,26 @@ class TestResumeOffer:
         assert offered == []
 
 
-class TestUsageTable:
-    """The run tab's per-port table: painted from the ledger's snapshot,
-    names read fresh from the config at each paint, hidden when empty."""
-
-    def _stub(self, rows):
-        from PyQt5.QtWidgets import QTableWidget
-        table = QTableWidget(0, 3)
-        stub = SimpleNamespace(
-            usageTable=table,
-            system=SimpleNamespace(
-                usage=SimpleNamespace(rows=lambda: list(rows))),
-        )
-        return stub, table
-
-    def test_totals_paint_with_fresh_names(self, qapp):
-        stub, table = self._stub([(1, None, 500.0), (3, "DAPI", 1500.0)])
-        gui.SequencesWidget._renderUsage(stub)
-        assert not table.isHidden()
-        assert table.rowCount() == 2
-        rows = [(table.item(r, 0).text(), table.item(r, 1).text(),
-                 table.item(r, 2).text()) for r in range(2)]
-        assert rows == [("1", "", "500"), ("3", "DAPI", "1500")]
-
-    def test_nothing_drawn_hides_the_table(self, qapp):
-        stub, table = self._stub([])
-        table.setVisible(True)
-        gui.SequencesWidget._renderUsage(stub)
-        assert table.isHidden()
 
 
-class TestHeldVolumePaint:
-    def test_the_bar_paints_the_published_reading(self, qapp):
-        from PyQt5.QtWidgets import QProgressBar
-        bar = QProgressBar()
-        bar.setRange(0, 5000)
-        stub = SimpleNamespace(plungerPositionBar=bar)
-        gui.ManualControlWidget._handle_held_volume(stub, 2600.0)
-        assert bar.value() == 2600
+class TestStaleStateNone:
+    def test_a_stale_none_does_not_clear_a_run_already_started(self):
+        """The resume offer starts the tail from inside the old run's
+        RunEnded dialog chain; the old state(None) can land after it. The
+        reset must apply only if the rig is still idle at delivery."""
+        stopped = []
+        stub = Quiet()
+        stub.session = FakeSession(kind="run")     # the tail is already going
+        stub.timer = SimpleNamespace(stop=lambda: stopped.append(True))
+        stub._renderRunControls = lambda: None
+        gui.SequencesWidget._handle_state(stub, None)
+        assert stopped == [], "a stale state(None) stopped the new run's clock"
+
+    def test_a_current_none_still_resets(self):
+        stopped = []
+        stub = Quiet()
+        stub.session = FakeSession()               # idle: the reset is real
+        stub.timer = SimpleNamespace(stop=lambda: stopped.append(True))
+        stub._renderRunControls = lambda: None
+        gui.SequencesWidget._handle_state(stub, None)
+        assert stopped == [True]

@@ -871,8 +871,10 @@ class SequencesWidget(PostsToQtThread, QWidget):
         """
         tail = self._plan[position:]
         entry = tail[0]
-        seq = self._sequences[entry.row]
-        label = seq.get('name') or SEQUENCE_TYPE_LABELS.get(seq['type'], seq['type'])
+        # The plan's own captured label: field edits stay live during a
+        # run, and the offer must name what will actually execute, not
+        # what the tree says by now.
+        label = entry.label
         which = (f", repeat {entry.repeat}/{entry.repeats}"
                  if entry.repeats > 1 else "")
         if not _ask_yes_no(
@@ -904,7 +906,12 @@ class SequencesWidget(PostsToQtThread, QWidget):
         reset follows it in the posted order. Every transition redraws the
         buttons, so a manual job deadens this tab's controls without
         leaning on the main window's tab guard."""
-        if kind is None:
+        if kind is None and self.session.snapshot().kind is None:
+            # Reset only if the rig is still idle when this lands: the
+            # resume offer starts the tail from inside the old run's
+            # RunEnded dialog chain, and the old state(None) can still be
+            # queued behind it -- a stale reset would stop the new run's
+            # clock and clear its display.
             self.timer.stop()
             self.progressBar.setValue(0)
             self.timeLabel.setText("00:00:00 remaining")
