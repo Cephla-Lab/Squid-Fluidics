@@ -202,27 +202,27 @@ class TestApplicationTypes:
         assert widget.runButton.isEnabled()
 
 
-class TestResumePreparesTheModel:
-    def test_the_offer_rewrites_the_include_flags_through_the_model(
+class TestResumeRunsTheTail:
+    def test_run_ended_starts_the_tail_through_the_real_widget(
             self, widget, monkeypatch):
-        """End to end through the real widget: a run over rows 0,2,3 that
-        ends in flight on row 2 resumes as rows 2,3 -- row 1, never part of
-        the run, keeps its own unchecked state."""
+        """End to end: a run over rows 0,2,3 that ends in flight on tree
+        row 2 resumes as exactly that entry and the one after -- the
+        checkboxes stay as they were, and the never-in-the-run row 1 is
+        untouched."""
         monkeypatch.setattr(gui.QMessageBox, "question",
                             lambda *args: gui.QMessageBox.Yes)
         monkeypatch.setattr(gui.QMessageBox, "information", lambda *args: None)
         widget.setSequences([FLOW, dict(FLOW, include=False), FLOW, TEMP])
         from fluidics.time_estimate import plan_run
         plan = plan_run(widget.config, widget.getSequences(selected_only=True))
-        # The plan's rows index the run's own selection (0,1,2 here); the
-        # widget relabels them to tree rows (0,2,3) at run start.
         rows = widget._includedRows()
         widget._plan = tuple(e._replace(row=rows[e.row]) for e in plan)
-        ended = gui.RunEnded("run-1", "stopped", None, 0.0, position=1)
-        widget._handle_run_event(ended)
-        assert widget._includedRows() == [2, 3]
-        assert widget.tree.topLevelItem(0).checkState(0) == gui.Qt.Unchecked, \
-            "the tree did not repaint from the model"
+        handed = []
+        widget.system.run = lambda seqs, plan=None: handed.append(plan)
+        widget._handle_run_event(
+            gui.RunEnded("run-1", "stopped", None, 0.0, position=1))
+        assert [entry.row for entry in handed[0]] == [2, 3]
+        assert widget._includedRows() == [0, 2, 3], "the checkboxes changed"
 
 
 class TestRunStartRelabelsThePlan:

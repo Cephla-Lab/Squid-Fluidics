@@ -841,7 +841,7 @@ class SequencesWidget(PostsToQtThread, QWidget):
             QMessageBox.information(self, "Finished",
                                     "Sequence execution finished.")
         if event.position is not None:
-            self._offerResume(self._plan[event.position].row)
+            self._offerResume(event.position)
 
     def _handle_warning(self, message):
         self._warnings.append(message)
@@ -855,40 +855,42 @@ class SequencesWidget(PostsToQtThread, QWidget):
         The system's channel logs it; this only shows it."""
         self._post_event('_handle_warning', message)
 
-    def _offerResume(self, cutoff):
-        """After an early end: offer to check only the row that was in
-        flight (RunEnded named its plan entry; `cutoff` is that entry's
-        model row) and the ones after it, so Run restarts the experiment
-        there.
-
-        Row-level on purpose -- the interrupted row restarts from its first
-        repeat, and a run stopped exactly at a row boundary re-offers the
-        row that just finished; the operator sees the checkboxes (and the
-        fresh estimate behind the Run button) before anything moves.
+    def _offerResume(self, position):
+        """After an early end: offer to run the plan's tail -- the entry
+        that was in flight (its repeat re-run whole, never skipped) and
+        everything after it -- as a new run. The offer names the resume
+        point and carries the tail's own bill, so it is the confirm dialog
+        too; Yes starts the run. The checkboxes are not touched: the tail
+        is the interrupted experiment's remainder, whatever the tree says
+        by then.
 
         The model still matches the plan's rows (relabeled to tree rows at
         run start): edits are frozen during the run, and from the RunEnded
         dialog through this question the Qt thread never leaves the modal
         chain, so nothing can edit between.
         """
-        seq = self._sequences[cutoff]
+        tail = self._plan[position:]
+        entry = tail[0]
+        seq = self._sequences[entry.row]
         label = seq.get('name') or SEQUENCE_TYPE_LABELS.get(seq['type'], seq['type'])
+        which = (f", repeat {entry.repeat}/{entry.repeats}"
+                 if entry.repeats > 1 else "")
         if not _ask_yes_no(
                 self, "Resume from here?",
-                f"The run ended at sequence {cutoff + 1} ({label}).\n\n"
-                "Check only that row and the ones after it, ready to run "
-                "again from there?"):
+                f"The run ended at sequence {entry.row + 1} ({label}{which}).\n\n"
+                f"Resume from there? {len(tail)} sequence(s) remain, "
+                f"estimated {_hms(plan_seconds(tail))}."):
             return
-        _logger.info("Resume accepted: rows re-checked from sequence %d (%s).",
-                     cutoff + 1, label)
-        # Every row of the run's plan is set from the cutoff -- not just
-        # completed rows unchecked: the checkboxes stay live during a run,
-        # and a row unchecked mid-run must still come back checked, or the
-        # offer's promise ("that row and the ones after it") reads false.
-        # Rows that were never part of the run keep their own state.
-        for row in {entry.row for entry in self._plan}:
-            self._sequences[row]['include'] = row >= cutoff
-        self._refresh()
+        _logger.info("Resume accepted: %d sequence(s) from row %d (%s%s).",
+                     len(tail), entry.row + 1, label, which)
+        try:
+            self.system.run(None, plan=tail)
+        except RuntimeError as e:
+            # The tabs and the modal chain make this unreachable in
+            # practice; the message beats a traceback if it ever is not.
+            QMessageBox.warning(self, "Rig busy", str(e))
+            return
+        self._beginRunDisplay(len(tail))
 
     def _onSessionState(self, kind):
         # On the session's thread; the display change crosses to Qt.

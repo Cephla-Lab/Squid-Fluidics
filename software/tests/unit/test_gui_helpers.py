@@ -1076,11 +1076,11 @@ class TestHeldVolumePaint:
 
 class TestResumeOffer:
     """After an early end, RunEnded names the plan entry in flight; the
-    offer sets the checkboxes to run again from its model row. Called
-    unbound against stubs."""
+    offer prices the plan's tail and, on Yes, runs exactly it -- the
+    checkboxes are never touched. Called unbound against stubs."""
 
-    def _stub(self, monkeypatch, answer=gui.QMessageBox.No, sequences=None,
-              plan=()):
+    def _stub(self, monkeypatch, answer=gui.QMessageBox.No, plan=(),
+              sequences=None):
         asked = []
 
         def question(*args):
@@ -1088,47 +1088,94 @@ class TestResumeOffer:
             return answer
 
         monkeypatch.setattr(gui.QMessageBox, "question", question)
-        refreshed = []
+        started = []
         stub = SimpleNamespace(
-            _sequences=sequences if sequences is not None else [],
             _plan=plan,
-            _refresh=lambda: refreshed.append(True),
-            asked=asked, refreshed=refreshed,
+            _sequences=(sequences if sequences is not None else
+                        [{"include": True, "type": "flow_reagent"}] * 4),
+            system=SimpleNamespace(
+                run=lambda seqs, plan=None: started.append(plan)),
+            _beginRunDisplay=lambda count: started.append(("display", count)),
+            asked=asked, started=started,
         )
         return stub
 
-    def test_no_leaves_the_checkboxes_alone(self, monkeypatch):
-        sequences = [{"include": True, "type": "flow_reagent"},
-                     {"include": True, "type": "priming"}]
-        stub = self._stub(monkeypatch, sequences=sequences,
-                          plan=plan_of([1.0, 1.0], rows=[0, 1]))
+    def test_yes_runs_exactly_the_tail(self, monkeypatch):
+        plan = plan_of([10.0, 20.0, 30.0], rows=[0, 2, 3])
+        stub = self._stub(monkeypatch, answer=gui.QMessageBox.Yes, plan=plan)
         gui.SequencesWidget._offerResume(stub, 1)
-        assert [s["include"] for s in sequences] == [True, True]
-        assert stub.refreshed == []
+        assert stub.started == [plan[1:], ("display", 2)], \
+            "the run must be the interrupted plan's tail, nothing else"
+        assert all(s["include"] for s in stub._sequences), \
+            "the checkboxes are not the offer's to touch"
+
+    def test_no_runs_nothing(self, monkeypatch):
+        stub = self._stub(monkeypatch, plan=plan_of([10.0, 20.0]))
+        gui.SequencesWidget._offerResume(stub, 0)
+        assert stub.started == []
+
+    def test_the_offer_names_the_point_and_carries_the_bill(self, monkeypatch):
+        """One dialog is both the resume point and the confirm: the entry's
+        repeat k/n and the tail's own estimate are in the text."""
+        from ..worker_helpers import plan_for
+        plan = plan_for([{"type": "priming", "name": "prime", "repeat": 2}],
+                        seconds=[45.0, 45.0])
+        stub = self._stub(
+            monkeypatch, plan=plan,
+            sequences=[{"include": True, "type": "priming", "name": "prime"}])
+        gui.SequencesWidget._offerResume(stub, 1)
+        text = stub.asked[0]
+        assert "prime" in text
+        assert "repeat 2/2" in text
+        assert "1 sequence(s) remain" in text
+        assert "00:00:45" in text
 
     def test_a_finished_run_offers_nothing(self, monkeypatch):
         """RunEnded carries position=None when the run finished; there is
         nowhere to resume from and no question to ask."""
         monkeypatch.setattr(gui.QMessageBox, "information", lambda *args: None)
         offered = []
-        stub = SimpleNamespace(_offerResume=lambda cutoff: offered.append(cutoff))
+        stub = SimpleNamespace(_offerResume=lambda position: offered.append(position))
         gui.SequencesWidget._reportRunEnded(
             stub, RunEnded("run-1", "finished", None, 5.0, position=None))
         assert offered == []
 
-    def test_yes_rechecks_a_run_row_unchecked_mid_run(self, monkeypatch):
-        """The checkboxes stay live during a run: a remaining row the
-        operator unchecked while it ran must still come back checked, or
-        the offer's "that row and the ones after it" reads false."""
-        sequences = [{"include": True, "type": "flow_reagent"},
-                     {"include": True, "type": "priming", "name": "wash A"},
-                     {"include": False, "type": "clean_up"}]
-        stub = self._stub(monkeypatch, answer=gui.QMessageBox.Yes,
-                          sequences=sequences,
-                          plan=plan_of([1.0, 1.0, 1.0], rows=[0, 1, 2]))
-        gui.SequencesWidget._offerResume(stub, 1)
-        assert "wash A" in stub.asked[0]
-        assert [s["include"] for s in sequences] == [False, True, True]
-        assert stub.refreshed == [True]
+
+class TestUsageTable:
+    """The run tab's per-port table: painted from the ledger's snapshot,
+    names read fresh from the config at each paint, hidden when empty."""
+
+    def _stub(self, rows):
+        from PyQt5.QtWidgets import QTableWidget
+        table = QTableWidget(0, 3)
+        stub = SimpleNamespace(
+            usageTable=table,
+            system=SimpleNamespace(
+                usage=SimpleNamespace(rows=lambda: list(rows))),
+        )
+        return stub, table
+
+    def test_totals_paint_with_fresh_names(self, qapp):
+        stub, table = self._stub([(1, None, 500.0), (3, "DAPI", 1500.0)])
+        gui.SequencesWidget._renderUsage(stub)
+        assert not table.isHidden()
+        assert table.rowCount() == 2
+        rows = [(table.item(r, 0).text(), table.item(r, 1).text(),
+                 table.item(r, 2).text()) for r in range(2)]
+        assert rows == [("1", "", "500"), ("3", "DAPI", "1500")]
+
+    def test_nothing_drawn_hides_the_table(self, qapp):
+        stub, table = self._stub([])
+        table.setVisible(True)
+        gui.SequencesWidget._renderUsage(stub)
+        assert table.isHidden()
 
 
+class TestHeldVolumePaint:
+    def test_the_bar_paints_the_published_reading(self, qapp):
+        from PyQt5.QtWidgets import QProgressBar
+        bar = QProgressBar()
+        bar.setRange(0, 5000)
+        stub = SimpleNamespace(plungerPositionBar=bar)
+        gui.ManualControlWidget._handle_held_volume(stub, 2600.0)
+        assert bar.value() == 2600
