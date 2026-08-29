@@ -1086,3 +1086,78 @@ class TestHeldVolumePaint:
         stub = SimpleNamespace(plungerPositionBar=bar)
         gui.ManualControlWidget._handle_held_volume(stub, 2600.0)
         assert bar.value() == 2600
+
+
+class TestResumeOffer:
+    """After an early end, the operator is offered the checkboxes set to run
+    again from the row that was in flight. Called unbound against stubs."""
+
+    def _stub(self, monkeypatch, answer=gui.QMessageBox.No, sequences=None,
+              running=None, resume_index=None):
+        asked = []
+
+        def question(*args):
+            asked.append(args[2])
+            return answer
+
+        monkeypatch.setattr(gui.QMessageBox, "question", question)
+        refreshed = []
+        stub = SimpleNamespace(
+            _sequences=sequences if sequences is not None else [],
+            _running_rows=running or [],
+            _resume_index=resume_index,
+            _refresh=lambda: refreshed.append(True),
+            asked=asked, refreshed=refreshed,
+        )
+        return stub
+
+    def test_no_leaves_the_checkboxes_and_consumes_the_offer(self, monkeypatch):
+        sequences = [{"include": True, "type": "flow_reagent"},
+                     {"include": True, "type": "priming"}]
+        stub = self._stub(monkeypatch, sequences=sequences, running=[0, 1],
+                          resume_index=1)
+        gui.SequencesWidget._offerResume(stub)
+        assert [s["include"] for s in sequences] == [True, True]
+        gui.SequencesWidget._offerResume(stub)
+        assert len(stub.asked) == 1, "the offer must not repeat"
+
+    def test_nothing_started_means_no_offer(self, monkeypatch):
+        stub = self._stub(monkeypatch, resume_index=None)
+        gui.SequencesWidget._offerResume(stub)
+        assert stub.asked == []
+
+    def test_stopped_and_error_both_offer(self, monkeypatch):
+        monkeypatch.setattr(gui.QMessageBox, "information", lambda *a: None)
+        monkeypatch.setattr(gui.QMessageBox, "critical", lambda *a: None)
+        offered = []
+        stub = SimpleNamespace(_ended_early=False,
+                               _offerResume=lambda: offered.append(True))
+        gui.SequencesWidget._handle_stopped(stub)
+        gui.SequencesWidget._handle_error(stub, "pump fault")
+        assert offered == [True, True]
+
+    def test_a_fresh_run_clears_the_stale_offer(self):
+        stub = SimpleNamespace(
+            total_time=1.0, _resume_index=3, total_sequences=1,
+            sequenceLabel=SimpleNamespace(setText=lambda t: None),
+            timer=SimpleNamespace(start=lambda ms: None),
+            _renderRunControls=lambda: None,
+        )
+        gui.SequencesWidget._beginRunDisplay(stub)
+        assert stub._resume_index is None
+
+    def test_yes_rechecks_a_run_row_unchecked_mid_run(self, monkeypatch):
+        """The checkboxes stay live during a run: a remaining row the
+        operator unchecked while it ran must still come back checked, or
+        the offer's "that row and the ones after it" reads false. (The
+        never-in-the-run case rides the real-widget test.)"""
+        sequences = [{"include": True, "type": "flow_reagent"},
+                     {"include": True, "type": "priming", "name": "wash A"},
+                     {"include": False, "type": "clean_up"}]
+        stub = self._stub(monkeypatch, answer=gui.QMessageBox.Yes,
+                          sequences=sequences, running=[0, 1, 2],
+                          resume_index=1)
+        gui.SequencesWidget._offerResume(stub)
+        assert "wash A" in stub.asked[0]
+        assert [s["include"] for s in sequences] == [False, True, True]
+        assert stub.refreshed == [True]

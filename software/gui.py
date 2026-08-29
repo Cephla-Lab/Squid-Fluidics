@@ -29,7 +29,7 @@ from fluidics.devices import (
     ISSUE_TEMPERATURE_CONTROLLER,
 )
 from fluidics.system import FluidicsSystem
-from fluidics.experiment_worker import SEQUENCE_COMPLETED
+from fluidics.experiment_worker import SEQUENCE_COMPLETED, SEQUENCE_STARTED
 from fluidics.run_log import setup_uncaught_exception_logging, start_log_file
 from fluidics.sequences import (
     load_sequences, save_sequences_yaml,
@@ -246,6 +246,14 @@ class PortNamesDialog(QDialog):
         super().accept()
 
 
+def _ask_yes_no(parent, title, text, default=QMessageBox.No):
+    """One spelling of the Yes/No question the GUI asks three ways --
+    start a run, resume one, abort on exit."""
+    answer = QMessageBox.question(parent, title, text,
+                                  QMessageBox.Yes | QMessageBox.No, default)
+    return answer == QMessageBox.Yes
+
+
 def _hms(seconds):
     """Seconds as hh:mm:ss, for the estimate dialog and the countdown."""
     seconds = int(seconds)
@@ -273,6 +281,7 @@ class SequencesWidget(PostsToQtThread, QWidget):
         self._invalid = {}       # model row -> live-validation message
         self._port_limit = available_port_count(config)   # config-fixed
         self._running_rows = []  # model rows of the sequences handed to the worker
+        self._resume_index = None   # position in that list last reported Started
         self._durations = []     # per-sequence estimates, for re-anchoring
         self._ended_early = False   # a stop or an error has already had its dialog
         system.warnings.subscribe(self.reportWarning)
@@ -708,16 +717,17 @@ class SequencesWidget(PostsToQtThread, QWidget):
     def _confirmStart(self, seconds, n_sequences):
         """The operator sees the bill before the run starts: how many
         sequences, how long they should take. True to go ahead."""
-        answer = QMessageBox.question(
+        return _ask_yes_no(
             self, "Start run?",
             f"{n_sequences} sequence(s), estimated {_hms(seconds)}.\n\nStart the run?",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
-        return answer == QMessageBox.Yes
+            default=QMessageBox.Yes)
 
     def _beginRunDisplay(self):
         """A fresh run's display. The previous run's estimate must not price
-        this one while the new estimate is still in the post."""
+        this one while the new estimate is still in the post, and a clean
+        earlier run's last row must not seed a bogus resume offer."""
         self.total_time = None
+        self._resume_index = None
         self._renderRunControls()
         self.sequenceLabel.setText(f"0/{self.total_sequences} sequences")
         self.timer.start(1000)
@@ -809,6 +819,8 @@ class SequencesWidget(PostsToQtThread, QWidget):
 
     def _handle_progress(self, index, sequence_num, status):
         self.sequenceLabel.setText(f"{sequence_num}/{self.total_sequences} sequences")
+        if status == SEQUENCE_STARTED:
+            self._resume_index = index
         if status == SEQUENCE_COMPLETED and self._durations:
             # Re-anchor: whatever the finished sequences actually took, what
             # remains is the estimate of the ones not yet run, from now.
@@ -833,10 +845,49 @@ class SequencesWidget(PostsToQtThread, QWidget):
     def _handle_stopped(self):
         self._ended_early = True
         QMessageBox.information(self, "Stopped", "The run was stopped.")
+        self._offerResume()
 
     def _handle_error(self, error_message):
         self._ended_early = True
         QMessageBox.critical(self, "Error", error_message)
+        self._offerResume()
+
+    def _offerResume(self):
+        """After an early end: offer to check only the row that was in
+        flight and the ones after it, so Run restarts the experiment there.
+
+        Row-level on purpose -- the interrupted row restarts from its first
+        repeat, and a run stopped exactly at a row boundary re-offers the
+        row that just finished; the operator sees the checkboxes (and the
+        fresh estimate behind the Run button) before anything moves.
+
+        The model still matches _running_rows here: edits are frozen during
+        the run, and from the early-end dialog through this question the Qt
+        thread never leaves the modal chain, so nothing can edit between.
+        """
+        index = self._resume_index
+        self._resume_index = None       # one offer per early end
+        if index is None:
+            return
+        cutoff = self._running_rows[index]
+        seq = self._sequences[cutoff]
+        label = seq.get('name') or SEQUENCE_TYPE_LABELS.get(seq['type'], seq['type'])
+        if not _ask_yes_no(
+                self, "Resume from here?",
+                f"The run ended at sequence {cutoff + 1} ({label}).\n\n"
+                "Check only that row and the ones after it, ready to run "
+                "again from there?"):
+            return
+        _logger.info("Resume accepted: rows re-checked from sequence %d (%s).",
+                     cutoff + 1, label)
+        # Every row of the run snapshot is set from the cutoff -- not just
+        # completed rows unchecked: the checkboxes stay live during a run,
+        # and a row unchecked mid-run must still come back checked, or the
+        # offer's promise ("that row and the ones after it") reads false.
+        # Rows that were never part of the run keep their own state.
+        for row in self._running_rows:
+            self._sequences[row]['include'] = row >= cutoff
+        self._refresh()
 
     def _onSessionState(self, kind):
         # On the session's thread; the display change crosses to Qt.
@@ -1784,10 +1835,8 @@ class FluidicsControlGUI(PostsToQtThread, QMainWindow):
         if not self.session.busy:
             return True
         what = "run" if self.session.kind == "run" else "manual move"
-        answer = QMessageBox.question(
-            self, "Still running", f"A {what} is in progress. Abort it and exit?",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        return answer == QMessageBox.Yes
+        return _ask_yes_no(self, "Still running",
+                           f"A {what} is in progress. Abort it and exit?")
 
     def closeEvent(self, event):
         if not self._quiesce():

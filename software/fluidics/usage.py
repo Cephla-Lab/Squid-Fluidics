@@ -16,10 +16,12 @@ so dropping it (or never building it) changes no operations code -- and a
 future duration-operated pump joins by publishing its own draws in uL,
 converted by its own calibration. Totals reset when a run starts ("from
 the beginning of each experiment"); manual draws between runs stay in the
-ambient view until then -- and a run resumed via a fresh start() counts
-as a new experiment today (the resume feature will revisit that). At a
-run's end the totals go to the fluidics log, so the record exists even
-when nothing was watching.
+ambient view until then. A resumed run (the resume offer re-runs the
+tail as a fresh start()) deliberately counts as a new experiment: the
+interrupted run's totals were already logged at its end, and cross-run
+accumulation, if ever wanted, belongs with run identity. At a run's end
+the totals go to the fluidics log, so the record exists even when
+nothing was watching.
 """
 
 import logging

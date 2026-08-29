@@ -200,3 +200,21 @@ class TestApplicationTypes:
         widget.tree.setCurrentItem(widget.tree.topLevelItem(1))
         widget.removeSequence()
         assert widget.runButton.isEnabled()
+
+
+class TestResumePreparesTheModel:
+    def test_the_offer_rewrites_the_include_flags_through_the_model(
+            self, widget, monkeypatch):
+        """End to end through the real widget: a run over rows 0,2,3 that
+        ends in flight on row 2 resumes as rows 2,3 -- row 1, never part of
+        the run, keeps its own unchecked state."""
+        monkeypatch.setattr(gui.QMessageBox, "question",
+                            lambda *args: gui.QMessageBox.Yes)
+        widget.setSequences([FLOW, dict(FLOW, include=False), FLOW, TEMP])
+        widget.total_sequences = 3
+        widget._running_rows = [0, 2, 3]
+        widget._handle_progress(1, 2, gui.SEQUENCE_STARTED)
+        widget._offerResume()
+        assert widget._includedRows() == [2, 3]
+        assert widget.tree.topLevelItem(0).checkState(0) == gui.Qt.Unchecked, \
+            "the tree did not repaint from the model"
