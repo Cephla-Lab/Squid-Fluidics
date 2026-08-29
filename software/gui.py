@@ -29,7 +29,7 @@ from fluidics.devices import (
     ISSUE_TEMPERATURE_CONTROLLER,
 )
 from fluidics.system import FluidicsSystem
-from fluidics.experiment_worker import SEQUENCE_COMPLETED
+from fluidics.experiment_worker import SEQUENCE_COMPLETED, SEQUENCE_STARTED
 from fluidics.run_log import setup_uncaught_exception_logging, start_log_file
 from fluidics.sequences import (
     load_sequences, save_sequences_yaml,
@@ -273,6 +273,7 @@ class SequencesWidget(PostsToQtThread, QWidget):
         self._invalid = {}       # model row -> live-validation message
         self._port_limit = available_port_count(config)   # config-fixed
         self._running_rows = []  # model rows of the sequences handed to the worker
+        self._resume_index = None   # position in that list last reported Started
         self._durations = []     # per-sequence estimates, for re-anchoring
         self._ended_early = False   # a stop or an error has already had its dialog
         system.warnings.subscribe(self.reportWarning)
@@ -716,8 +717,10 @@ class SequencesWidget(PostsToQtThread, QWidget):
 
     def _beginRunDisplay(self):
         """A fresh run's display. The previous run's estimate must not price
-        this one while the new estimate is still in the post."""
+        this one while the new estimate is still in the post, and a clean
+        earlier run's last row must not seed a bogus resume offer."""
         self.total_time = None
+        self._resume_index = None
         self._renderRunControls()
         self.sequenceLabel.setText(f"0/{self.total_sequences} sequences")
         self.timer.start(1000)
@@ -809,6 +812,8 @@ class SequencesWidget(PostsToQtThread, QWidget):
 
     def _handle_progress(self, index, sequence_num, status):
         self.sequenceLabel.setText(f"{sequence_num}/{self.total_sequences} sequences")
+        if status == SEQUENCE_STARTED:
+            self._resume_index = index   # the row in flight, if this run ends early
         if status == SEQUENCE_COMPLETED and self._durations:
             # Re-anchor: whatever the finished sequences actually took, what
             # remains is the estimate of the ones not yet run, from now.
@@ -833,10 +838,41 @@ class SequencesWidget(PostsToQtThread, QWidget):
     def _handle_stopped(self):
         self._ended_early = True
         QMessageBox.information(self, "Stopped", "The run was stopped.")
+        self._offerResume()
 
     def _handle_error(self, error_message):
         self._ended_early = True
         QMessageBox.critical(self, "Error", error_message)
+        self._offerResume()
+
+    def _offerResume(self):
+        """After an early end: offer to check only the row that was in
+        flight and the ones after it, so Run restarts the experiment there.
+
+        Row-level on purpose -- the interrupted row restarts from its first
+        repeat, and a run stopped exactly at a row boundary re-offers the
+        row that just finished; the operator sees the checkboxes (and the
+        fresh estimate behind the Run button) before anything moves.
+        Exact-repeat resume needs the shared run plan and comes with it.
+        """
+        index, self._resume_index = self._resume_index, None
+        if index is None or not 0 <= index < len(self._running_rows):
+            return
+        cutoff = self._running_rows[index]
+        seq = self._sequences[cutoff] if cutoff < len(self._sequences) else {}
+        label = seq.get('name') or seq.get('type', '?')
+        answer = QMessageBox.question(
+            self, "Resume from here?",
+            f"The run ended at sequence {cutoff + 1} ({label}).\n\n"
+            "Check only that row and the ones after it, ready to run again "
+            "from there?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer != QMessageBox.Yes:
+            return
+        for row in self._running_rows:
+            if row < cutoff and row < len(self._sequences):
+                self._sequences[row]['include'] = False
+        self._refresh()
 
     def _onSessionState(self, kind):
         # On the session's thread; the display change crosses to Qt.

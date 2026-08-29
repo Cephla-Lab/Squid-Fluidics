@@ -7,8 +7,10 @@ from .errors import OperationError  # noqa: F401
 
 _logger = logging.getLogger(__name__)
 
-# The one progress status a consumer branches on -- the GUI re-anchors its
-# countdown when a sequence completes. The other statuses are narration.
+# The progress statuses a consumer branches on: the GUI re-anchors its
+# countdown on Completed and remembers the row in flight from Started (the
+# resume offer). The other statuses are narration.
+SEQUENCE_STARTED = "Started"
 SEQUENCE_COMPLETED = "Completed"
 
 
@@ -123,7 +125,8 @@ class ExperimentWorker:
                     # sequence, the device that was waiting answers for both.
                     self._hold_if_paused(index, current_sequence, tag)
                     _logger.info("%s: started", tag)
-                    self._call_callback('update_progress', index, current_sequence, "Started")
+                    self._call_callback('update_progress', index, current_sequence,
+                                        SEQUENCE_STARTED)
                     self.experiment_ops.process_sequence(seq)
                     # Every wait inside an operation raises on a cancel, so
                     # this covers only the tail: a cancel landing after the
