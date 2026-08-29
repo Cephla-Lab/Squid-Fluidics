@@ -1,15 +1,16 @@
-"""Estimate a run's time before it starts, by running it.
+"""The run plan, priced by running the run before it starts.
 
-estimate_run_time keeps no hand-maintained copy of the timing knowledge:
-it replays the sequences against a simulated rig built from the same
-config -- the same operations code queues the same chains, overflow dumps
-and all -- and totals what actually got queued. Hardware is never touched;
-a real run is estimated on its simulated twin, in milliseconds.
+plan_run keeps no hand-maintained copy of the timing knowledge: it
+replays the sequences against a simulated rig built from the same config
+-- the same operations code queues the same chains, overflow dumps and
+all -- and prices each plan entry from what actually got queued.
+Hardware is never touched; a real run is priced on its simulated twin,
+in milliseconds.
 
-The estimate is per sequence (one figure per repeat, in run order), so a
-display can re-anchor at every boundary: when a sequence completes, what
-remains is the sum of the not-yet-run figures, whatever the finished
-ones actually took.
+The plan is per repeat, in run order, so a display can re-anchor at
+every boundary: when a sequence completes, what remains is the sum of
+the not-yet-run entries, whatever the finished ones actually took.
+estimate_run_time wraps the plan for callers that only price.
 """
 
 import logging
@@ -17,6 +18,8 @@ import logging
 from .control._def import CMD_SET
 from .devices import build_devices, build_operations
 from .errors import RunControl
+from .events import PlanEntry
+from .sequences import sequence_label
 
 _logger = logging.getLogger(__name__)
 
@@ -48,27 +51,39 @@ class _MeteredRunControl(RunControl):
         return super().wait_interrupted(0)
 
 
-def estimate_run_time(config, sequences):
-    """(total_seconds, durations) for a run of `sequences` under `config`:
-    the total, and one figure per sequence repeat in run order (their sum).
+def plan_run(config, sequences):
+    """The run plan for `sequences` under `config`: one PlanEntry per
+    sequence repeat, in run order, each priced by the replay -- the one
+    expansion the worker iterates, events refer to, and displays sum.
 
-    Never raises: a run the replay cannot estimate -- a sequence the
-    simulated rig refuses, a config the simulation cannot build -- gets a
-    flat fallback per sequence and a logged warning. The estimate must not
-    stop a runnable run; validation is the entry points' job, done before
-    this.
+    Never raises: a run the replay cannot price -- a sequence the simulated
+    rig refuses, a config the simulation cannot build -- gets a flat
+    fallback per repeat and a logged warning. The plan must not stop a
+    runnable run; validation is the entry points' job, done before this.
     """
     try:
         durations = _replay(config, sequences)
     except Exception as e:
-        _logger.warning("Could not estimate the run by replay (%s); using a "
+        _logger.warning("Could not price the run by replay (%s); using a "
                         "flat fallback of %.0f s per sequence.",
                         e, FALLBACK_SEQUENCE_SECONDS)
-        durations = []
-        for seq in sequences:
-            per_repeat = (seq.get("incubation_time", 0) * 60
-                          + FALLBACK_SEQUENCE_SECONDS)
-            durations += [per_repeat] * seq.get("repeat", 1)
+        durations = None
+    plan = []
+    for row, seq in enumerate(sequences):
+        label = sequence_label(seq)
+        repeats = seq.get("repeat", 1)
+        for repeat in range(1, repeats + 1):
+            seconds = (durations[len(plan)] if durations is not None
+                       else seq.get("incubation_time", 0) * 60
+                       + FALLBACK_SEQUENCE_SECONDS)
+            plan.append(PlanEntry(row, seq, repeat, repeats, label, seconds))
+    return tuple(plan)
+
+
+def estimate_run_time(config, sequences):
+    """(total_seconds, durations) for a run of `sequences` under `config`
+    -- the plan's figures, for callers that only price."""
+    durations = [entry.duration_seconds for entry in plan_run(config, sequences)]
     return sum(durations), durations
 
 

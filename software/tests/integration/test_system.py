@@ -10,7 +10,7 @@ from fluidics.merfish_operations import MERFISHOperations
 from fluidics.open_chamber_operations import OpenChamberOperations
 from fluidics.system import FluidicsSystem
 
-from ..conftest import wait_until
+from ..conftest import hears, wait_until
 from .conftest import FLOW_CELL_STEP
 
 
@@ -37,10 +37,12 @@ class TestBuild:
 
 class TestTheJob:
     def test_run_goes_through_the_session_with_the_systems_operations(self, system, real_clock):
-        reports = []
-        system.run([FLOW_CELL_STEP], callbacks={"on_finished": lambda: reports.append("finished")})
+        from fluidics.events import RunEnded
+        reports = hears(system.session.events, RunEnded,
+                        key=lambda event: event.outcome)
+        system.run([FLOW_CELL_STEP])
         assert system.wait(5)
-        assert reports == ["finished"]
+        assert wait_until(lambda: reports == ["finished"]), reports
         assert system.devices.syringe_pump.executed, "nothing moved"
 
     def test_run_manual_goes_through_the_session(self, system, real_clock):

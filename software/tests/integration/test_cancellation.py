@@ -16,7 +16,7 @@ from fluidics.flow_monitor import FlowFault
 from fluidics.sequences import APPLICATION_SEQUENCES
 
 from .conftest import FLOW_CELL_STEP
-from ..worker_helpers import errors_in, record_run
+from ..worker_helpers import record_run
 
 # Every fluidic step type on each operations stack: both stacks share the
 # pump's cancellation path, and every one of their exception wrappers must let
@@ -99,10 +99,10 @@ def test_the_worker_learns_of_the_abort_from_the_operation(stack):
     sequence as completed nor starts the next one."""
     ops, sp, seq, config = stack
     sp.run_control.cancel()
-    events = record_run(ops, [seq, seq], config)
-    assert ("progress", 1, "Completed") not in events
-    assert ("progress", 2, "Started") not in events
-    assert ("stopped",) in events and errors_in(events) == []
+    worker, events = record_run(ops, [seq, seq])
+    assert ("sequence", 1, "completed") not in events
+    assert ("sequence", 2, "started") not in events
+    assert worker.outcome == "stopped" and worker.message is None
 
 
 def test_a_flow_fault_reaches_the_operator_as_a_fault_not_an_abort(flow_cell_config):
@@ -114,7 +114,7 @@ def test_a_flow_fault_reaches_the_operator_as_a_fault_not_an_abort(flow_cell_con
                             tolerance_fraction=0.2, measured_ul_min=12.0,
                             out_of_band_seconds=3.0, consecutive_samples=6)
 
-    (message,) = errors_in(record_run(FaultingOps(), [SEQS["flow_cell"]],
-                                      flow_cell_config))
-    assert "inlet" in message and "12 µL/min" in message
-    assert "abort" not in message.lower()
+    worker, _ = record_run(FaultingOps(), [SEQS["flow_cell"]])
+    assert worker.outcome == "failed"
+    assert "inlet" in worker.message and "12 µL/min" in worker.message
+    assert "abort" not in worker.message.lower()

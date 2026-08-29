@@ -10,10 +10,11 @@ import threading
 import pytest
 
 from fluidics.devices import build_operations
+from fluidics.events import RunEnded, RunStarted, SequenceStarted
 from fluidics.manual_operations import ManualOperations
 from fluidics.run_session import RunSession
 
-from ..conftest import wait_until
+from ..conftest import hears, wait_until
 from .conftest import FLOW_CELL_STEP
 
 INCUBATING = {**FLOW_CELL_STEP, "incubation_time": 60}     # minutes: a run to catch mid-way
@@ -50,10 +51,10 @@ def manual(devices):
 class TestARun:
     def test_it_runs_on_another_thread_and_the_rig_is_free_after(
             self, devices, session, ops, seen, real_clock):
-        during = []
-        session.start([FLOW_CELL_STEP], ops, callbacks={
-            "update_progress": lambda *a: during.append(
-                (threading.current_thread(), session.busy, session.kind))})
+        during = hears(session.events, SequenceStarted,
+                       key=lambda event: (threading.current_thread(),
+                                          session.busy, session.kind))
+        session.start([FLOW_CELL_STEP], ops)
         assert session.wait(5)
         assert during, "the run never reported"
         assert all(t is not threading.main_thread() for t, _, _ in during)
@@ -62,45 +63,85 @@ class TestARun:
         assert seen == ["run", None]
         assert devices.syringe_pump.executed, "nothing moved"
 
-    def test_the_rig_is_free_and_the_signal_clean_before_the_callers_on_finished(
+    def test_run_ended_arrives_with_the_rig_free_and_the_signal_clean(
             self, session, ops, seen, real_clock):
-        """A GUI renders its controls on on_finished; it must see an idle rig
-        and a signal the next job can use."""
-        at_finish = []
-        session.start([FLOW_CELL_STEP], ops, callbacks={"on_finished": lambda: at_finish.append(
-            (session.busy, session.cancelled, list(seen)))})
+        """A GUI paints its dialogs on RunEnded; it must see an idle rig
+        and a signal the next job can use. The state(None) notification
+        follows the terminal event -- that ordering is what stops a chained
+        start from sliding in front of it."""
+        at_end = hears(session.events, RunEnded,
+                       key=lambda event: (event.outcome, session.busy,
+                                          session.cancelled, list(seen)))
+        session.start([FLOW_CELL_STEP], ops)
         session.abort()
         assert session.wait(5)
-        assert at_finish == [(False, False, ["run", None])]
+        assert wait_until(lambda: at_end != [])
+        assert at_end[0][1:] == (False, False, ["run"])
+        assert seen == ["run", None]
+
+    def test_a_chained_start_cannot_precede_the_old_runs_ending(
+            self, session, ops, real_clock):
+        """A state(None) subscriber may start the next job synchronously;
+        the old run's RunEnded must already be out, or the new RunStarted
+        pairs with the old ending."""
+        history = []
+        session.events.subscribe(
+            lambda event: history.append(type(event).__name__))
+        chained = []
+
+        def chain(kind):
+            if kind is None and not chained:
+                chained.append(True)
+                session.start([FLOW_CELL_STEP], ops)
+
+        session.state.subscribe(chain)
+        session.start([FLOW_CELL_STEP], ops)
+        assert session.wait(5)
+        assert wait_until(lambda: history.count("RunEnded") == 2)
+        first_end = history.index("RunEnded")
+        second_start = history.index("RunStarted", 1)
+        assert first_end < second_start, history
+
+    def test_a_launch_that_fails_still_ends_the_run_it_announced(
+            self, session, ops, thread_cannot_start):
+        """RunStarted goes out from the worker's constructor; a thread that
+        will not start must not leave it unpaired."""
+        history = []
+        session.events.subscribe(lambda event: history.append(event))
+        with pytest.raises(RuntimeError, match="can't start"):
+            session.start([FLOW_CELL_STEP], ops)
+        kinds = [type(event).__name__ for event in history]
+        assert kinds == ["RunStarted", "RunEnded"]
+        assert history[1].outcome == "failed"
+        assert not session.busy
 
     def test_a_runs_early_end_is_reported_after_the_rig_is_free(self, session, ops, real_clock):
-        """As a manual move's is: the worker says stop or error from inside
-        run(), but whoever listens must see an idle rig, the same as they do
-        on on_finished."""
-        seen = []
-        session.start([INCUBATING], ops, callbacks={
-            "on_stopped": lambda: seen.append(("stopped", session.busy, session.cancelled))})
+        """As a manual move's report is: the worker records stop or error
+        from inside run(), but RunEnded lands with the rig already idle."""
+        ended = hears(session.events, RunEnded,
+                      key=lambda event: (event.outcome, event.message,
+                                         session.busy, session.cancelled))
+        session.start([INCUBATING], ops)
         assert not session.wait(0.02)
         session.abort()
         assert session.wait(5)
-        assert seen == [("stopped", False, False)]
+        assert wait_until(lambda: ended != [])
+        assert ended == [("stopped", None, False, False)]
 
         bad_port = {**FLOW_CELL_STEP, "fluidic_port": 99}
-        session.start([bad_port], ops, callbacks={
-            "on_error": lambda m: seen.append(("error", session.busy, "99" in m))})
+        session.start([bad_port], ops)
         assert session.wait(5)
-        assert seen[-1] == ("error", False, True)
+        assert wait_until(lambda: len(ended) == 2)
+        outcome, message, busy, _ = ended[1]
+        assert (outcome, busy) == ("failed", False) and "99" in message
 
     def test_abort_stops_a_run_mid_incubation_and_wait_returns(self, session, ops, real_clock):
-        reports = []
-        session.start([INCUBATING], ops, callbacks={
-            "on_stopped": lambda: reports.append("stopped"),
-            "on_error": lambda m: reports.append(("error", m)),
-            "on_finished": lambda: reports.append("finished")})
+        ended = hears(session.events, RunEnded, key=lambda event: event.outcome)
+        session.start([INCUBATING], ops)
         assert not session.wait(0.02), "an hour's incubation ended in 20 ms"
         assert session.abort() is True
         assert session.wait(5)
-        assert reports == ["stopped", "finished"]
+        assert wait_until(lambda: ended == ["stopped"])
         assert not session.busy
 
     def test_a_second_job_while_a_run_is_going_is_refused(self, session, ops, seen, real_clock):
@@ -320,14 +361,30 @@ class TestWait:
         release.set()
         assert session.wait(5) is True
 
-    def test_wait_from_inside_the_jobs_own_callback_does_not_raise(self, session, ops, real_clock):
-        """A callback that wants to know the job is over may ask; it cannot
-        join its own thread, and is not asked to."""
+    def test_wait_from_inside_a_manual_moves_on_finished_does_not_raise(
+            self, session, real_clock):
+        """on_finished runs after the end's one transition, so a callback
+        that wants to know the job is over may ask; it cannot join the
+        job's own thread, and is not asked to. (An events subscriber may
+        NOT wait -- reports land inside the transition, before the waiters
+        are woken.)"""
         waited = []
-        session.start([FLOW_CELL_STEP], ops,
-                      callbacks={"on_finished": lambda: waited.append(session.wait(1))})
+        session.run_manual(lambda: None,
+                           callbacks={"on_finished": lambda: waited.append(session.wait(1))})
         assert session.wait(5)
-        assert waited == [True]
+        assert wait_until(lambda: waited == [True])
+
+
+class TestRunIds:
+    def test_two_runs_in_one_second_get_distinct_ids(self, session, ops):
+        """The counter, not the clock, is what keeps back-to-back ids
+        apart -- under the suite's fake clock both stamps share a second."""
+        ids = hears(session.events, RunStarted, key=lambda event: event.run_id)
+        session.start([FLOW_CELL_STEP], ops)
+        assert session.wait()
+        session.start([FLOW_CELL_STEP], ops)
+        assert session.wait()
+        assert len(ids) == 2 and len(set(ids)) == 2, ids
 
 
 class TestSnapshot:

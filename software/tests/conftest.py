@@ -131,6 +131,21 @@ def moved_ul(sp, kind):
     return sum(op[2] for op in sp.executed_ops if op[0] == kind)
 
 
+def hears(channel, event_type, key=lambda event: event):
+    """Subscribe a typed recorder to a Subscribers channel: returns the
+    list that will collect key(event) for every `event_type` published --
+    the events-test idiom, without each test hand-rolling the isinstance
+    filter."""
+    heard = []
+
+    def note(event):
+        if isinstance(event, event_type):
+            heard.append(key(event))
+
+    channel.subscribe(note)
+    return heard
+
+
 def wait_until(predicate, timeout=2, step=0.002):
     """Poll `predicate` on the real clock. True once it holds, False if
     `timeout` seconds pass first."""

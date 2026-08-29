@@ -14,8 +14,9 @@ import pytest
 
 from fluidics.control.controller import FluidControllerSimulation
 from fluidics.time_estimate import (SET_TEMPERATURE_SECONDS, VALVE_MOVE_SECONDS,
-                                    _op_seconds, estimate_run_time)
+                                    _op_seconds, estimate_run_time, plan_run)
 
+from ..conftest import hears
 from ..unit.control.pump_helpers import sim_pump
 from .conftest import FLOW_CELL_STEP
 
@@ -125,35 +126,39 @@ class TestTheReplayIsSafe:
         with caplog.at_level(logging.WARNING, logger="fluidics"):
             seconds, durations = estimate_run_time(flow_cell_config, [bad, FLOW_CELL_STEP])
         assert len(durations) == 2 and seconds > 0
-        assert "Could not estimate" in caplog.text
+        assert "Could not price the run" in caplog.text
 
 
-class TestTheRunCarriesTheEstimate:
-    def test_the_figures_the_gui_hears_are_the_ones_it_handed_in(
+class TestTheRunCarriesThePlan:
+    def test_the_plan_the_gui_hears_is_the_one_it_handed_in(
             self, flow_cell_config, instant_devices):
-        """The GUI prices its confirm dialog and hands the same figures to
-        the run; the worker relays them verbatim."""
-        from fluidics.devices import build_operations, build_worker
-        devices = instant_devices(flow_cell_config)
-        _, durations = estimate_run_time(flow_cell_config, [FLOW_CELL_STEP])
-        heard = []
-        build_worker(devices, build_operations(flow_cell_config, devices),
-                     [FLOW_CELL_STEP], callbacks={"on_estimate": heard.append},
-                     durations=durations)
-        assert heard == [durations]
-
-    def test_a_run_started_without_figures_estimates_its_own(
-            self, flow_cell_config, instant_devices):
-        """The session is the one place every run passes through: a caller
-        with no estimate in hand (the CLI) still gets the replayed figures,
-        not zeros."""
+        """The GUI prices its confirm dialog with the plan and hands the
+        same object to the run; RunStarted brings it back verbatim."""
         from fluidics.devices import build_operations
+        from fluidics.events import RunStarted
         from fluidics.run_session import RunSession
         devices = instant_devices(flow_cell_config)
         session = RunSession(devices)
-        _, durations = estimate_run_time(flow_cell_config, [FLOW_CELL_STEP])
-        heard = []
-        session.start([FLOW_CELL_STEP], build_operations(flow_cell_config, devices),
-                      callbacks={"on_estimate": heard.append})
+        plan = plan_run(flow_cell_config, [FLOW_CELL_STEP])
+        heard = hears(session.events, RunStarted, key=lambda event: event.plan)
+        session.start([FLOW_CELL_STEP],
+                      build_operations(flow_cell_config, devices), plan=plan)
         assert session.wait()
-        assert heard == [durations]
+        assert heard == [plan]
+
+    def test_a_run_started_without_a_plan_builds_its_own(
+            self, flow_cell_config, instant_devices):
+        """The session is the one place every run passes through: a caller
+        with no plan in hand (the CLI) still gets the replayed figures,
+        not zeros."""
+        from fluidics.devices import build_operations
+        from fluidics.events import RunStarted
+        from fluidics.run_session import RunSession
+        devices = instant_devices(flow_cell_config)
+        session = RunSession(devices)
+        expected = plan_run(flow_cell_config, [FLOW_CELL_STEP])
+        heard = hears(session.events, RunStarted, key=lambda event: event.plan)
+        session.start([FLOW_CELL_STEP],
+                      build_operations(flow_cell_config, devices))
+        assert session.wait()
+        assert heard == [expected]

@@ -29,7 +29,8 @@ from fluidics.devices import (
     ISSUE_TEMPERATURE_CONTROLLER,
 )
 from fluidics.system import FluidicsSystem
-from fluidics.experiment_worker import SEQUENCE_COMPLETED, SEQUENCE_STARTED
+from fluidics.events import (RunEnded, RunStarted, SequenceCompleted,
+                             SequenceStarted, plan_seconds)
 from fluidics.run_log import setup_uncaught_exception_logging, start_log_file
 from fluidics.sequences import (
     load_sequences, save_sequences_yaml,
@@ -280,14 +281,13 @@ class SequencesWidget(PostsToQtThread, QWidget):
         self._sequences = []     # THE sequence list; the tree renders it
         self._invalid = {}       # model row -> live-validation message
         self._port_limit = available_port_count(config)   # config-fixed
-        self._running_rows = []  # model rows of the sequences handed to the worker
-        self._resume_index = None   # position in that list last reported Started
-        self._durations = []     # per-sequence estimates, for re-anchoring
-        self._ended_early = False   # a stop or an error has already had its dialog
+        self._plan = ()          # the running run's plan, rows = model rows
         system.warnings.subscribe(self.reportWarning)
         # The run display ends when the session's job does -- whichever way
-        # it ends -- rather than riding any one worker callback.
+        # it ends -- rather than riding any one worker callback; the run's
+        # boundary facts arrive on the one events channel.
         system.session.state.subscribe(self._onSessionState)
+        system.session.events.subscribe(self._onRunEvent)
 
         self.initUI()
 
@@ -678,41 +678,33 @@ class SequencesWidget(PostsToQtThread, QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Invalid Sequence", f"Failed to validate sequences: {str(e)}")
             return
-        # The worker reports positions in this filtered list; remember which
-        # model row each one came from so the highlight lands on it.
-        self._running_rows = self._includedRows()
-        self.total_sequences = sum(s.get('repeat', 1) for s in selected)
-
         if not selected:
             QMessageBox.warning(self, "No Sequences Selected", "Please select at least one sequence to run.")
             return
 
-        callbacks = {
-            'update_progress': self.updateProgress,
-            'on_stopped': self.onStopped,
-            'on_error': self.handleError,
-            'on_finished': self.onWorkerFinished,
-            'on_estimate': self.setTimeEstimate,
-        }
-
-        # Estimated here, before anything starts, so the operator confirms
-        # with the figure in hand; the same figures ride into the run below,
-        # so the dialog and the countdown cannot disagree.
-        seconds, durations = self.system.estimate(selected)
-        if not self._confirmStart(seconds, self.total_sequences):
+        # Planned here, before anything starts, so the operator confirms
+        # with the figure in hand; the same plan rides into the run below,
+        # so the dialog and the run cannot disagree. RunStarted brings it
+        # back with the run's id, and the display paints from that.
+        plan = self.system.plan(selected)
+        if not self._confirmStart(plan_seconds(plan), len(plan)):
             return
+        # The plan's rows index `selected`; this widget's rows include the
+        # unchecked ones. Relabel once, so highlight and resume land on
+        # tree rows without a translation table riding alongside.
+        rows = self._includedRows()
+        plan = tuple(entry._replace(row=rows[entry.row]) for entry in plan)
 
         self._warnings.clear()
         self.warningLabel.setVisible(False)
-        self._ended_early = False
 
         try:
-            self.system.run(selected, callbacks, durations=durations)
+            self.system.run(selected, plan=plan)
         except RuntimeError as e:
             # A manual move got in first; the tabs normally prevent this.
             QMessageBox.warning(self, "Rig busy", str(e))
             return
-        self._beginRunDisplay()
+        self._beginRunDisplay(len(plan))
 
     def _confirmStart(self, seconds, n_sequences):
         """The operator sees the bill before the run starts: how many
@@ -722,14 +714,12 @@ class SequencesWidget(PostsToQtThread, QWidget):
             f"{n_sequences} sequence(s), estimated {_hms(seconds)}.\n\nStart the run?",
             default=QMessageBox.Yes)
 
-    def _beginRunDisplay(self):
+    def _beginRunDisplay(self, count):
         """A fresh run's display. The previous run's estimate must not price
-        this one while the new estimate is still in the post, and a clean
-        earlier run's last row must not seed a bogus resume offer."""
+        this one while RunStarted is still in the post."""
         self.total_time = None
-        self._resume_index = None
         self._renderRunControls()
-        self.sequenceLabel.setText(f"0/{self.total_sequences} sequences")
+        self.sequenceLabel.setText(f"0/{count} sequences")
         self.timer.start(1000)
 
     def updateTimeRemaining(self):
@@ -799,8 +789,8 @@ class SequencesWidget(PostsToQtThread, QWidget):
         self.pauseButton.setEnabled(live)
         self.abortButton.setEnabled(live)
         self.pauseButton.setText("Resume" if snap.paused else "Pause")
-        # The list is frozen while a job rides it: _running_rows is a
-        # positional snapshot, and a mid-run move would walk the highlight
+        # The list is frozen while a job rides it: the plan's rows are a
+        # snapshot of the model, and a mid-run move would walk the highlight
         # (and the run's meaning) to the wrong row.
         for button in (self.loadButton, self.addButton, self.removeButton,
                        self.duplicateButton, self.moveUpButton,
@@ -817,18 +807,41 @@ class SequencesWidget(PostsToQtThread, QWidget):
         # The label would otherwise wait for the next tick to say anything.
         self._showTimeRemaining()
 
-    def _handle_progress(self, index, sequence_num, status):
-        self.sequenceLabel.setText(f"{sequence_num}/{self.total_sequences} sequences")
-        if status == SEQUENCE_STARTED:
-            self._resume_index = index
-        if status == SEQUENCE_COMPLETED and self._durations:
+    def _handle_run_event(self, event):
+        """One handler for the run's boundary facts; continuous state stays
+        with the tick's snapshot reads."""
+        if isinstance(event, RunStarted):
+            self._plan = event.plan
+            self.total_time = plan_seconds(event.plan)
+            self.progressBar.setMaximum(100)  # For percentage
+            self.progressBar.setValue(0)
+        elif isinstance(event, SequenceStarted):
+            self.sequenceLabel.setText(
+                f"{event.position + 1}/{len(self._plan)} sequences")
+            self.highlightRow(self._plan[event.position].row)
+        elif isinstance(event, SequenceCompleted):
             # Re-anchor: whatever the finished sequences actually took, what
             # remains is the estimate of the ones not yet run, from now.
-            completed = sequence_num     # 1-based count == first not-yet-run index
             self.total_time = (self.session.elapsed_seconds
-                               + sum(self._durations[completed:]))
-        row = self._running_rows[index] if 0 <= index < len(self._running_rows) else None
-        self.highlightRow(row)
+                               + plan_seconds(self._plan[event.position + 1:]))
+        elif isinstance(event, RunEnded):
+            self._reportRunEnded(event)
+
+    def _reportRunEnded(self, event):
+        """The run's last word, delivered with the rig already free (the
+        session clears kind and signal before publishing): one dialog for
+        how it ended -- shown over the run display as it stood, the state
+        reset follows -- then the resume offer when there is somewhere to
+        resume from."""
+        if event.outcome == "stopped":
+            QMessageBox.information(self, "Stopped", "The run was stopped.")
+        elif event.outcome == "failed":
+            QMessageBox.critical(self, "Error", event.message)
+        else:
+            QMessageBox.information(self, "Finished",
+                                    "Sequence execution finished.")
+        if event.position is not None:
+            self._offerResume(self._plan[event.position].row)
 
     def _handle_warning(self, message):
         self._warnings.append(message)
@@ -842,34 +855,22 @@ class SequencesWidget(PostsToQtThread, QWidget):
         The system's channel logs it; this only shows it."""
         self._post_event('_handle_warning', message)
 
-    def _handle_stopped(self):
-        self._ended_early = True
-        QMessageBox.information(self, "Stopped", "The run was stopped.")
-        self._offerResume()
-
-    def _handle_error(self, error_message):
-        self._ended_early = True
-        QMessageBox.critical(self, "Error", error_message)
-        self._offerResume()
-
-    def _offerResume(self):
+    def _offerResume(self, cutoff):
         """After an early end: offer to check only the row that was in
-        flight and the ones after it, so Run restarts the experiment there.
+        flight (RunEnded named its plan entry; `cutoff` is that entry's
+        model row) and the ones after it, so Run restarts the experiment
+        there.
 
         Row-level on purpose -- the interrupted row restarts from its first
         repeat, and a run stopped exactly at a row boundary re-offers the
         row that just finished; the operator sees the checkboxes (and the
         fresh estimate behind the Run button) before anything moves.
 
-        The model still matches _running_rows here: edits are frozen during
-        the run, and from the early-end dialog through this question the Qt
-        thread never leaves the modal chain, so nothing can edit between.
+        The model still matches the plan's rows (relabeled to tree rows at
+        run start): edits are frozen during the run, and from the RunEnded
+        dialog through this question the Qt thread never leaves the modal
+        chain, so nothing can edit between.
         """
-        index = self._resume_index
-        self._resume_index = None       # one offer per early end
-        if index is None:
-            return
-        cutoff = self._running_rows[index]
         seq = self._sequences[cutoff]
         label = seq.get('name') or SEQUENCE_TYPE_LABELS.get(seq['type'], seq['type'])
         if not _ask_yes_no(
@@ -880,12 +881,12 @@ class SequencesWidget(PostsToQtThread, QWidget):
             return
         _logger.info("Resume accepted: rows re-checked from sequence %d (%s).",
                      cutoff + 1, label)
-        # Every row of the run snapshot is set from the cutoff -- not just
+        # Every row of the run's plan is set from the cutoff -- not just
         # completed rows unchecked: the checkboxes stay live during a run,
         # and a row unchecked mid-run must still come back checked, or the
         # offer's promise ("that row and the ones after it") reads false.
         # Rows that were never part of the run keep their own state.
-        for row in self._running_rows:
+        for row in {entry.row for entry in self._plan}:
             self._sequences[row]['include'] = row >= cutoff
         self._refresh()
 
@@ -896,9 +897,11 @@ class SequencesWidget(PostsToQtThread, QWidget):
     def _handle_state(self, kind):
         """The run display follows the session, not any one callback: the
         job ending -- finished, aborted, or a fault's self-cancel -- is what
-        stops the clock and clears the run's furniture. Every transition
-        redraws the buttons, so a manual job deadens this tab's controls
-        without leaning on the main window's tab guard."""
+        stops the clock and clears the run's furniture. RunEnded's dialog
+        lands first (over the still-painted run, highlight included); this
+        reset follows it in the posted order. Every transition redraws the
+        buttons, so a manual job deadens this tab's controls without
+        leaning on the main window's tab guard."""
         if kind is None:
             self.timer.stop()
             self.progressBar.setValue(0)
@@ -908,35 +911,9 @@ class SequencesWidget(PostsToQtThread, QWidget):
         self._renderRunControls()
         self._renderUsage()
 
-    def _handle_finished(self):
-        """The worker's last word; the display reset rode the session state
-        change already. A run that ended early has already said so -- one
-        dialog, not two."""
-        if not self._ended_early:
-            QMessageBox.information(self, "Finished", "Sequence execution finished.")
-
-    def _handle_time_estimate(self, durations):
-        self.total_time = sum(durations)
-        self._durations = list(durations)
-        self.progressBar.setMaximum(100)  # For percentage
-        self.progressBar.setValue(0)
-
-    # The worker's callbacks arrive on its thread; each crosses to the Qt
-    # thread as a call to its _handle_ method.
-    def setTimeEstimate(self, durations):
-        self._post_event('_handle_time_estimate', durations)
-
-    def updateProgress(self, index, sequence_num, status):
-        self._post_event('_handle_progress', index, sequence_num, status)
-
-    def onStopped(self):
-        self._post_event('_handle_stopped')
-
-    def handleError(self, error_message):
-        self._post_event('_handle_error', error_message)
-
-    def onWorkerFinished(self):
-        self._post_event('_handle_finished')
+    def _onRunEvent(self, event):
+        # On the worker's or session's thread; the paint crosses to Qt.
+        self._post_event('_handle_run_event', event)
 
     def abortSequences(self):
         if self.session.kind == "run":

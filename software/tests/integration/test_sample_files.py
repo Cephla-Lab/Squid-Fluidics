@@ -84,19 +84,20 @@ class TestQuickstartRunsEndToEnd:
         # still "complete without errors" -- with nothing watching the draws.
         assert len(devices.flow_sensors) == len(config.flow_sensors or [])
 
-        errors, statuses, finished = [], [], []
+        from fluidics.events import SequenceCompleted
+        from fluidics.subscribers import Subscribers
+        from fluidics.time_estimate import plan_run
+
+        from ..conftest import hears
+        events = Subscribers("test events")
+        completed = hears(events, SequenceCompleted)
         ops = build_operations(config, devices)
-        worker = build_worker(devices, ops, included, callbacks={
-            "on_error": errors.append,
-            "update_progress":
-                lambda index, num, status: statuses.append(status),
-            "on_finished": lambda: finished.append(True),
-        })
+        plan = plan_run(config, included)
+        worker = build_worker(devices, ops, plan, "run-1", events)
         # The CLI runs this on a thread only to keep its console alive;
         # the loop itself is synchronous.
         worker.run()
 
-        assert errors == []
-        assert finished == [True]
-        expected = sum(s.get("repeat", 1) for s in included)
-        assert statuses.count("Completed") == expected
+        assert worker.outcome == "finished", worker.message
+        assert len(completed) == len(plan)
+        assert len(plan) == sum(s.get("repeat", 1) for s in included)

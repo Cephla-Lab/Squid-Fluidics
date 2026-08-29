@@ -5,6 +5,7 @@ from fluidics.sequences import (
     get_included_sequences, load_sequences, validate_sequences,
 )
 from fluidics.control.config import default_config_path, load_config
+from fluidics.events import RunEnded
 from fluidics.system import FluidicsSystem
 from fluidics.run_log import (
     setup_uncaught_exception_logging, start_log_file, stop_log_file,
@@ -61,9 +62,14 @@ def main():
         system = FluidicsSystem.build(config, args.simulation)
 
         # The worker narrates its own run through the fluidics logger, so
-        # the CLI needs no rendering callbacks -- but a failed run must not
-        # exit 0, and the worker reports failure only through on_error.
-        system.run(included, callbacks={"on_error": run_errors.append})
+        # the CLI renders nothing -- but a failed run must not exit 0, and
+        # the run reports its outcome only through the events channel.
+        def note_bad_ending(event):
+            if isinstance(event, RunEnded) and event.outcome != "finished":
+                run_errors.append(event.message or event.outcome)
+
+        system.session.events.subscribe(note_bad_ending)
+        system.run(included)
         system.wait()
 
     except KeyboardInterrupt:
@@ -85,9 +91,9 @@ def main():
         stop_log_file()
 
     # Reached whenever main's own try completed. The worker never raises out
-    # of run() -- it reports through on_error -- so a failed run lands here
-    # too and must not exit 0; nor may a failed teardown report clean (the
-    # syringe may not be parked, a port may still be held).
+    # of run() -- the run's ending arrives as a RunEnded event -- so a failed
+    # run lands here too and must not exit 0; nor may a failed teardown
+    # report clean (the syringe may not be parked, a port may still be held).
     if run_errors:
         sys.exit(1)
     if close_errors:

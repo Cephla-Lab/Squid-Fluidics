@@ -4,7 +4,7 @@ once.
 
     with FluidicsSystem.build(config, simulation=True) as system:
         system.manual.open_port(3)
-        system.run(sequences, callbacks={"on_error": print})
+        system.run(sequences)      # reports on system.session.events
         system.wait()
 """
 
@@ -14,7 +14,7 @@ from .devices import build_devices, build_operations
 from .manual_operations import ManualOperations
 from .run_session import RunSession
 from .subscribers import Subscribers
-from .time_estimate import estimate_run_time
+from .time_estimate import plan_run
 from .usage import ReagentUsage
 
 _logger = logging.getLogger(__name__)
@@ -36,7 +36,7 @@ class FluidicsSystem:
         # Per-port reagent totals, reset at each run's start and logged at
         # its end; the GUI's table and any future API read this one object.
         self.usage = ReagentUsage(config, devices.syringe_pump,
-                                  devices.selector_valves, self.session.state)
+                                  devices.selector_valves, self.session.events)
 
     @classmethod
     def build(cls, config, simulation=False, on_issue=None):
@@ -47,16 +47,17 @@ class FluidicsSystem:
 
     # --- the one job ---
 
-    def estimate(self, sequences):
-        """(total_seconds, durations) for a run of `sequences` on this rig:
-        what a confirm dialog shows, ready to hand back to run() so the run
-        reports the same figures. See time_estimate.estimate_run_time."""
-        return estimate_run_time(self.devices.config, sequences)
+    def plan(self, sequences):
+        """The run plan for `sequences` on this rig (one PlanEntry per
+        repeat, each priced): what a confirm dialog shows, ready to hand to
+        run() so the dialog and the run cannot disagree."""
+        return plan_run(self.devices.config, sequences)
 
-    def run(self, sequences, callbacks=None, durations=None):
-        """Start a run of `sequences`; see RunSession.start. `durations`
-        from estimate() rides along so the run is not priced twice."""
-        self.session.start(sequences, self.operations, callbacks, durations)
+    def run(self, sequences, plan=None):
+        """Start a run of `sequences`; see RunSession.start. The run reports
+        through session.events; `plan` from plan() rides along so the run
+        is not priced twice."""
+        self.session.start(sequences, self.operations, plan=plan)
 
     def run_manual(self, verb, callbacks=None):
         """Start one manual verb; see RunSession.run_manual."""

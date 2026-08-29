@@ -11,6 +11,7 @@ Qt-free. Callbacks run on the job's thread; a GUI posts them across.
 """
 
 import collections
+import itertools
 import logging
 import threading
 import time
@@ -18,8 +19,9 @@ from functools import partial
 
 from .devices import build_worker
 from .errors import Cancelled
+from .events import RunEnded
 from .subscribers import Subscribers
-from .time_estimate import estimate_run_time
+from .time_estimate import plan_run
 
 _logger = logging.getLogger(__name__)
 
@@ -41,6 +43,12 @@ class RunSession:
         # for that one too). Subscribers must not block on another thread
         # that needs the session; the GUI posts an event.
         self.state = Subscribers("run session")
+        # The run's boundary facts (fluidics.events): the worker publishes
+        # the in-run ones; the session publishes RunEnded once the rig is
+        # free, so a dialog painted on it sees an idle rig -- the same
+        # deferral the early-end report has always had.
+        self.events = Subscribers("run events")
+        self._run_ids = itertools.count(1)     # atomic under the GIL
         self._lock = threading.RLock()
         self._kind = None
         self._thread = None
@@ -88,45 +96,55 @@ class RunSession:
 
     # --- starting a job ---
 
-    # Every job reports the same way: on_stopped() if the operator stopped
-    # it, on_error(message) if it failed, and on_finished() last, always. A
-    # run's callbacks also carry the worker's update_progress and
-    # on_estimate. The reports run after the rig is free, so a GUI
-    # rendering on them sees an idle rig.
+    # A run reports through `events` (RunStarted and the per-sequence facts
+    # from the worker; RunEnded from here, after the rig is free, so a GUI
+    # painting on it sees an idle rig). A manual move reports through its
+    # callbacks -- on_stopped() if the operator stopped it, on_error(message)
+    # if it failed, on_finished() last, always -- likewise after the rig is
+    # free.
 
-    def start(self, sequences, operations, callbacks=None, durations=None):
+    def start(self, sequences, operations, plan=None):
         """Run `sequences` through `operations` on a new thread. Refused with
         RuntimeError while a job runs.
 
-        durations: the run's per-sequence time estimate, when the caller
-        already has one in hand (the GUI prices its confirm dialog first and
-        passes the same figures, so the dialog and the countdown cannot
-        disagree). Estimated here otherwise -- the one place every run
-        passes through, so every run carries figures.
+        plan: the run plan (fluidics.events.PlanEntry per repeat), when the
+        caller already has one in hand (the GUI prices its confirm dialog
+        with it, so the dialog and the run cannot disagree). Built here
+        otherwise -- the one place every run passes through, so every run
+        carries one. `sequences` is read only to build a missing plan: a
+        caller holding a plan (a resume tail, say) may pass sequences=None. The run reports through `self.events`: the worker
+        publishes RunStarted and the per-sequence facts; RunEnded is
+        published once the rig is free, the same deferral the early-end
+        report has always had.
         """
-        if self.busy:       # before the worker is built, whose estimate callback would fire
+        if self.busy:       # before the worker is built, whose RunStarted would fire
             raise RuntimeError(f"the rig is busy: a {self._kind} is in progress")
-        if durations is None:
-            durations = estimate_run_time(self.devices.config, sequences)[1]
-        callbacks = dict(callbacks or {})
-        on_finished = callbacks.pop("on_finished", None)
-        on_stopped = callbacks.pop("on_stopped", None)
-        on_error = callbacks.pop("on_error", None)
-        # The worker reports an early end from inside run(), while the rig is
-        # still its; the report is held and delivered once the rig is free,
-        # as a manual move's is.
-        ended = []
-        callbacks["on_stopped"] = lambda: ended.append(on_stopped)
-        callbacks["on_error"] = lambda message: ended.append(
-            on_error and partial(on_error, message))
-        worker = build_worker(self.devices, operations, sequences, callbacks,
-                              durations=durations)
+        if plan is None:
+            plan = plan_run(self.devices.config, sequences)
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())   # UTC: sortable across DST
+        run_id = f"run-{stamp}-{next(self._run_ids)}"
+        worker = build_worker(self.devices, operations, plan, run_id,
+                              self.events)
 
         def body():
             worker.run()
-            return ended[0] if ended else None
+            return partial(self.events.notify,
+                           RunEnded(run_id, worker.outcome, worker.message,
+                                    worker.elapsed_seconds,
+                                    worker.ended_position))
 
-        self._launch("run", body, on_finished)
+        try:
+            self._launch("run", body, None)
+        except BaseException as e:
+            # The worker's RunStarted already went out (from its
+            # constructor); a launch that failed must not leave it
+            # unpaired -- consumers pairing starts with endings (the usage
+            # ledger's totals, a display's lifecycle) would wait forever.
+            # This one RunEnded lands after _finish's state(None), outside
+            # the serialized ordering -- acceptable for a thread that would
+            # not start, revisit if a chaining subscriber ever exists.
+            self.events.notify(RunEnded(run_id, "failed", str(e), 0.0, None))
+            raise
 
     def run_manual(self, verb, callbacks=None):
         """Run one manual verb -- a callable -- on a new thread. Refused with
@@ -148,9 +166,10 @@ class RunSession:
         self._launch("manual", body, callbacks.get("on_finished"))
 
     def _launch(self, kind, body, on_finished):
-        """Start `body` on the job's thread. It returns how the job ended
-        early -- a callable to report it, or None -- and once the rig is free
-        that report runs, then on_finished."""
+        """Start `body` on the job's thread. It returns how the job ended --
+        a callable that reports it (a run's RunEnded, a manual move's held
+        callback), delivered by _finish once the rig reads free -- then
+        on_finished runs."""
         with self._lock:
             if self._kind is not None:
                 raise RuntimeError(f"the rig is busy: a {self._kind} is in progress")
@@ -160,12 +179,11 @@ class RunSession:
             self.state.notify(kind)
 
         def job():
+            report = None
             try:
                 report = body()
             finally:
-                self._finish()          # whatever happened, the rig is free
-            if report is not None:
-                report()
+                self._finish(report)    # whatever happened, the rig is free
             if on_finished is not None:
                 on_finished()
 
@@ -178,16 +196,27 @@ class RunSession:
             raise
         self._thread = thread       # only ever a started thread, for wait() to join
 
-    def _finish(self):
+    def _finish(self, report=None):
         """The job has ended. One transition, under the lock: the rig is
-        free, the signal is clean, the subscribers know, the waiters wake --
-        and nothing can start in between, or the ending job's tail would
-        land on the new one."""
+        free, the signal is clean, the job's own report lands, the
+        subscribers know, the waiters wake -- and nothing can start in
+        between, or the ending job's tail would land on the new one.
+
+        The report (a run's RunEnded, a manual move's held callback) runs
+        after kind and signal are cleared -- whoever hears it sees an idle
+        rig -- and *before* state.notify(None), so a state subscriber that
+        chains the next job cannot slide a new RunStarted in front of the
+        old run's ending. The price is a rule the channel already carries:
+        a report subscriber must not block on the session (the waiters are
+        woken only at the end of this transition).
+        """
         with self._lock:
             self._kind = None
             # The cancellation -- or pause -- belonged to the job that just
             # ended; the next one must not raise on a stale abort.
             self.control.reset()
+            if report is not None:
+                report()
             self.state.notify(None)
             # Done means no job is current. A subscriber may have started the
             # next one just now, in which case waiters keep waiting for it --
