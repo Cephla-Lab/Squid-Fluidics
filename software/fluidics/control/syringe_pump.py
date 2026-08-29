@@ -5,6 +5,7 @@ import time
 import fluidics.control.tecancavro as tecancavro
 
 from ..errors import Cancelled, RunControl, SafetyFault
+from ..subscribers import Subscribers
 from .discovery import find_serial_port
 
 _logger = logging.getLogger(__name__)
@@ -50,6 +51,18 @@ class Interruptible:
         self.moving = False
         self.run_control = run_control if run_control is not None else RunControl()
         self._chain = []
+        # What the pump tells whoever listens (fire-and-forget; no
+        # subscriber, no effect): draws carries (pump_port, volume_ul) for
+        # every dispatched extract -- the reagent ledger's feed; held_volume
+        # carries the held uL whenever the pump takes a reading, so a
+        # display never has to poll the serial line for it.
+        self.draws = Subscribers("syringe draws")
+        self.held_volume = Subscribers("syringe held volume")
+
+    def _publish_reading(self):
+        # One payload site for both pumps: every recorded reading reaches
+        # held_volume as the held uL.
+        self.held_volume.notify(self.get_current_volume())
 
     # --- queueing ---
 
@@ -138,8 +151,15 @@ class Interruptible:
 
     def _run_op(self, op):
         """Run one op to the end, however many pauses that takes."""
-        self.run_control.checkpoint()
+        self.run_control.checkpoint()   # a cancel here dispatched nothing
         estimate = self._start(op)
+        # A dispatched extract is charged in full, here, once: a failed
+        # dispatch (raised from _start) was never charged, and whatever
+        # happens after it -- pauses, a cancel mid-draw, a driver fault --
+        # keeps the charge. Generous on a cut-short draw by design: a total
+        # that reads slightly high beats one that silently undercounts.
+        if op[0] == "extract":
+            self.draws.notify(op[1], op[2])
         self.moving = True
         while self.wait_for_stop(estimate):
             self._halted(op)
@@ -300,16 +320,25 @@ class SyringePump(SpeedCodes, Interruptible):
         # deadlock loudly in testing, not silently interleave.
         self._serial_lock = threading.Lock()
 
+        self._init_run_control(run_control)     # channels exist before the first reading
         self.get_plunger_position()
-        self._init_run_control(run_control)
 
         _logger.info("Syringe pump initialized.")
 
     def get_plunger_position(self):
         with self._serial_lock:
             position = self.syringe.getPlungerPos()
-        self.plunger_pos = position / self.range
+        self._record_reading(position)
         return self.plunger_pos
+
+    def _record_reading(self, position):
+        """A raw plunger reading becomes the recorded truth, published --
+        every reading, the mid-chain ones from _start/_resume included, so
+        displays paint what the pump last recorded instead of polling the
+        serial line. Called after the serial lock is released: no
+        subscriber ever runs under it."""
+        self.plunger_pos = position / self.range
+        self._publish_reading()
 
     def get_current_volume(self):
         return self.volume * self.plunger_pos  # ul
@@ -362,7 +391,7 @@ class SyringePump(SpeedCodes, Interruptible):
             self._op_target = self.syringe.sim_state["plunger_pos"]
             self._op_port = self.syringe.sim_state["port"]
             t = self.syringe.executeChain(minimal_reset=True)
-        self.plunger_pos = start / self.range
+        self._record_reading(start)
         return t
 
     def _resume(self, op):
@@ -378,7 +407,7 @@ class SyringePump(SpeedCodes, Interruptible):
             self.syringe.changePort(self._op_port)
             self.syringe.movePlungerAbs(self._op_target)
             t = self.syringe.executeChain(minimal_reset=True)
-        self.plunger_pos = start / self.range
+        self._record_reading(start)
         return t
 
     def _halted(self, op):
@@ -488,6 +517,7 @@ class SyringePumpSimulation(SpeedCodes, Interruptible):
 
     def get_plunger_position(self):
         self.plunger_pos = self._held_ul / self.volume
+        self._publish_reading()
         return self.plunger_pos
 
     def get_current_volume(self):

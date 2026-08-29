@@ -10,6 +10,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QTabWidget, QWidget, QVB
                              QHBoxLayout, QPushButton, QTreeWidget, QTreeWidgetItem,
                              QHeaderView, QCheckBox, QFileDialog, QMessageBox, QComboBox,
                              QSpinBox, QLabel, QProgressBar, QLineEdit,
+                             QTableWidget, QTableWidgetItem,
                              QGroupBox, QGridLayout, QSizePolicy, QDialog, QFormLayout,
                              QDoubleSpinBox, QDialogButtonBox, QScrollArea)
 from PyQt5.QtCore import (Qt, QTimer, pyqtSignal, QEvent, QCoreApplication,
@@ -357,6 +358,17 @@ class SequencesWidget(PostsToQtThread, QWidget):
         progressSection.addLayout(progressLabelLayout)
         progressSection.addWidget(self.progressBar)
         progressSection.addWidget(self.warningLabel)
+
+        # Reagent drawn per port since the run began (manual draws show
+        # between runs). Hidden until something has been drawn.
+        self.usageTable = QTableWidget(0, 3)
+        self.usageTable.setHorizontalHeaderLabels(["Port", "Reagent", "Used (\u00b5L)"])
+        self.usageTable.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.usageTable.verticalHeader().setVisible(False)
+        self.usageTable.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.usageTable.setMaximumHeight(120)
+        self.usageTable.setVisible(False)
+        progressSection.addWidget(self.usageTable)
 
         layout.addLayout(progressSection)
 
@@ -721,6 +733,18 @@ class SequencesWidget(PostsToQtThread, QWidget):
         """
         self._showTimeRemaining()
         self._renderRunControls()
+        self._renderUsage()
+
+    def _renderUsage(self):
+        """The per-port totals as they stand; the ledger's rows carry the
+        names, read fresh per call, so a rename shows on the next tick."""
+        rows = self.system.usage.rows()
+        self.usageTable.setVisible(bool(rows))
+        self.usageTable.setRowCount(len(rows))
+        for index, (port, name, used) in enumerate(rows):
+            for column, text in enumerate((str(port), name or "",
+                                           f"{used:.0f}")):
+                self.usageTable.setItem(index, column, QTableWidgetItem(text))
 
     def _showTimeRemaining(self):
         """Draw the label and the bar from one session snapshot: the clock a
@@ -831,6 +855,7 @@ class SequencesWidget(PostsToQtThread, QWidget):
             self.sequenceLabel.setText("0/0 sequences")
             self.highlightRow(None)
         self._renderRunControls()
+        self._renderUsage()
 
     def _handle_finished(self):
         """The worker's last word; the display reset rode the session state
@@ -884,8 +909,9 @@ class ManualControlWidget(PostsToQtThread, QWidget):
 
         self.progress_timer = QTimer(self)
         self.progress_timer.timeout.connect(self.updateProgress)
-        self.plunger_timer = QTimer(self)
-        self.plunger_timer.timeout.connect(self.updatePlungerPosition)
+        # The plunger bar paints what the pump publishes after each of its
+        # own readings; the GUI thread never touches the serial line.
+        system.devices.syringe_pump.held_volume.subscribe(self._onHeldVolume)
 
         self.initUI()
 
@@ -985,6 +1011,8 @@ class ManualControlWidget(PostsToQtThread, QWidget):
         self.plungerPositionBar.setRange(0, self.config.syringe_pump.volume_ul)
         self.plungerPositionBar.setOrientation(Qt.Vertical)
         self.plungerPositionBar.setTextVisible(False)
+        # The pump's last reading, no serial traffic (refresh=False).
+        self.plungerPositionBar.setValue(int(self.manual.held_volume_ul(refresh=False)))
         rightLayout.addWidget(self.plungerPositionBar, alignment=Qt.AlignHCenter)
 
         topLayout.addWidget(rightWidget, 1)
@@ -1007,8 +1035,6 @@ class ManualControlWidget(PostsToQtThread, QWidget):
         mainLayout.addWidget(syringeGroupBox)
 
         self.setLayout(mainLayout)
-
-        self.updatePlungerPosition()
 
     # --- the controls: each picks a verb and hands it to _run ---
 
@@ -1135,32 +1161,22 @@ class ManualControlWidget(PostsToQtThread, QWidget):
         progress = min(100, int((elapsed / max(self.operation_duration, 1e-9)) * 100))
         self.syringeProgressBar.setValue(progress)
 
-    def updatePlungerPosition(self):
-        # The wire is read only while a manual move is running -- that is
-        # when the plunger is going somewhere the pump has not yet recorded.
-        # Idle, the pump's own reading from the end of its last move is the
-        # truth, and costs the GUI thread nothing.
-        try:
-            volume = self.manual.held_volume_ul(refresh=self.session.kind == "manual")
-            self.plungerPositionBar.setValue(int(volume))
-        except Exception as e:
-            _logger.debug("Plunger position poll failed: %s", e)
+    def _onHeldVolume(self, volume_ul):
+        # On the pump's thread; the paint crosses to Qt.
+        self._post_event('_handle_held_volume', volume_ul)
+
+    def _handle_held_volume(self, volume_ul):
+        self.plungerPositionBar.setValue(int(volume_ul))
 
     def showEvent(self, event):
         super().showEvent(event)
-        self.plunger_timer.start(500)
         # Show where the valves are; do not move them there.
         self.valveCombo.blockSignals(True)
         self.valveCombo.setCurrentIndex(self.manual.current_port() - 1)
         self.valveCombo.blockSignals(False)
 
-    def hideEvent(self, event):
-        super().hideEvent(event)
-        self.plunger_timer.stop()
-
     def closeEvent(self, event):
         self.progress_timer.stop()
-        self.plunger_timer.stop()
         super().closeEvent(event)
 
 

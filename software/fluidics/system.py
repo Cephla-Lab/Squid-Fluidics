@@ -15,6 +15,7 @@ from .manual_operations import ManualOperations
 from .run_session import RunSession
 from .subscribers import Subscribers
 from .time_estimate import estimate_run_time
+from .usage import ReagentUsage
 
 _logger = logging.getLogger(__name__)
 
@@ -32,6 +33,10 @@ class FluidicsSystem:
                                            on_warning=self.warnings.notify)
         self.manual = ManualOperations(devices)
         self.session = RunSession(devices)
+        # Per-port reagent totals, reset at each run's start and logged at
+        # its end; the GUI's table and any future API read this one object.
+        self.usage = ReagentUsage(config, devices.syringe_pump,
+                                  devices.selector_valves, self.session.state)
 
     @classmethod
     def build(cls, config, simulation=False, on_issue=None):

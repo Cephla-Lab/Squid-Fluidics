@@ -36,6 +36,16 @@ def instant_devices(built):
 
 
 @pytest.fixture
+def system(flow_cell_config, instant_devices):
+    """A FluidicsSystem on the instant simulated DeviceSet, torn down clean
+    -- the shape test_system and test_usage share."""
+    from fluidics.system import FluidicsSystem
+    built = FluidicsSystem(flow_cell_config, instant_devices(flow_cell_config))
+    yield built
+    assert built.close() == []
+
+
+@pytest.fixture
 def thread_cannot_start(monkeypatch):
     """The session's Thread whose start() raises -- what a host out of
     threads looks like. Patched after the simulated drivers have started
