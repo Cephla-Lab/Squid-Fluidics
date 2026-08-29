@@ -4,7 +4,7 @@ once.
 
     with FluidicsSystem.build(config, simulation=True) as system:
         system.manual.open_port(3)
-        system.run(sequences, callbacks={"on_error": print})
+        system.run(sequences)      # reports on system.session.events
         system.wait()
 """
 
@@ -14,7 +14,7 @@ from .devices import build_devices, build_operations
 from .manual_operations import ManualOperations
 from .run_session import RunSession
 from .subscribers import Subscribers
-from .time_estimate import estimate_run_time, plan_run
+from .time_estimate import plan_run
 from .usage import ReagentUsage
 
 _logger = logging.getLogger(__name__)
@@ -46,12 +46,6 @@ class FluidicsSystem:
         return cls(config, build_devices(config, simulation, on_issue=on_issue))
 
     # --- the one job ---
-
-    def estimate(self, sequences):
-        """(total_seconds, durations) for a run of `sequences` on this rig;
-        see time_estimate.estimate_run_time. For pricing alone -- a caller
-        about to run should take plan() and hand it to run()."""
-        return estimate_run_time(self.devices.config, sequences)
 
     def plan(self, sequences):
         """The run plan for `sequences` on this rig (one PlanEntry per

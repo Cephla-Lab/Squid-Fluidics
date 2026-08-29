@@ -29,8 +29,8 @@ from fluidics.devices import (
     ISSUE_TEMPERATURE_CONTROLLER,
 )
 from fluidics.system import FluidicsSystem
-from fluidics.events import (Incubating, RunEnded, RunStarted,
-                             SequenceCompleted, SequenceStarted)
+from fluidics.events import (RunEnded, RunStarted, SequenceCompleted,
+                             SequenceStarted, plan_seconds)
 from fluidics.run_log import setup_uncaught_exception_logging, start_log_file
 from fluidics.sequences import (
     load_sequences, save_sequences_yaml,
@@ -281,9 +281,7 @@ class SequencesWidget(PostsToQtThread, QWidget):
         self._sequences = []     # THE sequence list; the tree renders it
         self._invalid = {}       # model row -> live-validation message
         self._port_limit = available_port_count(config)   # config-fixed
-        self._plan = ()          # the running run's plan (fluidics.events)
-        self._model_rows = []    # plan entry row -> model row (the run runs
-                                 # the *included* rows; the tree shows all)
+        self._plan = ()          # the running run's plan, rows = model rows
         system.warnings.subscribe(self.reportWarning)
         # The run display ends when the session's job does -- whichever way
         # it ends -- rather than riding any one worker callback; the run's
@@ -689,14 +687,13 @@ class SequencesWidget(PostsToQtThread, QWidget):
         # so the dialog and the run cannot disagree. RunStarted brings it
         # back with the run's id, and the display paints from that.
         plan = self.system.plan(selected)
-        seconds = sum(entry.duration_seconds for entry in plan)
-        if not self._confirmStart(seconds, len(plan)):
+        if not self._confirmStart(plan_seconds(plan), len(plan)):
             return
-        self.total_sequences = len(plan)
-        # The plan's rows index `selected`; the tree's rows include the
-        # unchecked ones. Snapshot the mapping the highlight and the resume
-        # offer translate through.
-        self._model_rows = self._includedRows()
+        # The plan's rows index `selected`; this widget's rows include the
+        # unchecked ones. Relabel once, so highlight and resume land on
+        # tree rows without a translation table riding alongside.
+        rows = self._includedRows()
+        plan = tuple(entry._replace(row=rows[entry.row]) for entry in plan)
 
         self._warnings.clear()
         self.warningLabel.setVisible(False)
@@ -707,7 +704,7 @@ class SequencesWidget(PostsToQtThread, QWidget):
             # A manual move got in first; the tabs normally prevent this.
             QMessageBox.warning(self, "Rig busy", str(e))
             return
-        self._beginRunDisplay()
+        self._beginRunDisplay(len(plan))
 
     def _confirmStart(self, seconds, n_sequences):
         """The operator sees the bill before the run starts: how many
@@ -717,12 +714,12 @@ class SequencesWidget(PostsToQtThread, QWidget):
             f"{n_sequences} sequence(s), estimated {_hms(seconds)}.\n\nStart the run?",
             default=QMessageBox.Yes)
 
-    def _beginRunDisplay(self):
+    def _beginRunDisplay(self, count):
         """A fresh run's display. The previous run's estimate must not price
         this one while RunStarted is still in the post."""
         self.total_time = None
         self._renderRunControls()
-        self.sequenceLabel.setText(f"0/{self.total_sequences} sequences")
+        self.sequenceLabel.setText(f"0/{count} sequences")
         self.timer.start(1000)
 
     def updateTimeRemaining(self):
@@ -815,20 +812,18 @@ class SequencesWidget(PostsToQtThread, QWidget):
         with the tick's snapshot reads."""
         if isinstance(event, RunStarted):
             self._plan = event.plan
-            self.total_sequences = len(event.plan)
-            self.total_time = sum(e.duration_seconds for e in event.plan)
+            self.total_time = plan_seconds(event.plan)
             self.progressBar.setMaximum(100)  # For percentage
             self.progressBar.setValue(0)
         elif isinstance(event, SequenceStarted):
             self.sequenceLabel.setText(
                 f"{event.position + 1}/{len(self._plan)} sequences")
-            self.highlightRow(self._model_rows[self._plan[event.position].row])
+            self.highlightRow(self._plan[event.position].row)
         elif isinstance(event, SequenceCompleted):
             # Re-anchor: whatever the finished sequences actually took, what
             # remains is the estimate of the ones not yet run, from now.
-            remaining = self._plan[event.position + 1:]
             self.total_time = (self.session.elapsed_seconds
-                               + sum(e.duration_seconds for e in remaining))
+                               + plan_seconds(self._plan[event.position + 1:]))
         elif isinstance(event, RunEnded):
             self._reportRunEnded(event)
 
@@ -846,7 +841,7 @@ class SequencesWidget(PostsToQtThread, QWidget):
             QMessageBox.information(self, "Finished",
                                     "Sequence execution finished.")
         if event.position is not None:
-            self._offerResume(self._model_rows[self._plan[event.position].row])
+            self._offerResume(self._plan[event.position].row)
 
     def _handle_warning(self, message):
         self._warnings.append(message)
@@ -871,10 +866,10 @@ class SequencesWidget(PostsToQtThread, QWidget):
         row that just finished; the operator sees the checkboxes (and the
         fresh estimate behind the Run button) before anything moves.
 
-        The model still matches the plan's rows here: edits are frozen
-        during the run, and from the RunEnded dialog through this question
-        the Qt thread never leaves the modal chain, so nothing can edit
-        between.
+        The model still matches the plan's rows (relabeled to tree rows at
+        run start): edits are frozen during the run, and from the RunEnded
+        dialog through this question the Qt thread never leaves the modal
+        chain, so nothing can edit between.
         """
         seq = self._sequences[cutoff]
         label = seq.get('name') or SEQUENCE_TYPE_LABELS.get(seq['type'], seq['type'])
@@ -891,7 +886,7 @@ class SequencesWidget(PostsToQtThread, QWidget):
         # and a row unchecked mid-run must still come back checked, or the
         # offer's promise ("that row and the ones after it") reads false.
         # Rows that were never part of the run keep their own state.
-        for row in self._model_rows:
+        for row in {entry.row for entry in self._plan}:
             self._sequences[row]['include'] = row >= cutoff
         self._refresh()
 
@@ -916,8 +911,6 @@ class SequencesWidget(PostsToQtThread, QWidget):
         self._renderRunControls()
         self._renderUsage()
 
-    # The worker's callbacks arrive on its thread; each crosses to the Qt
-    # thread as a call to its _handle_ method.
     def _onRunEvent(self, event):
         # On the worker's or session's thread; the paint crosses to Qt.
         self._post_event('_handle_run_event', event)

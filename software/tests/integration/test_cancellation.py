@@ -99,7 +99,7 @@ def test_the_worker_learns_of_the_abort_from_the_operation(stack):
     sequence as completed nor starts the next one."""
     ops, sp, seq, config = stack
     sp.run_control.cancel()
-    worker, events = record_run(ops, [seq, seq], config)
+    worker, events = record_run(ops, [seq, seq])
     assert ("sequence", 1, "completed") not in events
     assert ("sequence", 2, "started") not in events
     assert worker.outcome == "stopped" and worker.message is None
@@ -114,8 +114,7 @@ def test_a_flow_fault_reaches_the_operator_as_a_fault_not_an_abort(flow_cell_con
                             tolerance_fraction=0.2, measured_ul_min=12.0,
                             out_of_band_seconds=3.0, consecutive_samples=6)
 
-    worker, _ = record_run(FaultingOps(), [SEQS["flow_cell"]],
-                           flow_cell_config)
+    worker, _ = record_run(FaultingOps(), [SEQS["flow_cell"]])
     assert worker.outcome == "failed"
     assert "inlet" in worker.message and "12 µL/min" in worker.message
     assert "abort" not in worker.message.lower()

@@ -22,8 +22,7 @@ def _bind(name, stub, cls=None):
     cls = cls or gui.SequencesWidget
     return lambda *args: getattr(cls, name)(stub, *args)
 from fluidics.flow_monitor import FlowFault
-from fluidics.events import (PlanEntry, RunEnded, RunStarted,
-                             SequenceCompleted, SequenceStarted)
+from fluidics.events import RunEnded, SequenceCompleted, SequenceStarted
 from fluidics.run_session import SessionSnapshot
 from fluidics.subscribers import Subscribers
 
@@ -141,25 +140,24 @@ class TestSafeFilenamePart:
         assert gui._safe_filename_part("waste line") == "waste_line"
 
 
+from ..worker_helpers import plan_for
+
+
 def plan_of(durations, rows=None):
-    """A plan stub: one entry per duration; rows default 0..n-1 (a run over
-    every model row)."""
-    rows = rows if rows is not None else range(len(durations))
-    return tuple(PlanEntry(row, {}, 1, 1, f"step {row}", seconds)
-                 for row, seconds in zip(rows, durations))
+    """A plan stub for display tests: one empty-sequence entry per figure;
+    rows are tree rows (the widget relabels plans at run start)."""
+    return plan_for([{"type": "flow_reagent"}] * len(durations),
+                    seconds=list(durations), rows=rows)
 
 
 class TestHighlightFollowsThePlan:
-    """The run covers only the checked sequences, so a plan entry's row is a
-    position in that filtered list -- not a tree row. With a non-contiguous
-    selection, highlighting it raw lights up the wrong sequence:
-    SequenceStarted must translate through the model rows snapshotted at run
-    start. Called unbound against a stub."""
+    """The plan's rows are relabeled to tree rows at run start, so a sparse
+    selection highlights the row the operator sees -- not the position in
+    the filtered list. Called unbound against a stub."""
 
     def test_a_sparse_selection_lights_each_checked_row_in_turn(self):
         stub = SimpleNamespace(
-            _plan=plan_of([1.0, 1.0, 1.0]),
-            _model_rows=[0, 2, 4],
+            _plan=plan_of([1.0, 1.0, 1.0], rows=[0, 2, 4]),
             sequenceLabel=SimpleNamespace(setText=lambda t: None),
             highlighted=[],
         )
@@ -456,7 +454,6 @@ class TestRunEnded:
         offered = []
         stub._offerResume = offered.append
         stub._plan = plan_of([1.0])
-        stub._model_rows = [0]
         gui.SequencesWidget._reportRunEnded(
             stub, RunEnded("run-1", "stopped", None, 5.0, position=0))
         gui.SequencesWidget._handle_state(stub, None)
@@ -467,7 +464,6 @@ class TestRunEnded:
         stub, order = self._ending(monkeypatch)
         stub._offerResume = lambda cutoff: None
         stub._plan = plan_of([1.0])
-        stub._model_rows = [0]
         gui.SequencesWidget._reportRunEnded(
             stub, RunEnded("run-1", "failed", "pump fault", 5.0, position=0))
         gui.SequencesWidget._handle_state(stub, None)
@@ -826,14 +822,16 @@ class TestRunDisplayClocks:
 
     def test_a_new_run_starts_its_clocks_fresh(self):
         started = []
+        labeled = []
         stub = SimpleNamespace(
-            total_time=300, total_sequences=7,
-            sequenceLabel=SimpleNamespace(setText=lambda t: None),
+            total_time=300,
+            sequenceLabel=SimpleNamespace(setText=labeled.append),
             timer=SimpleNamespace(start=started.append),
             _renderRunControls=lambda: None,
         )
-        gui.SequencesWidget._beginRunDisplay(stub)
+        gui.SequencesWidget._beginRunDisplay(stub, 7)
         assert stub.total_time is None, "the old estimate would price the new run"
+        assert labeled == ["0/7 sequences"]
         assert started == [1000]
 
     def test_the_tick_outlives_the_estimate(self):
@@ -1082,7 +1080,7 @@ class TestResumeOffer:
     unbound against stubs."""
 
     def _stub(self, monkeypatch, answer=gui.QMessageBox.No, sequences=None,
-              model_rows=None):
+              plan=()):
         asked = []
 
         def question(*args):
@@ -1093,7 +1091,7 @@ class TestResumeOffer:
         refreshed = []
         stub = SimpleNamespace(
             _sequences=sequences if sequences is not None else [],
-            _model_rows=model_rows or [],
+            _plan=plan,
             _refresh=lambda: refreshed.append(True),
             asked=asked, refreshed=refreshed,
         )
@@ -1102,7 +1100,8 @@ class TestResumeOffer:
     def test_no_leaves_the_checkboxes_alone(self, monkeypatch):
         sequences = [{"include": True, "type": "flow_reagent"},
                      {"include": True, "type": "priming"}]
-        stub = self._stub(monkeypatch, sequences=sequences, model_rows=[0, 1])
+        stub = self._stub(monkeypatch, sequences=sequences,
+                          plan=plan_of([1.0, 1.0], rows=[0, 1]))
         gui.SequencesWidget._offerResume(stub, 1)
         assert [s["include"] for s in sequences] == [True, True]
         assert stub.refreshed == []
@@ -1125,7 +1124,8 @@ class TestResumeOffer:
                      {"include": True, "type": "priming", "name": "wash A"},
                      {"include": False, "type": "clean_up"}]
         stub = self._stub(monkeypatch, answer=gui.QMessageBox.Yes,
-                          sequences=sequences, model_rows=[0, 1, 2])
+                          sequences=sequences,
+                          plan=plan_of([1.0, 1.0, 1.0], rows=[0, 1, 2]))
         gui.SequencesWidget._offerResume(stub, 1)
         assert "wash A" in stub.asked[0]
         assert [s["include"] for s in sequences] == [False, True, True]

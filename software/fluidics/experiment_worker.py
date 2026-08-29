@@ -1,7 +1,8 @@
 import logging
 
 from .errors import AbortRequested, Cancelled, RunControl
-from .events import Incubating, RunStarted, SequenceCompleted, SequenceStarted
+from .events import (Incubating, RunStarted, SequenceCompleted,
+                     SequenceStarted, plan_seconds)
 from .subscribers import Subscribers
 # Re-exported: defined here before fluidics.errors existed, and scripts
 # outside this package may still import it from here.
@@ -11,7 +12,7 @@ _logger = logging.getLogger(__name__)
 
 
 class ExperimentWorker:
-    def __init__(self, experiment_ops, plan, config, run_id="run",
+    def __init__(self, experiment_ops, plan, run_id="run",
                  events=None, make_safe=None, run_control=None):
         """One run of `plan` (fluidics.events.PlanEntry per sequence repeat,
         in run order -- RunSession.start builds it via time_estimate).
@@ -32,7 +33,6 @@ class ExperimentWorker:
         """
         self.experiment_ops = experiment_ops
         self.plan = tuple(plan)
-        self.config = config
         self.run_id = run_id
         self.events = events if events is not None else Subscribers("run events")
         self.make_safe = make_safe
@@ -46,8 +46,7 @@ class ExperimentWorker:
         # The worker narrates its own run: one source feeds the console and
         # the run log, so the record exists even when nothing is watching.
         _logger.info("Run %s: %d sequence(s), estimated %.0f s.",
-                     self.run_id, len(self.plan),
-                     sum(entry.duration_seconds for entry in self.plan))
+                     self.run_id, len(self.plan), plan_seconds(self.plan))
         self.events.notify(RunStarted(self.run_id, self.plan))
 
     def wait_for_incubation(self, time_minutes):
@@ -91,8 +90,10 @@ class ExperimentWorker:
         tag = None                       # names the entry in hand for the log
         try:
             for position, entry in enumerate(self.plan):
+                which = (f", repeat {entry.repeat}/{entry.repeats}"
+                         if entry.repeats > 1 else "")
                 tag = (f"Sequence {position + 1}/{len(self.plan)} "
-                       f"({entry.label})")
+                       f"({entry.label}{which})")
                 # A cancel that landed between sequences must not start the
                 # next one, and a pause holds here -- the sequence before it
                 # finished, this one has not begun. Inside a sequence, the

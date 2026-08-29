@@ -6,8 +6,6 @@ in what order, and how the worker records its ending -- rather than the
 abort mechanics, so internals can be rewritten against these tests.
 """
 
-from types import SimpleNamespace
-
 from fluidics.errors import AbortRequested, RunControl, SafetyFault
 from fluidics.events import RunStarted, SequenceCompleted, SequenceStarted
 from fluidics.experiment_worker import ExperimentWorker
@@ -29,15 +27,11 @@ class RecordingOps:
             raise exc
 
 
-CONFIG = SimpleNamespace(
-    reagent_selection=SimpleNamespace(common_tubing_fluid_amount_ul=800))
-
-
 def run_worker(sequences, ops=None, run_control=None):
-    """RecordingOps over the stub config; returns (ops, worker, events) --
-    the event shapes are record_run's."""
+    """RecordingOps; returns (ops, worker, events) -- the event shapes are
+    record_run's."""
     ops = ops or RecordingOps()
-    worker, events = record_run(ops, sequences, CONFIG, run_control=run_control)
+    worker, events = record_run(ops, sequences, run_control=run_control)
     return ops, worker, events
 
 
@@ -102,7 +96,7 @@ class TestRunStarted:
         channel = Subscribers("events")
         channel.subscribe(heard.append)
         plan = plan_for([dict(FLOW, repeat=2), dict(FLOW)])
-        ExperimentWorker(RecordingOps(), plan, CONFIG, run_id="run-x",
+        ExperimentWorker(RecordingOps(), plan, run_id="run-x",
                          events=channel)
         assert heard == [RunStarted("run-x", plan)]
 
@@ -162,7 +156,7 @@ class TestTheSharedSignal:
 
         channel.subscribe(cancel_after_first)
         worker = ExperimentWorker(RecordingOps(), plan_for([dict(FLOW), dict(FLOW)]),
-                                  CONFIG, events=channel, run_control=control)
+                                  events=channel, run_control=control)
         worker.run()
         assert not any(isinstance(e, SequenceStarted) and e.position == 1
                        for e in heard), "the next sequence started after the cancel"
@@ -208,7 +202,7 @@ class TestTheSharedSignal:
         exists yet -- before any operation, so nothing has moved. The run
         has still ended, so the rig is still quieted."""
         made_safe = []
-        worker = ExperimentWorker(RecordingOps(), plan_for([FLOW]), CONFIG,
+        worker = ExperimentWorker(RecordingOps(), plan_for([FLOW]),
                                   make_safe=lambda: made_safe.append(True) or [])
         # Past RunStarted in __init__; fails on the run's own pass.
         worker.plan = (None,)
@@ -221,7 +215,7 @@ class TestTheSharedSignal:
         that matters; the ERROR in the log alone does not reach the dialog."""
         worker = ExperimentWorker(
             RecordingOps(raise_on={0: ValueError("bad step")}), plan_for([FLOW]),
-            CONFIG, make_safe=lambda: [IOError("TEC channel 1 not answering")])
+            make_safe=lambda: [IOError("TEC channel 1 not answering")])
         worker.run()
         assert "bad step" in worker.message
         assert "TEC channel 1 not answering" in worker.message
@@ -236,7 +230,7 @@ class TestPause:
         control = RunControl()
         asked = []
         control.delay = lambda seconds: asked.append(seconds)
-        ExperimentWorker(RecordingOps(), plan_for([FLOW]), CONFIG,
+        ExperimentWorker(RecordingOps(), plan_for([FLOW]),
                          run_control=control).wait_for_incubation(30)
         assert asked == [1800]
 
@@ -251,7 +245,7 @@ class TestPause:
 
         ops = PauseAfterFirst()
         worker = ExperimentWorker(ops, plan_for([dict(FLOW), dict(FLOW)]),
-                                  CONFIG, run_control=control)
+                                  run_control=control)
         finished, error = run_in_background(worker.run)
         assert wait_until(lambda: control.at_rest), "the run never parked"
         assert len(ops.processed) == 1, "the second sequence ran through the hold"
@@ -269,7 +263,7 @@ class TestPause:
                 control.pause()                      # the operator, mid-sequence
                 raise RuntimeError("pump fault")     # the rig, a moment later
 
-        record_run(PausedThenFailing(), [FLOW], CONFIG, run_control=control)
+        record_run(PausedThenFailing(), [FLOW], run_control=control)
         assert not control.paused
 
     def test_a_cancel_beats_a_pending_pause(self):

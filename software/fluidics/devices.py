@@ -278,7 +278,7 @@ def build_worker(devices, operations, plan, run_id, events):
     make_safe hook (which this function owns). The plan, the run's id and
     the events channel come from whoever starts the run
     (RunSession.start)."""
-    return ExperimentWorker(operations, plan, devices.config,
+    return ExperimentWorker(operations, plan,
                             run_id=run_id, events=events,
                             make_safe=devices.make_safe,
                             run_control=devices.run_control)

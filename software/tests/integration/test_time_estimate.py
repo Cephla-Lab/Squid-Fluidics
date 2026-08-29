@@ -16,6 +16,7 @@ from fluidics.control.controller import FluidControllerSimulation
 from fluidics.time_estimate import (SET_TEMPERATURE_SECONDS, VALVE_MOVE_SECONDS,
                                     _op_seconds, estimate_run_time, plan_run)
 
+from ..conftest import hears
 from ..unit.control.pump_helpers import sim_pump
 from .conftest import FLOW_CELL_STEP
 
@@ -139,10 +140,7 @@ class TestTheRunCarriesThePlan:
         devices = instant_devices(flow_cell_config)
         session = RunSession(devices)
         plan = plan_run(flow_cell_config, [FLOW_CELL_STEP])
-        heard = []
-        session.events.subscribe(
-            lambda event: heard.append(event.plan)
-            if isinstance(event, RunStarted) else None)
+        heard = hears(session.events, RunStarted, key=lambda event: event.plan)
         session.start([FLOW_CELL_STEP],
                       build_operations(flow_cell_config, devices), plan=plan)
         assert session.wait()
@@ -159,10 +157,7 @@ class TestTheRunCarriesThePlan:
         devices = instant_devices(flow_cell_config)
         session = RunSession(devices)
         expected = plan_run(flow_cell_config, [FLOW_CELL_STEP])
-        heard = []
-        session.events.subscribe(
-            lambda event: heard.append(event.plan)
-            if isinstance(event, RunStarted) else None)
+        heard = hears(session.events, RunStarted, key=lambda event: event.plan)
         session.start([FLOW_CELL_STEP],
                       build_operations(flow_cell_config, devices))
         assert session.wait()

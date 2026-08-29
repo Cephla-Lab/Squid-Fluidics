@@ -10,11 +10,11 @@ import threading
 import pytest
 
 from fluidics.devices import build_operations
-from fluidics.events import RunEnded, SequenceStarted
+from fluidics.events import RunEnded, RunStarted, SequenceStarted
 from fluidics.manual_operations import ManualOperations
 from fluidics.run_session import RunSession
 
-from ..conftest import wait_until
+from ..conftest import hears, wait_until
 from .conftest import FLOW_CELL_STEP
 
 INCUBATING = {**FLOW_CELL_STEP, "incubation_time": 60}     # minutes: a run to catch mid-way
@@ -51,11 +51,9 @@ def manual(devices):
 class TestARun:
     def test_it_runs_on_another_thread_and_the_rig_is_free_after(
             self, devices, session, ops, seen, real_clock):
-        during = []
-        session.events.subscribe(
-            lambda event: during.append(
-                (threading.current_thread(), session.busy, session.kind))
-            if isinstance(event, SequenceStarted) else None)
+        during = hears(session.events, SequenceStarted,
+                       key=lambda event: (threading.current_thread(),
+                                          session.busy, session.kind))
         session.start([FLOW_CELL_STEP], ops)
         assert session.wait(5)
         assert during, "the run never reported"
@@ -71,11 +69,9 @@ class TestARun:
         and a signal the next job can use. The state(None) notification
         follows the terminal event -- that ordering is what stops a chained
         start from sliding in front of it."""
-        at_end = []
-        session.events.subscribe(
-            lambda event: at_end.append(
-                (event.outcome, session.busy, session.cancelled, list(seen)))
-            if isinstance(event, RunEnded) else None)
+        at_end = hears(session.events, RunEnded,
+                       key=lambda event: (event.outcome, session.busy,
+                                          session.cancelled, list(seen)))
         session.start([FLOW_CELL_STEP], ops)
         session.abort()
         assert session.wait(5)
@@ -122,11 +118,9 @@ class TestARun:
     def test_a_runs_early_end_is_reported_after_the_rig_is_free(self, session, ops, real_clock):
         """As a manual move's report is: the worker records stop or error
         from inside run(), but RunEnded lands with the rig already idle."""
-        ended = []
-        session.events.subscribe(
-            lambda event: ended.append(
-                (event.outcome, event.message, session.busy, session.cancelled))
-            if isinstance(event, RunEnded) else None)
+        ended = hears(session.events, RunEnded,
+                      key=lambda event: (event.outcome, event.message,
+                                         session.busy, session.cancelled))
         session.start([INCUBATING], ops)
         assert not session.wait(0.02)
         session.abort()
@@ -142,10 +136,7 @@ class TestARun:
         assert (outcome, busy) == ("failed", False) and "99" in message
 
     def test_abort_stops_a_run_mid_incubation_and_wait_returns(self, session, ops, real_clock):
-        ended = []
-        session.events.subscribe(
-            lambda event: ended.append(event.outcome)
-            if isinstance(event, RunEnded) else None)
+        ended = hears(session.events, RunEnded, key=lambda event: event.outcome)
         session.start([INCUBATING], ops)
         assert not session.wait(0.02), "an hour's incubation ended in 20 ms"
         assert session.abort() is True
@@ -382,6 +373,18 @@ class TestWait:
                            callbacks={"on_finished": lambda: waited.append(session.wait(1))})
         assert session.wait(5)
         assert wait_until(lambda: waited == [True])
+
+
+class TestRunIds:
+    def test_two_runs_in_one_second_get_distinct_ids(self, session, ops):
+        """The counter, not the clock, is what keeps back-to-back ids
+        apart -- under the suite's fake clock both stamps share a second."""
+        ids = hears(session.events, RunStarted, key=lambda event: event.run_id)
+        session.start([FLOW_CELL_STEP], ops)
+        assert session.wait()
+        session.start([FLOW_CELL_STEP], ops)
+        assert session.wait()
+        assert len(ids) == 2 and len(set(ids)) == 2, ids
 
 
 class TestSnapshot:

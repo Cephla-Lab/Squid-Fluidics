@@ -11,6 +11,7 @@ Qt-free. Callbacks run on the job's thread; a GUI posts them across.
 """
 
 import collections
+import itertools
 import logging
 import threading
 import time
@@ -47,7 +48,7 @@ class RunSession:
         # free, so a dialog painted on it sees an idle rig -- the same
         # deferral the early-end report has always had.
         self.events = Subscribers("run events")
-        self._runs = 0
+        self._run_ids = itertools.count(1)     # atomic under the GIL
         self._lock = threading.RLock()
         self._kind = None
         self._thread = None
@@ -110,7 +111,8 @@ class RunSession:
         caller already has one in hand (the GUI prices its confirm dialog
         with it, so the dialog and the run cannot disagree). Built here
         otherwise -- the one place every run passes through, so every run
-        carries one. The run reports through `self.events`: the worker
+        carries one. `sequences` is read only to build a missing plan: a
+        caller holding a plan (a resume tail, say) may pass sequences=None. The run reports through `self.events`: the worker
         publishes RunStarted and the per-sequence facts; RunEnded is
         published once the rig is free, the same deferral the early-end
         report has always had.
@@ -119,8 +121,8 @@ class RunSession:
             raise RuntimeError(f"the rig is busy: a {self._kind} is in progress")
         if plan is None:
             plan = plan_run(self.devices.config, sequences)
-        self._runs += 1
-        run_id = time.strftime(f"run-%Y%m%d-%H%M%S-{self._runs}")
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())   # UTC: sortable across DST
+        run_id = f"run-{stamp}-{next(self._run_ids)}"
         worker = build_worker(self.devices, operations, plan, run_id,
                               self.events)
 
@@ -138,6 +140,9 @@ class RunSession:
             # constructor); a launch that failed must not leave it
             # unpaired -- consumers pairing starts with endings (the usage
             # ledger's totals, a display's lifecycle) would wait forever.
+            # This one RunEnded lands after _finish's state(None), outside
+            # the serialized ordering -- acceptable for a thread that would
+            # not start, revisit if a chaining subscriber ever exists.
             self.events.notify(RunEnded(run_id, "failed", str(e), 0.0, None))
             raise
 

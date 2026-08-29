@@ -10,7 +10,7 @@ from fluidics.merfish_operations import MERFISHOperations
 from fluidics.open_chamber_operations import OpenChamberOperations
 from fluidics.system import FluidicsSystem
 
-from ..conftest import wait_until
+from ..conftest import hears, wait_until
 from .conftest import FLOW_CELL_STEP
 
 
@@ -38,10 +38,8 @@ class TestBuild:
 class TestTheJob:
     def test_run_goes_through_the_session_with_the_systems_operations(self, system, real_clock):
         from fluidics.events import RunEnded
-        reports = []
-        system.session.events.subscribe(
-            lambda event: reports.append(event.outcome)
-            if isinstance(event, RunEnded) else None)
+        reports = hears(system.session.events, RunEnded,
+                        key=lambda event: event.outcome)
         system.run([FLOW_CELL_STEP])
         assert system.wait(5)
         assert wait_until(lambda: reports == ["finished"]), reports

@@ -1,15 +1,16 @@
-"""Estimate a run's time before it starts, by running it.
+"""The run plan, priced by running the run before it starts.
 
-estimate_run_time keeps no hand-maintained copy of the timing knowledge:
-it replays the sequences against a simulated rig built from the same
-config -- the same operations code queues the same chains, overflow dumps
-and all -- and totals what actually got queued. Hardware is never touched;
-a real run is estimated on its simulated twin, in milliseconds.
+plan_run keeps no hand-maintained copy of the timing knowledge: it
+replays the sequences against a simulated rig built from the same config
+-- the same operations code queues the same chains, overflow dumps and
+all -- and prices each plan entry from what actually got queued.
+Hardware is never touched; a real run is priced on its simulated twin,
+in milliseconds.
 
-The estimate is per sequence (one figure per repeat, in run order), so a
-display can re-anchor at every boundary: when a sequence completes, what
-remains is the sum of the not-yet-run figures, whatever the finished
-ones actually took.
+The plan is per repeat, in run order, so a display can re-anchor at
+every boundary: when a sequence completes, what remains is the sum of
+the not-yet-run entries, whatever the finished ones actually took.
+estimate_run_time wraps the plan for callers that only price.
 """
 
 import logging
@@ -66,19 +67,16 @@ def plan_run(config, sequences):
         _logger.warning("Could not price the run by replay (%s); using a "
                         "flat fallback of %.0f s per sequence.",
                         e, FALLBACK_SEQUENCE_SECONDS)
-        durations = []
-        for seq in sequences:
-            per_repeat = (seq.get("incubation_time", 0) * 60
-                          + FALLBACK_SEQUENCE_SECONDS)
-            durations += [per_repeat] * seq.get("repeat", 1)
+        durations = None
     plan = []
-    position = 0
     for row, seq in enumerate(sequences):
+        label = sequence_label(seq)
         repeats = seq.get("repeat", 1)
         for repeat in range(1, repeats + 1):
-            plan.append(PlanEntry(row, seq, repeat, repeats,
-                                  sequence_label(seq), durations[position]))
-            position += 1
+            seconds = (durations[len(plan)] if durations is not None
+                       else seq.get("incubation_time", 0) * 60
+                       + FALLBACK_SEQUENCE_SECONDS)
+            plan.append(PlanEntry(row, seq, repeat, repeats, label, seconds))
     return tuple(plan)
 
 

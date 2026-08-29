@@ -88,10 +88,9 @@ class TestQuickstartRunsEndToEnd:
         from fluidics.subscribers import Subscribers
         from fluidics.time_estimate import plan_run
 
-        completed = []
+        from ..conftest import hears
         events = Subscribers("test events")
-        events.subscribe(lambda event: completed.append(event)
-                         if isinstance(event, SequenceCompleted) else None)
+        completed = hears(events, SequenceCompleted)
         ops = build_operations(config, devices)
         plan = plan_run(config, included)
         worker = build_worker(devices, ops, plan, "run-1", events)

@@ -10,11 +10,12 @@ The plan is the one expansion of "each sequence × its repeats": the
 estimate produces it, the worker iterates it, and events refer to its
 entries by position -- so the count the display shows, the durations the
 countdown re-anchors on, and the rows the highlight lands on cannot
-drift apart, because they are the same object. `row` is the entry's
-index in the sequence list the plan was built from -- for a GUI run
-that is the *filtered* selection, not the tree: a consumer that owns a
-larger list (the GUI's model, with unchecked rows) must translate
-through its own snapshot of which rows ran before touching it.
+drift apart, because they are the same object. `row` is the caller's
+identity for the entry's source sequence: plan_run sets it to the
+sequence's index in the list it was handed, and a caller whose own list
+is larger may relabel before starting the run -- the GUI remaps rows to
+its model (which holds unchecked rows too) so highlight and resume land
+on the right tree row.
 """
 
 from collections import namedtuple
@@ -28,11 +29,22 @@ SequenceStarted = namedtuple("SequenceStarted", "run_id position")
 Incubating = namedtuple("Incubating", "run_id position minutes")
 SequenceCompleted = namedtuple("SequenceCompleted", "run_id position")
 
-# Published by the session once the rig is free (the same deferral the
-# early-end report has always had), so a dialog painted on it sees an idle
-# rig. outcome is one of "finished" | "stopped" | "failed"; position is the
-# plan entry that was in flight when the run ended early (None when it
-# finished) -- the resume offer's input. Deliberately carries no usage
-# totals: consumers read system.usage, which the session does not know.
+# Published by the session with the rig already reading idle -- but from
+# inside the end's one transition, before the state channel announces it,
+# so a chained start can never precede the ending it follows. A subscriber
+# therefore must be brief and must not block on the session (its waiters
+# wake only after this dispatch; session.wait() here deadlocks). outcome is
+# one of "finished" | "stopped" | "failed"; position is the plan entry in
+# flight when the run ended early (None when it finished) -- the resume
+# offer's input; elapsed_seconds is the run's running time, held spans
+# excluded -- captured by the worker because the signal's clock is reset
+# before this is published, so no subscriber could derive it. Deliberately
+# carries no usage totals: consumers read system.usage, which the session
+# does not know.
 RunEnded = namedtuple(
     "RunEnded", "run_id outcome message elapsed_seconds position")
+
+
+def plan_seconds(entries):
+    """The summed estimate of `entries` -- the whole plan, or its tail."""
+    return sum(entry.duration_seconds for entry in entries)

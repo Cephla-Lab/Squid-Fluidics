@@ -213,12 +213,32 @@ class TestResumePreparesTheModel:
         monkeypatch.setattr(gui.QMessageBox, "information", lambda *args: None)
         widget.setSequences([FLOW, dict(FLOW, include=False), FLOW, TEMP])
         from fluidics.time_estimate import plan_run
-        widget._plan = plan_run(widget.config, widget.getSequences(selected_only=True))
-        widget._model_rows = widget._includedRows()
+        plan = plan_run(widget.config, widget.getSequences(selected_only=True))
         # The plan's rows index the run's own selection (0,1,2 here); the
-        # tree's model rows are 0,2,3 -- RunEnded's entry must translate.
+        # widget relabels them to tree rows (0,2,3) at run start.
+        rows = widget._includedRows()
+        widget._plan = tuple(e._replace(row=rows[e.row]) for e in plan)
         ended = gui.RunEnded("run-1", "stopped", None, 0.0, position=1)
         widget._handle_run_event(ended)
         assert widget._includedRows() == [2, 3]
         assert widget.tree.topLevelItem(0).checkState(0) == gui.Qt.Unchecked, \
             "the tree did not repaint from the model"
+
+
+class TestRunStartRelabelsThePlan:
+    def test_plan_rows_become_tree_rows_before_the_run_starts(
+            self, widget, monkeypatch):
+        """system.plan() numbers rows by the filtered selection; the widget
+        must relabel them to its own tree rows before handing the plan to
+        the run, or a sparse selection highlights (and resumes) the wrong
+        row."""
+        from tests.worker_helpers import plan_for
+        monkeypatch.setattr(gui.QMessageBox, "question",
+                            lambda *args: gui.QMessageBox.Yes)
+        widget.setSequences([FLOW, dict(FLOW, include=False), FLOW])
+        handed = []
+        widget.system.plan = lambda seqs: plan_for(
+            [{"type": "flow_reagent"}] * len(seqs))
+        widget.system.run = lambda seqs, plan=None: handed.append(plan)
+        widget.runSelectedSequences()
+        assert [entry.row for entry in handed[0]] == [0, 2]
