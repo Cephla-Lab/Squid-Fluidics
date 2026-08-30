@@ -36,7 +36,11 @@ def widget(qapp, flow_cell_config):
     )
     w = gui.SequencesWidget(config, system)
     yield w
+    # Actually destroy it: deleteLater only queues, and a widget that is
+    # never destroyed keeps its subscriptions -- the log handler among
+    # them -- attached for the rest of the session.
     w.deleteLater()
+    gui.QApplication.sendPostedEvents(None, gui.QEvent.DeferredDelete)
 
 
 def field_item(widget, row, fname):
@@ -91,6 +95,83 @@ class TestTheModelIsTheTruth:
         field_item(widget, 0, "volume").setText(1, "750")
         assert widget._sequences[0]["volume"] == "750"
         assert widget.getSequences()[0]["volume"] == 750
+
+
+class TestLogPane:
+    """The run tab shows what the run log is saying, and exports what it
+    is showing."""
+
+    def test_a_logged_line_reaches_the_pane(self, widget, caplog):
+        import logging
+        # The app's own configure_console puts the logger at DEBUG; the
+        # test session leaves it higher, so say what the app says.
+        caplog.set_level(logging.DEBUG, logger="fluidics")
+        logging.getLogger("fluidics").info("Sequence 1/3 (prime)")
+        # The handler posts to the Qt thread; deliver what it queued.
+        gui.QApplication.processEvents()
+        assert "Sequence 1/3 (prime)" in widget.logView.toPlainText()
+
+    def test_debug_chatter_stays_out_of_the_pane(self, widget, caplog):
+        """The pane is the console's level, not the log file's: per-move
+        valve traffic would bury the run's own narration."""
+        import logging
+        caplog.set_level(logging.DEBUG, logger="fluidics")
+        logging.getLogger("fluidics").debug("Valve 0: open port 1")
+        gui.QApplication.processEvents()
+        assert "open port 1" not in widget.logView.toPlainText()
+
+    def test_the_pane_keeps_only_its_last_lines(self, widget):
+        for n in range(widget.LOG_LINES + 50):
+            widget._handle_log_line(f"line {n}")
+        text = widget.logView.toPlainText()
+        assert "line 0" not in text and f"line {widget.LOG_LINES + 49}" in text
+
+    def test_export_writes_exactly_what_is_shown(self, widget, tmp_path,
+                                                 monkeypatch):
+        widget._handle_log_line("first line")
+        widget._handle_log_line("second line")
+        out = tmp_path / "exported.txt"
+        monkeypatch.setattr(gui.QFileDialog, "getSaveFileName",
+                            lambda *a, **k: (str(out), ""))
+        widget.exportLog()
+        assert out.read_text().splitlines() == ["first line", "second line"]
+
+    def test_a_cancelled_export_writes_nothing(self, widget, tmp_path,
+                                               monkeypatch):
+        monkeypatch.setattr(gui.QFileDialog, "getSaveFileName",
+                            lambda *a, **k: ("", ""))
+        widget.exportLog()
+        assert list(tmp_path.iterdir()) == []
+
+    def test_an_export_that_fails_says_so_and_raises_nothing(
+            self, widget, tmp_path, monkeypatch):
+        blocked = tmp_path / "blocked"
+        blocked.mkdir()
+        said = []
+        monkeypatch.setattr(gui.QFileDialog, "getSaveFileName",
+                            lambda *a, **k: (str(blocked), ""))
+        monkeypatch.setattr(gui.QMessageBox, "critical",
+                            lambda *args: said.append(args[1]))
+        widget.exportLog()
+        assert said == ["Export Failed"]
+
+    def test_the_handler_detaches_with_the_widget(self, qapp,
+                                                  flow_cell_config):
+        """logging keeps handlers globally: one left attached would post
+        to a destroyed widget, and take the process with it."""
+        import logging
+        from fluidics.subscribers import Subscribers
+        system = SimpleNamespace(
+            devices=SimpleNamespace(selector_valves=SimpleNamespace(
+                get_port_names=lambda: ["Port 1"])),
+            session=FakeSession(), warnings=Subscribers("test warnings"))
+        logger = logging.getLogger("fluidics")
+        before = len(logger.handlers)
+        w = gui.SequencesWidget(flow_cell_config, system)
+        assert len(logger.handlers) == before + 1
+        w.deleteLater()
+        gui.QApplication.sendPostedEvents(None, gui.QEvent.DeferredDelete)
+        assert len(logger.handlers) == before, "the log handler outlived the tab"
 
 
 class TestExpansion:

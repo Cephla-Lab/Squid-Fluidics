@@ -12,7 +12,8 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QTabWidget, QWidget, QVB
                              QSpinBox, QLabel, QProgressBar, QLineEdit,
                              QTableWidget, QTableWidgetItem,
                              QGroupBox, QGridLayout, QSizePolicy, QDialog, QFormLayout,
-                             QDoubleSpinBox, QDialogButtonBox, QScrollArea)
+                             QDoubleSpinBox, QDialogButtonBox, QScrollArea,
+                             QPlainTextEdit, QSplitter)
 from PyQt5.QtCore import (Qt, QTimer, pyqtSignal, QEvent, QCoreApplication,
                           QSettings, QSignalBlocker)
 from PyQt5.QtGui import QColor, QBrush
@@ -31,7 +32,9 @@ from fluidics.devices import (
 from fluidics.system import FluidicsSystem
 from fluidics.events import (RunEnded, RunStarted, SequenceCompleted,
                              SequenceStarted, plan_seconds, repeat_suffix)
-from fluidics.run_log import setup_uncaught_exception_logging, start_log_file
+from fluidics.files import atomic_write
+from fluidics.run_log import (LOGGER_NAME, setup_uncaught_exception_logging,
+                             start_log_file)
 from fluidics.sequences import (
     load_sequences, save_sequences_yaml,
     get_fields_for_type, validate_sequences, sequence_port_problems,
@@ -261,6 +264,46 @@ def _hms(seconds):
     return f"{seconds // 3600:02d}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
 
 
+class GuiLogHandler(logging.Handler):
+    """Feeds the run tab's log pane from the fluidics logger.
+
+    Records arrive on whatever thread logged them -- the run's, the MCU
+    reader's, a report writer's -- so the text crosses to the Qt thread
+    the way every other cross-thread paint does. `detach()` takes it off
+    the logger: handlers are held globally, so one left attached would
+    outlive its tab and post into a destroyed widget.
+    """
+
+    def __init__(self, widget):
+        super().__init__(level=logging.INFO)
+        self.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(message)s", datefmt="%m/%d %H:%M:%S"))
+        self._widget = widget
+
+    def emit(self, record):
+        widget = self._widget
+        if widget is None:
+            return
+        try:
+            widget._post_event("_handle_log_line", self.format(record))
+        except RuntimeError:
+            # The C++ widget went out from under us: its tab is gone but
+            # this handler is still on the logger, so take it off here --
+            # nothing else will, and posting again would be worse.
+            self.detach()
+
+    def detach(self):
+        """Take this handler off the logger and stop feeding the pane.
+        Idempotent: the widget's destruction and a failed post both land
+        here, in either order."""
+        self._widget = None
+        logging.getLogger(LOGGER_NAME).removeHandler(self)
+
+    def close(self):
+        self._widget = None
+        super().close()
+
+
 class SequencesWidget(PostsToQtThread, QWidget):
     """Edits the sequence list and runs it through the system's session, which
     owns the run's thread and its end; this widget renders the callbacks.
@@ -295,6 +338,14 @@ class SequencesWidget(PostsToQtThread, QWidget):
 
         self.initUI()
 
+        # The log pane reads the same records the console and the run log
+        # file get, at INFO. Detached when the widget goes: logging keeps
+        # its handlers globally, so a live handler would outlive the tab.
+        self._logHandler = GuiLogHandler(self)
+        logging.getLogger(LOGGER_NAME).addHandler(self._logHandler)
+        handler = self._logHandler          # not self: the lambda outlives it
+        self.destroyed.connect(lambda: handler.detach())
+
     def initUI(self):
         layout = QVBoxLayout()
 
@@ -309,7 +360,32 @@ class SequencesWidget(PostsToQtThread, QWidget):
         self.tree.itemCollapsed.connect(self._onItemClosed)
         self.tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
         self.tree.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        layout.addWidget(self.tree)
+
+        # What the run log is saying, where the run is being watched. The
+        # operator sizes it against the sequences: a splitter rather than a
+        # fixed height, since a bench session wants one or the other.
+        self.logView = QPlainTextEdit()
+        self.logView.setReadOnly(True)
+        self.logView.setMaximumBlockCount(self.LOG_LINES)
+        self.logView.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.exportLogButton = QPushButton("Export Log...")
+        self.exportLogButton.clicked.connect(self.exportLog)
+        logHeader = QHBoxLayout()
+        logHeader.addWidget(QLabel("Log"))
+        logHeader.addStretch()
+        logHeader.addWidget(self.exportLogButton)
+        logPane = QWidget()
+        logLayout = QVBoxLayout(logPane)
+        logLayout.setContentsMargins(0, 0, 0, 0)
+        logLayout.addLayout(logHeader)
+        logLayout.addWidget(self.logView)
+
+        splitter = QSplitter(Qt.Vertical)
+        splitter.addWidget(self.tree)
+        splitter.addWidget(logPane)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 1)
+        layout.addWidget(splitter)
 
         # The list's editing verbs on one row, the run's controls on the next.
         self.loadButton = QPushButton("Load")
@@ -366,12 +442,14 @@ class SequencesWidget(PostsToQtThread, QWidget):
         self._warnings = []
 
         progressSection = QVBoxLayout()
-        progressLabelLayout = QHBoxLayout()
-        progressLabelLayout.addWidget(self.sequenceLabel)
-        progressLabelLayout.addStretch()
-        progressLabelLayout.addWidget(self.timeLabel)
-        progressSection.addLayout(progressLabelLayout)
-        progressSection.addWidget(self.progressBar)
+        # Count, bar and countdown share one line: three short readings
+        # that belong together, and the tab's vertical room belongs to the
+        # sequences and the log.
+        statusRow = QHBoxLayout()
+        statusRow.addWidget(self.sequenceLabel)
+        statusRow.addWidget(self.progressBar, 1)
+        statusRow.addWidget(self.timeLabel)
+        progressSection.addLayout(statusRow)
         progressSection.addWidget(self.warningLabel)
 
         # Reagent drawn per port since the run began (manual draws show
@@ -393,6 +471,11 @@ class SequencesWidget(PostsToQtThread, QWidget):
         self.timer = QTimer()
         self.timer.timeout.connect(self.updateTimeRemaining)
         self.total_time = None
+
+    # What the log pane keeps. Enough to cover a long run's narration
+    # without holding the whole session's text in the widget -- the run
+    # log file on disk is the complete record.
+    LOG_LINES = 2000
 
     FIELD_LABELS = {
         'fluidic_port': 'Fluidic Port',
@@ -475,6 +558,33 @@ class SequencesWidget(PostsToQtThread, QWidget):
 
         self.tree.addTopLevelItem(item)
         item.setExpanded(id(seq) in self._opened)
+
+    def _handle_log_line(self, line):
+        """On the Qt thread: the pane keeps the last LOG_LINES lines, and
+        follows the tail only when the operator is already at it -- a
+        scroll back to read something must not be yanked forward."""
+        bar = self.logView.verticalScrollBar()
+        at_tail = bar.value() >= bar.maximum() - 2
+        self.logView.appendPlainText(line)
+        if at_tail:
+            bar.setValue(bar.maximum())
+
+    def exportLog(self):
+        """Write what the pane is showing to a file the operator picks --
+        the window's text, not the whole rolling log file on disk."""
+        default = time.strftime("fluidics-log-%Y%m%d-%H%M%S.txt")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Log", default, "Text Files (*.txt)")
+        if not path:
+            return
+        try:
+            with atomic_write(path) as f:
+                f.write(self.logView.toPlainText() + "\n")
+        except OSError as e:
+            QMessageBox.critical(self, "Export Failed",
+                                 f"Could not write {path}:\n{e}")
+            return
+        _logger.info("Log exported to %s", path)
 
     def _onItemOpened(self, item):
         self._noteOpen(item, True)
