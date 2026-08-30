@@ -27,13 +27,17 @@ def atomic_write(path, encoding="utf-8"):
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".",
                                suffix=".part")
     try:
-        if path.exists():
-            os.chmod(tmp, os.stat(path).st_mode & 0o777)
-        else:
-            umask = os.umask(0)
-            os.umask(umask)
-            os.chmod(tmp, 0o666 & ~umask)
+        # The handle owns the descriptor from the first line: a failure
+        # anywhere below -- the mode setup included -- must close it, not
+        # strand it open while the name is unlinked.
         with open(fd, "w", encoding=encoding) as f:
+            try:
+                mode = os.stat(path).st_mode & 0o777
+            except FileNotFoundError:
+                umask = os.umask(0)
+                os.umask(umask)
+                mode = 0o666 & ~umask
+            os.chmod(tmp, mode)
             yield f
         os.replace(tmp, path)
     except BaseException:

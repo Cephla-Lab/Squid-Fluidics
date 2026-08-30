@@ -28,6 +28,26 @@ class TestAtomicWrite:
         assert path.read_text() == "the earlier content"
         assert os.listdir(tmp_path) == ["out.txt"], "no temp left behind"
 
+    def test_a_failure_during_mode_setup_leaks_no_descriptor(
+            self, tmp_path, monkeypatch):
+        """The temp's descriptor belongs to the handle from the first
+        line: a chmod that fails must close it with the unwind, not
+        strand it (repeated saves against a bad filesystem would
+        exhaust the process's descriptors)."""
+        import fluidics.files as files
+
+        def refuses(*args, **kwargs):
+            raise PermissionError("chmod refused")
+
+        monkeypatch.setattr(files.os, "chmod", refuses)
+        open_fds = os.listdir("/proc/self/fd")
+        for _ in range(3):
+            with pytest.raises(PermissionError):
+                with atomic_write(tmp_path / "out.txt"):
+                    pass
+        assert os.listdir("/proc/self/fd") == open_fds, "descriptors leaked"
+        assert list(tmp_path.iterdir()) == [], "no temp left behind"
+
     def test_a_replaced_file_keeps_its_permissions(self, tmp_path):
         path = tmp_path / "config.yaml"
         path.write_text("a: 1")
