@@ -182,5 +182,6 @@ class TestTheEdges:
             r.events.notify(RunEnded("run-8", "finished", None, 1.0, None))
             assert r.reports.wait(5)
         assert standing.read_text() == '{"outcome": "the earlier record"}'
-        assert list(tmp_path.glob("*.part")) == [], "temp wreckage left behind"
+        assert [p.name for p in tmp_path.iterdir()] == ["run-8.json"], \
+            "temp wreckage left behind"
         assert "could not be written" in caplog.text

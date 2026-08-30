@@ -39,7 +39,7 @@ class TestAtomicWrite:
         def refuses(*args, **kwargs):
             raise PermissionError("chmod refused")
 
-        monkeypatch.setattr(files.os, "chmod", refuses)
+        monkeypatch.setattr(files.os, "fchmod", refuses)
         open_fds = os.listdir("/proc/self/fd")
         for _ in range(3):
             with pytest.raises(PermissionError):
@@ -55,6 +55,20 @@ class TestAtomicWrite:
         with atomic_write(path) as f:
             f.write("a: 2")
         assert (os.stat(path).st_mode & 0o777) == 0o640
+
+    def test_a_write_never_flips_the_process_umask(self, tmp_path,
+                                                    monkeypatch):
+        """Reading the umask means setting it -- there is no getter --
+        and that flip is process-wide: a file another thread creates
+        inside the window is born unmasked (reproduced at a small switch
+        interval). The read happens once at import, never in a write."""
+        import fluidics.files as files
+        flips = []
+        monkeypatch.setattr(files.os, "umask",
+                            lambda mask: flips.append(mask) or 0o022)
+        with atomic_write(tmp_path / "new.txt") as f:
+            f.write("x")
+        assert flips == [], "a write flipped the process umask"
 
     def test_a_new_file_gets_a_plain_opens_mode_not_the_temps(self, tmp_path):
         """mkstemp creates a private 0600; a config or a report the
