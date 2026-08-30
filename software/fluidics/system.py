@@ -12,6 +12,7 @@ import logging
 
 from .devices import build_devices, build_operations
 from .manual_operations import ManualOperations
+from .reports import RunReports
 from .run_session import RunSession
 from .subscribers import Subscribers
 from .time_estimate import plan_run
@@ -21,9 +22,10 @@ _logger = logging.getLogger(__name__)
 
 
 class FluidicsSystem:
-    def __init__(self, config, devices):
+    def __init__(self, config, devices, report_dir=None):
         """Assemble the rig around a DeviceSet already brought up; build()
-        is the usual way, doing the bring-up too."""
+        is the usual way, doing the bring-up too. report_dir: where the
+        per-run reports go (None: beside the rolling log)."""
         self.devices = devices
         # Draw-protection notices from the operations (Flow Cell), for
         # whoever is watching -- the run log always is.
@@ -37,13 +39,19 @@ class FluidicsSystem:
         # its end; the GUI's table and any future API read this one object.
         self.usage = ReagentUsage(config, devices.syringe_pump,
                                   devices.selector_valves, self.session.events)
+        # The written record of each run, one JSON per run_id beside the
+        # rolling log; built before any widget subscribes (RunSession.events
+        # states the order rule).
+        self.reports = RunReports(self.session.events, self.usage,
+                                  self.warnings, directory=report_dir)
 
     @classmethod
-    def build(cls, config, simulation=False, on_issue=None):
+    def build(cls, config, simulation=False, on_issue=None, report_dir=None):
         """Bring the rig up for `config` and assemble it. What build_devices
         reports through on_issue (a degraded bring-up) passes straight
         through; what it raises (no controller, no pump) raises."""
-        return cls(config, build_devices(config, simulation, on_issue=on_issue))
+        return cls(config, build_devices(config, simulation, on_issue=on_issue),
+                   report_dir=report_dir)
 
     # --- the one job ---
 

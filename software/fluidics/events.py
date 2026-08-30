@@ -16,7 +16,9 @@ sequence's index in the list it was handed, and a caller whose own list
 is larger may relabel before starting the run -- the GUI remaps rows to
 its model (which holds unchecked rows too) so highlight and resume land
 on the right tree row. Anyone else -- a report, a log -- keys on
-`position` or `label`, never `row`: it is the caller's coordinate.
+`position` or `label`, never `row`: it is the caller's coordinate, and
+a record that carries it carries the starter's own numbering, meaning
+nothing to anyone else.
 """
 
 from collections import namedtuple
