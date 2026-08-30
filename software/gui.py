@@ -422,7 +422,9 @@ class SequencesWidget(PostsToQtThread, QWidget):
         tree their view."""
         self._sequences = [dict(seq) for seq in sequences]
         # A new file's rows are not the old file's: it opens collapsed,
-        # one line per sequence, whatever was open before.
+        # one line per sequence, whatever was open before. Not merely the
+        # prune's job -- the old dicts are freed here, and a new one
+        # allocated at a remembered address would render open by accident.
         self._opened.clear()
         self._refresh()
 
