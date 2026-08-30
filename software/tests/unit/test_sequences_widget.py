@@ -93,6 +93,44 @@ class TestTheModelIsTheTruth:
         assert widget.getSequences()[0]["volume"] == 750
 
 
+class TestExpansion:
+    """A loaded file opens collapsed -- one line per sequence, not a wall
+    of every field -- and what the operator opens stays open."""
+
+    def _opened(self, widget):
+        return [row for row in range(widget.tree.topLevelItemCount())
+                if widget.tree.topLevelItem(row).isExpanded()]
+
+    def test_a_loaded_file_opens_collapsed(self, widget):
+        widget.setSequences([FLOW, TEMP, FLOW])
+        assert self._opened(widget) == []
+        assert widget.tree.topLevelItem(0).childCount() > 0, \
+            "collapsed, not empty: the fields are there to open"
+
+    def test_loading_again_collapses_what_the_last_file_had_open(self, widget):
+        widget.setSequences([FLOW, TEMP])
+        widget.tree.topLevelItem(0).setExpanded(True)
+        widget.setSequences([TEMP, FLOW])
+        assert self._opened(widget) == [], \
+            "a new file's rows are not the old file's"
+
+    def test_a_structural_change_leaves_the_open_rows_open(self, widget):
+        """Adding, moving or removing re-renders every row; a row the
+        operator opened to edit must not close under them."""
+        widget.setSequences([FLOW, TEMP])
+        widget.tree.topLevelItem(1).setExpanded(True)
+        widget.tree.setCurrentItem(widget.tree.topLevelItem(1))
+        widget.duplicateSequence()
+        assert self._opened(widget) == [1]
+
+    def test_a_row_the_operator_closed_stays_closed(self, widget):
+        widget.setSequences([FLOW, TEMP])
+        widget.tree.topLevelItem(0).setExpanded(True)
+        widget.tree.topLevelItem(0).setExpanded(False)
+        widget._refresh()
+        assert self._opened(widget) == []
+
+
 class TestStructuralOps:
     def test_duplicate_inserts_an_independent_copy_after(self, widget):
         widget.setSequences([FLOW, TEMP])

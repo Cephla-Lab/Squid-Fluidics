@@ -415,6 +415,11 @@ class SequencesWidget(PostsToQtThread, QWidget):
         """Replace the model and render it: the dicts are the truth, the
         tree their view."""
         self._sequences = [dict(seq) for seq in sequences]
+        with QSignalBlocker(self.tree):
+            # A new file's rows are not the old file's, so no expansion
+            # carries into them: a loaded file opens collapsed, one line
+            # per sequence, whatever was open before.
+            self.tree.clear()
         self._refresh()
 
     def _refresh(self, select=None):
@@ -428,10 +433,18 @@ class SequencesWidget(PostsToQtThread, QWidget):
         self._renderRunControls()
 
     def _renderTree(self):
+        # Which rows the operator had open, kept across the rebuild: a
+        # structural change re-renders every row, and reopening a row the
+        # operator closed (or closing one they opened) is the tree
+        # overruling them. New rows arrive collapsed.
+        opened = {row for row in range(self.tree.topLevelItemCount())
+                  if self.tree.topLevelItem(row).isExpanded()}
         with QSignalBlocker(self.tree):
             self.tree.clear()
             for seq in self._sequences:
                 self._renderSequenceRow(seq)
+            for row in opened & set(range(self.tree.topLevelItemCount())):
+                self.tree.topLevelItem(row).setExpanded(True)
         self._renderValidation()
 
     def _renderSequenceRow(self, seq):
@@ -459,7 +472,6 @@ class SequencesWidget(PostsToQtThread, QWidget):
             item.addChild(child)
 
         self.tree.addTopLevelItem(item)
-        item.setExpanded(True)
 
     def _onItemChanged(self, item, column):
         """An edit or a checkbox toggle: write it into the model, then
