@@ -40,9 +40,8 @@ class FluidicsSystem:
         self.usage = ReagentUsage(config, devices.syringe_pump,
                                   devices.selector_valves, self.session.events)
         # The written record of each run, one JSON per run_id beside the
-        # rolling log. Built here, after the ledger and before any widget
-        # subscribes: system bookkeeping must hear RunEnded before a GUI
-        # subscriber that can chain the next run (see RunSession.events).
+        # rolling log; built before any widget subscribes (RunSession.events
+        # states the order rule).
         self.reports = RunReports(self.session.events, self.usage,
                                   self.warnings, directory=report_dir)
 

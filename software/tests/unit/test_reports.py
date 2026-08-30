@@ -5,6 +5,7 @@ events, written beside the rolling log."""
 import json
 import logging
 import threading
+import time
 from types import SimpleNamespace
 
 from fluidics.events import RunEnded, RunStarted
@@ -13,15 +14,13 @@ from fluidics.subscribers import Subscribers
 
 from ..worker_helpers import plan_for
 
-ROWS = [(2, "wash buffer", 300.0), (5, None, 40.0)]
-
-
-def rig(tmp_path, rows=ROWS):
+def rig(directory):
     """A RunReports on real channels, the ledger canned."""
     events = Subscribers("test run events")
     warnings = Subscribers("test warnings")
-    usage = SimpleNamespace(rows=lambda: list(rows))
-    reports = RunReports(events, usage, warnings, directory=tmp_path)
+    usage = SimpleNamespace(
+        rows=lambda: [(2, "wash buffer", 300.0), (5, None, 40.0)])
+    reports = RunReports(events, usage, warnings, directory=directory)
     return SimpleNamespace(events=events, warnings=warnings, usage=usage,
                            reports=reports)
 
@@ -41,6 +40,7 @@ class TestTheRecord:
         r.warnings.notify("flow low on syringe_draw")
         r.events.notify(RunEnded("run-1", "finished", None, 47.5, None))
         report = written(tmp_path, r.reports, "run-1")
+        assert report["format"] == 1
         assert report["outcome"] == "finished" and report["message"] is None
         assert report["elapsed_seconds"] == 47.5
         assert report["estimated_seconds"] == 50.0
@@ -108,7 +108,6 @@ class TestTheWait:
         """Three writes stuck at once must not each be granted the full
         timeout in turn. real_clock: under the fake clock this elapsed
         assertion would pass against the per-writer bug too."""
-        import time
         r = rig(tmp_path)
         gate = threading.Event()
         r.reports._write = lambda report: gate.wait()
@@ -131,7 +130,28 @@ class TestTheEdges:
             r.events.notify(RunEnded("run-6", "failed", "pump fault", 0.0, None))
         report = written(tmp_path, r.reports, "run-6")
         assert report["outcome"] == "failed" and report["plan"] == []
-        assert "no start on record" in caplog.text
+        assert "no matching start on record" in caplog.text
+
+    def test_a_raced_ending_does_not_eat_the_surviving_runs_record(
+            self, tmp_path, caplog):
+        """Two starters can race start()'s outer busy check: the loser
+        announces a failed ending under the winner's stash. That ending
+        gets its degraded record -- and must leave the winner's plan,
+        start time and warnings for the winner's own ending."""
+        r = rig(tmp_path)
+        plan = plan_for([{"type": "priming", "name": "prime"}], seconds=5.0)
+        r.events.notify(RunStarted("run-winner", plan))
+        r.warnings.notify("kept for the winner")
+        with caplog.at_level(logging.WARNING, logger="fluidics"):
+            r.events.notify(RunEnded("run-loser", "failed",
+                                     "the rig is busy", 0.0, None))
+        r.events.notify(RunEnded("run-winner", "finished", None, 5.0, None))
+        loser = written(tmp_path, r.reports, "run-loser")
+        winner = written(tmp_path, r.reports, "run-winner")
+        assert loser["plan"] == [] and "no matching start" in caplog.text
+        assert [e["label"] for e in winner["plan"]] == ["prime"]
+        assert [w["message"] for w in winner["warnings"]] == \
+            ["kept for the winner"]
 
     def test_a_failed_write_is_loud_and_kills_nothing(self, tmp_path, caplog):
         blocked = tmp_path / "blocked"

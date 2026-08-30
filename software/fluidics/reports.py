@@ -17,10 +17,22 @@ report reads. Only the disk is off-thread: the writer thread is
 short-lived and non-daemon, so a dispatch never waits on a file and an
 interpreter shutting down right after a run still finishes the write.
 
-run_id (UTC second + a per-process counter) is filename-safe and unique
-within a process; two processes ending same-second runs would collide on
-the name and the later write wins -- accepted until run identity is ever
-shared across processes.
+The warnings in the record are whatever the system's warnings channel
+carried between the run's two boundary events. That window is the run's
+by structure, not convention: the channel's one publisher today is draw
+protection, which only speaks inside a run's draws (a manual move
+cannot overlap a run, and publishes nothing here anyway) -- wiring a
+new publisher into system.warnings widens what every report attests.
+
+The record's schema: `format` is 1 and bumps only when an existing
+field changes meaning -- additions do not. `row` is the starting
+caller's own numbering for a source sequence (the GUI's tree rows, the
+CLI's file order); it joins `plan` to `sequences` within one report and
+means nothing beyond it -- consumers key on position and label, as
+fluidics.events prescribes. run_id (UTC second + a per-process counter)
+is filename-safe and unique within a process; two processes ending
+same-second runs would collide on the name and the later write wins --
+accepted until run identity is ever shared across processes.
 """
 
 import json
@@ -71,7 +83,7 @@ class RunReports:
                         max(0.0, deadline - time.monotonic()))
         return not any(writer.is_alive() for writer in writers)
 
-    # --- subscribers (the starter's thread, the job's thread) ---
+    # --- subscribers (the starter's, the job's, the sensor reader's) ---
 
     def _on_warning(self, message):
         with self._lock:
@@ -92,21 +104,28 @@ class RunReports:
     def _collect(self, event):
         """The whole report, gathered in the dispatch."""
         with self._lock:
-            run, self._run = self._run, None
-        if run is None or run["run_id"] != event.run_id:
-            # Nothing announced this ending -- events wired up mid-run,
-            # say. The outcome is still worth a record.
-            _logger.warning("Run %s ended with no start on record; writing "
-                            "what the ending carries.", event.run_id)
+            # Take the stash only for its own ending: a mismatched id
+            # (two starters raced; the loser announces a failed ending
+            # under the winner's stash) must leave the surviving run's
+            # record intact.
+            if self._run is not None and self._run["run_id"] == event.run_id:
+                run, self._run = self._run, None
+            else:
+                run = None
+        if run is None:
+            # An ending with no matching start -- events wired up
+            # mid-run, or the raced starter above. Still worth a record.
+            _logger.warning("Run %s ended with no matching start on record; "
+                            "writing what the ending carries.", event.run_id)
             run = {"run_id": event.run_id, "started": None, "plan": (),
                    "warnings": []}
         plan = run["plan"]
-        seen, sequences = set(), []
-        for entry in plan:
-            if entry.row not in seen:      # a tail may start mid-repeat, so
-                seen.add(entry.row)        # uniqueness is by row, not repeat
-                sequences.append({"row": entry.row, **entry.sequence})
+        # One entry per source row (a resumed tail repeats rows and may
+        # open mid-repeat); every repeat carries the same sequence dict.
+        by_row = {entry.row: entry.sequence for entry in plan}
+        at = None if event.position is None else plan[event.position]
         return {
+            "format": 1,
             "run_id": event.run_id,
             "outcome": event.outcome,
             "message": event.message,
@@ -114,18 +133,16 @@ class RunReports:
             "ended": _utc(time.time()),
             "elapsed_seconds": event.elapsed_seconds,
             "estimated_seconds": plan_seconds(plan),
-            "sequences": sequences,
+            "sequences": [{"row": row, **seq} for row, seq in by_row.items()],
             "plan": [{"position": position, "row": entry.row,
                       "label": entry.label, "repeat": entry.repeat,
                       "repeats": entry.repeats,
                       "estimated_seconds": entry.duration_seconds}
                      for position, entry in enumerate(plan)],
-            "ended_at": None if event.position is None else {
-                "position": event.position,
-                "row": plan[event.position].row,
-                "label": plan[event.position].label,
-                "repeat": plan[event.position].repeat,
-                "repeats": plan[event.position].repeats},
+            "ended_at": None if at is None else {
+                "position": event.position, "row": at.row,
+                "label": at.label, "repeat": at.repeat,
+                "repeats": at.repeats},
             "reagent_used_ul": [
                 {"port": port, "reagent": name, "volume_ul": used}
                 for port, name, used in self._usage.rows()],
@@ -144,10 +161,16 @@ class RunReports:
             self._writers = [w for w in self._writers if w.is_alive()]
             self._writers.append(writer)
 
-    def _write(self, report):
+    def path_for(self, run_id):
+        """Where that run's record goes -- the one spelling of the name,
+        for the writer below and any collector reading back."""
         directory = (Path(self._directory) if self._directory is not None
                      else default_report_directory())
-        path = directory / f"{report['run_id']}.json"
+        return directory / f"{run_id}.json"
+
+    def _write(self, report):
+        path = self.path_for(report["run_id"])
+        directory = path.parent
         try:
             directory.mkdir(parents=True, exist_ok=True)
             # Dump to a sibling temp file and swap it in whole: a write
