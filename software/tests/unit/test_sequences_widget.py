@@ -136,12 +136,19 @@ class TestLogPane:
         widget.exportLog()
         assert out.read_text().splitlines() == ["first line", "second line"]
 
-    def test_a_cancelled_export_writes_nothing(self, widget, tmp_path,
-                                               monkeypatch):
+    def test_a_cancelled_export_writes_nothing_and_says_nothing(
+            self, widget, tmp_path, monkeypatch):
+        """Cancel is not an error: no file, and no dialog either. The
+        second assertion also keeps a regression here from opening a real
+        modal, which would hang the suite rather than fail it."""
+        said = []
         monkeypatch.setattr(gui.QFileDialog, "getSaveFileName",
                             lambda *a, **k: ("", ""))
+        monkeypatch.setattr(gui.QMessageBox, "critical",
+                            lambda *args: said.append(args[1]))
         widget.exportLog()
         assert list(tmp_path.iterdir()) == []
+        assert said == []
 
     def test_an_export_that_fails_says_so_and_raises_nothing(
             self, widget, tmp_path, monkeypatch):
