@@ -282,6 +282,10 @@ class SequencesWidget(PostsToQtThread, QWidget):
         self._invalid = {}       # model row -> live-validation message
         self._port_limit = available_port_count(config)   # config-fixed
         self._plan = ()          # the running run's plan, rows = model rows
+        # Which sequences the operator has open, by identity: a move swaps
+        # the dicts themselves, so an open row follows its sequence rather
+        # than staying behind at the index it was rendered at.
+        self._opened = set()
         system.warnings.subscribe(self.reportWarning)
         # The run display ends when the session's job does -- whichever way
         # it ends -- rather than riding any one worker callback; the run's
@@ -301,6 +305,8 @@ class SequencesWidget(PostsToQtThread, QWidget):
         self.tree.setEditTriggers(QTreeWidget.NoEditTriggers)
         self.tree.itemDoubleClicked.connect(self._onItemDoubleClicked)
         self.tree.itemChanged.connect(self._onItemChanged)
+        self.tree.itemExpanded.connect(self._onItemOpened)
+        self.tree.itemCollapsed.connect(self._onItemClosed)
         self.tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
         self.tree.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         layout.addWidget(self.tree)
@@ -415,11 +421,9 @@ class SequencesWidget(PostsToQtThread, QWidget):
         """Replace the model and render it: the dicts are the truth, the
         tree their view."""
         self._sequences = [dict(seq) for seq in sequences]
-        with QSignalBlocker(self.tree):
-            # A new file's rows are not the old file's, so no expansion
-            # carries into them: a loaded file opens collapsed, one line
-            # per sequence, whatever was open before.
-            self.tree.clear()
+        # A new file's rows are not the old file's: it opens collapsed,
+        # one line per sequence, whatever was open before.
+        self._opened.clear()
         self._refresh()
 
     def _refresh(self, select=None):
@@ -433,18 +437,14 @@ class SequencesWidget(PostsToQtThread, QWidget):
         self._renderRunControls()
 
     def _renderTree(self):
-        # Which rows the operator had open, kept across the rebuild: a
-        # structural change re-renders every row, and reopening a row the
-        # operator closed (or closing one they opened) is the tree
-        # overruling them. New rows arrive collapsed.
-        opened = {row for row in range(self.tree.topLevelItemCount())
-                  if self.tree.topLevelItem(row).isExpanded()}
+        # Sequences that have left the model take their open state with
+        # them -- and a later dict could otherwise be allocated at a
+        # remembered address and render open for no reason.
+        self._opened &= {id(seq) for seq in self._sequences}
         with QSignalBlocker(self.tree):
             self.tree.clear()
             for seq in self._sequences:
                 self._renderSequenceRow(seq)
-            for row in opened & set(range(self.tree.topLevelItemCount())):
-                self.tree.topLevelItem(row).setExpanded(True)
         self._renderValidation()
 
     def _renderSequenceRow(self, seq):
@@ -472,6 +472,22 @@ class SequencesWidget(PostsToQtThread, QWidget):
             item.addChild(child)
 
         self.tree.addTopLevelItem(item)
+        item.setExpanded(id(seq) in self._opened)
+
+    def _onItemOpened(self, item):
+        self._noteOpen(item, True)
+
+    def _onItemClosed(self, item):
+        self._noteOpen(item, False)
+
+    def _noteOpen(self, item, is_open):
+        """Remember what the operator opened or closed. Rendering runs
+        under QSignalBlocker, so only their own clicks reach here."""
+        row = self.tree.indexOfTopLevelItem(item)
+        if not 0 <= row < len(self._sequences):
+            return                       # a field row, or mid-rebuild
+        seq_id = id(self._sequences[row])
+        self._opened.add(seq_id) if is_open else self._opened.discard(seq_id)
 
     def _onItemChanged(self, item, column):
         """An edit or a checkbox toggle: write it into the model, then

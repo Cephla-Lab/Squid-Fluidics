@@ -123,6 +123,28 @@ class TestExpansion:
         widget.duplicateSequence()
         assert self._opened(widget) == [1]
 
+    def test_an_open_row_follows_its_sequence_through_a_move(self, widget):
+        """Open state belongs to the sequence, not the position: move the
+        row you opened and it is still the one standing open."""
+        widget.setSequences([FLOW, TEMP])
+        widget.tree.topLevelItem(0).setExpanded(True)
+        widget.tree.setCurrentItem(widget.tree.topLevelItem(0))
+        widget.moveSequenceDown()
+        assert [s["type"] for s in widget._sequences] == \
+            ["set_temperature", "flow_reagent"]
+        assert self._opened(widget) == [1], \
+            "the open row stayed at the index instead of following the move"
+
+    def test_a_removed_sequence_takes_its_open_state_with_it(self, widget):
+        """Its identity must not linger: a later sequence allocated at the
+        same address would otherwise render open for no reason."""
+        widget.setSequences([FLOW, TEMP])
+        widget.tree.topLevelItem(1).setExpanded(True)
+        widget.tree.setCurrentItem(widget.tree.topLevelItem(1))
+        widget.removeSequence()
+        assert self._opened(widget) == []
+        assert widget._opened == set(), "a dead sequence's id was kept"
+
     def test_a_row_the_operator_closed_stays_closed(self, widget):
         widget.setSequences([FLOW, TEMP])
         widget.tree.topLevelItem(0).setExpanded(True)
