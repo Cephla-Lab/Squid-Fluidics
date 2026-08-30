@@ -16,7 +16,8 @@ class TestAtomicWrite:
             f.write("all of it")
             assert not path.exists(), "the name must not appear early"
         assert path.read_text() == "all of it"
-        assert os.listdir(tmp_path) == ["out.txt"], "no temp left behind"
+        assert [p.name for p in tmp_path.iterdir()] == ["out.txt"], \
+            "no temp left behind"
 
     def test_a_failure_leaves_the_standing_file_untouched(self, tmp_path):
         path = tmp_path / "out.txt"
@@ -26,7 +27,8 @@ class TestAtomicWrite:
                 f.write("half of")
                 raise OSError("disk full")
         assert path.read_text() == "the earlier content"
-        assert os.listdir(tmp_path) == ["out.txt"], "no temp left behind"
+        assert [p.name for p in tmp_path.iterdir()] == ["out.txt"], \
+            "no temp left behind"
 
     def test_a_failure_during_mode_setup_leaks_no_descriptor(
             self, tmp_path, monkeypatch):
@@ -40,13 +42,13 @@ class TestAtomicWrite:
             raise PermissionError("chmod refused")
 
         monkeypatch.setattr(files.os, "fchmod", refuses)
-        open_fds = os.listdir("/proc/self/fd")
-        for _ in range(3):
-            with pytest.raises(PermissionError):
-                with atomic_write(tmp_path / "out.txt"):
-                    pass
-        assert os.listdir("/proc/self/fd") == open_fds, "descriptors leaked"
-        assert list(tmp_path.iterdir()) == [], "no temp left behind"
+        open_fds = sorted(os.listdir("/proc/self/fd"))
+        with pytest.raises(PermissionError):
+            with atomic_write(tmp_path / "out.txt"):
+                pass
+        assert sorted(os.listdir("/proc/self/fd")) == open_fds, \
+            "the temp's descriptor was stranded"
+        assert [p.name for p in tmp_path.iterdir()] == [], "no temp left behind"
 
     def test_a_replaced_file_keeps_its_permissions(self, tmp_path):
         path = tmp_path / "config.yaml"

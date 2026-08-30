@@ -1,11 +1,13 @@
 """One way to replace a file: whole or not at all.
 
-Everything this package writes for keeps -- the hand-maintained config,
+Every file this package rewrites in place -- the hand-maintained config,
 a sequence file, a run's report -- goes through atomic_write, so a dump
 that dies midway (full disk, a crash, a bad value) can neither truncate
 what stood at the path nor leave half a file under its name. The crash
 covered here is the process's own; surviving a power cut mid-write is
-the filesystem's business, not this module's.
+the filesystem's business, not this module's. The measurement and
+recording CSVs are streams held open as they fill, not replacements,
+and are none of this module's business either.
 """
 
 import os
@@ -20,6 +22,16 @@ from pathlib import Path
 # report is written off-thread while the Qt thread may be saving a config.
 _UMASK = os.umask(0)
 os.umask(_UMASK)
+
+
+def _mode_for(path):
+    """The mode a plain open() would leave at `path`: the file's own if
+    one stands there, else what the umask allows -- mkstemp's private
+    0600 must not stick to a config or a report the operator reads."""
+    try:
+        return os.stat(path).st_mode & 0o777
+    except FileNotFoundError:
+        return 0o666 & ~_UMASK
 
 
 @contextmanager
@@ -41,11 +53,7 @@ def atomic_write(path, encoding="utf-8"):
         # anywhere below -- the mode setup included -- must close it, not
         # strand it open while the name is unlinked.
         with open(fd, "w", encoding=encoding) as f:
-            try:
-                mode = os.stat(path).st_mode & 0o777
-            except FileNotFoundError:
-                mode = 0o666 & ~_UMASK
-            os.fchmod(f.fileno(), mode)
+            os.fchmod(f.fileno(), _mode_for(path))
             yield f
         os.replace(tmp, path)
     except BaseException:

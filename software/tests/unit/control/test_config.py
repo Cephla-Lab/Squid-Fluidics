@@ -435,11 +435,9 @@ class TestSaveConfig:
             save_config(FluidicsConfig(**_make_config_dict()))
 
     def test_a_save_that_dies_midway_leaves_the_rigs_file_whole(
-            self, rig_yaml, monkeypatch):
+            self, rig_yaml, tmp_path, monkeypatch):
         """The per-rig config is hand-maintained; a dump that fails --
         full disk, a crash -- must not truncate it or strand a temp."""
-        from pathlib import Path
-
         import ruamel.yaml
         config = load_config(rig_yaml)
         config.reagent_selection.selector_valves.name_mapping = {"port_1": "DAPI"}
@@ -453,8 +451,8 @@ class TestSaveConfig:
         with pytest.raises(OSError, match="disk full"):
             save_config(config, rig_yaml)
         assert open(rig_yaml).read() == before
-        assert [p.name for p in Path(rig_yaml).parent.iterdir()] == \
-            ["config.yaml"], "no wreckage beside the rig's file"
+        assert [p.name for p in tmp_path.iterdir()] == ["config.yaml"], \
+            "no wreckage beside the rig's file"
 
     def test_a_json_path_writes_the_sibling_yaml_and_leaves_the_json(
             self, tmp_path, fixtures_dir):

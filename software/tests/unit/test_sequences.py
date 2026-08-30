@@ -183,7 +183,7 @@ class TestSaveSequences:
         with pytest.raises(OSError, match="disk full"):
             save_sequences_yaml(original, path)
         assert open(path).read() == before
-        assert sorted(p.name for p in tmp_path.iterdir()) == ["out.yaml"], \
+        assert [p.name for p in tmp_path.iterdir()] == ["out.yaml"], \
             "no temp wreckage"
 
 
