@@ -434,6 +434,28 @@ class TestSaveConfig:
         with pytest.raises(ValueError, match="not loaded from a file"):
             save_config(FluidicsConfig(**_make_config_dict()))
 
+    def test_a_save_that_dies_midway_leaves_the_rigs_file_whole(
+            self, rig_yaml, monkeypatch):
+        """The per-rig config is hand-maintained; a dump that fails --
+        full disk, a crash -- must not truncate it or strand a temp."""
+        import glob
+        from pathlib import Path
+
+        import ruamel.yaml
+        config = load_config(rig_yaml)
+        config.reagent_selection.selector_valves.name_mapping = {"port_1": "DAPI"}
+        before = open(rig_yaml).read()
+
+        def dies_midway(self, document, stream):
+            stream.write("application: half a")
+            raise OSError("disk full")
+
+        monkeypatch.setattr(ruamel.yaml.YAML, "dump", dies_midway)
+        with pytest.raises(OSError, match="disk full"):
+            save_config(config, rig_yaml)
+        assert open(rig_yaml).read() == before
+        assert glob.glob(str(Path(rig_yaml).parent / "*.part")) == []
+
     def test_a_json_path_writes_the_sibling_yaml_and_leaves_the_json(
             self, tmp_path, fixtures_dir):
         """Loading a legacy JSON already wrote and used the sibling YAML;

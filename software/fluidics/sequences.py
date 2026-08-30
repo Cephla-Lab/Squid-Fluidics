@@ -9,6 +9,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Discriminator, Field, TypeAdapter
 
 from .control.config import available_port_count
+from .files import atomic_write
 
 
 # --- Pydantic Models ---
@@ -222,7 +223,7 @@ def save_sequences_yaml(sequences: list[dict], path: str) -> None:
         ordered.update(d)
         reordered.append(ordered)
 
-    with open(path, "w") as f:
+    with atomic_write(path) as f:
         yaml.safe_dump({"sequences": reordered}, f, default_flow_style=False, sort_keys=False)
 
 

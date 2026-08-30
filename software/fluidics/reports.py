@@ -37,13 +37,12 @@ accepted until run identity is ever shared across processes.
 
 import json
 import logging
-import os
-import tempfile
 import threading
 import time
 from pathlib import Path
 
 from .events import RunEnded, RunStarted, plan_seconds
+from .files import atomic_write
 from .run_log import get_default_log_directory
 
 _logger = logging.getLogger(__name__)
@@ -170,22 +169,12 @@ class RunReports:
 
     def _write(self, report):
         path = self.path_for(report["run_id"])
-        directory = path.parent
         try:
-            directory.mkdir(parents=True, exist_ok=True)
-            # Dump to a sibling temp file and swap it in whole: a write
-            # that dies midway must not leave a truncated record at the
-            # destination -- or destroy one already there.
-            fd, tmp = tempfile.mkstemp(dir=directory, suffix=".part")
-            try:
-                with open(fd, "w", encoding="utf-8") as f:
-                    # default=str: a report is a record -- an unforeseen
-                    # value lands as its string, never costs the file.
-                    json.dump(report, f, indent=2, default=str)
-            except BaseException:
-                os.unlink(tmp)
-                raise
-            os.replace(tmp, path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with atomic_write(path) as f:
+                # default=str: a report is a record -- an unforeseen
+                # value lands as its string, never costs the file.
+                json.dump(report, f, indent=2, default=str)
             _logger.info("Run report: %s", path)
         except OSError:
             _logger.exception("The run report %s could not be written.", path)
