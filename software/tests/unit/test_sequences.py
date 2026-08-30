@@ -166,6 +166,26 @@ class TestSaveSequences:
         assert "include" not in seq
         assert "incubation_time" not in seq
 
+    def test_a_save_that_dies_midway_leaves_the_old_file_whole(
+            self, tmp_path, monkeypatch):
+        """The operator's sequence file must survive a dump that fails."""
+        original = [{"type": "flow_reagent", "fluidic_port": 1,
+                     "flow_rate": 1000, "volume": 500}]
+        path = str(tmp_path / "out.yaml")
+        save_sequences_yaml(original, path)
+        before = open(path).read()
+
+        def dies_midway(data, stream, **kwargs):
+            stream.write("sequences: half a")
+            raise OSError("disk full")
+
+        monkeypatch.setattr("fluidics.sequences.yaml.safe_dump", dies_midway)
+        with pytest.raises(OSError, match="disk full"):
+            save_sequences_yaml(original, path)
+        assert open(path).read() == before
+        assert [p.name for p in tmp_path.iterdir()] == ["out.yaml"], \
+            "no temp wreckage"
+
 
 class TestSequenceUtilities:
     def test_get_included_sequences(self):

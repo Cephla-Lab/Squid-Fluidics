@@ -9,12 +9,13 @@ with a .yaml extension replacing .json.
 """
 
 import json
-import sys
 import os
+import sys
 
 import yaml
 
 from fluidics.control.config import convert_legacy_config
+from fluidics.files import atomic_write
 
 
 def convert_json_to_yaml(json_path, yaml_path=None):
@@ -30,7 +31,7 @@ def convert_json_to_yaml(json_path, yaml_path=None):
 
     new = convert_legacy_config(old)
 
-    with open(yaml_path, 'w') as f:
+    with atomic_write(yaml_path) as f:
         yaml.dump(new, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
     return yaml_path
