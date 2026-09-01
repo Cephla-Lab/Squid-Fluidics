@@ -22,9 +22,7 @@ from fluidics.subscribers import Subscribers
 
 from .test_gui_helpers import FakeSession
 
-FLOW = {"type": "flow_reagent", "fluidic_port": 1, "flow_rate": 500,
-        "volume": 500}
-TEMP = {"type": "set_temperature", "temperature": 37.0}
+from ..conftest import FLOW, TEMP
 
 
 @pytest.fixture

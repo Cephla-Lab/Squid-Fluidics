@@ -9,11 +9,10 @@ headless embedder) with no GUI in the process.
 
 import pytest
 
-from fluidics.sequence_list import SequenceList, type_label
+from fluidics.sequence_list import SequenceList
+from fluidics.sequences import type_label
 
-FLOW = {"type": "flow_reagent", "fluidic_port": 1, "flow_rate": 500,
-        "volume": 500}
-TEMP = {"type": "set_temperature", "temperature": 37.0}
+from ..conftest import FLOW, TEMP, in_a_fresh_interpreter
 
 
 def flow_cell(*sequences):
@@ -169,17 +168,11 @@ class TestTheNameSentinel:
 
 
 def test_the_model_needs_no_qt():
-    """The extraction's whole point, pinned: importing the model must not
-    drag Qt into the process."""
-    import subprocess
-    import sys
-    code = ("import sys; import fluidics.sequence_list as m; "
-            "m.SequenceList('Flow Cell', 24, [{'type': 'priming', "
-            "'fluidic_port': 1, 'flow_rate': 1, 'volume': 1}]).validated(); "
-            "print([n for n in sys.modules if 'qt' in n.lower() "
-            "or 'PyQt' in n])")
-    out = subprocess.run([sys.executable, "-c", code], capture_output=True,
-                         text=True, cwd=str(__import__("pathlib").Path(
-                             __file__).resolve().parents[2]))
-    assert out.returncode == 0, out.stderr
-    assert out.stdout.strip() == "[]", f"Qt was imported: {out.stdout}"
+    """The extraction's whole point, pinned: building and validating a
+    list must not drag Qt into the process."""
+    loaded = in_a_fresh_interpreter(
+        "import sys; import fluidics.sequence_list as m; "
+        "m.SequenceList('Flow Cell', 24, [{'type': 'priming', "
+        "'fluidic_port': 1, 'flow_rate': 1, 'volume': 1}]).validated(); "
+        "print([n for n in sys.modules if 'qt' in n.lower() or 'PyQt' in n])")
+    assert loaded == "[]", f"Qt was imported: {loaded}"

@@ -37,12 +37,13 @@ from fluidics.events import RunEnded, RunStarted, SequenceCompleted, SequenceSta
 from fluidics.files import atomic_write
 from fluidics.qt.support import GuiLogHandler, PostsToQtThread, _ask_yes_no, _hms, subscribe_until_detached
 from fluidics.run_log import LOGGER_NAME
-from fluidics.sequence_list import SequenceList, type_label
+from fluidics.sequence_list import SequenceList
 from fluidics.sequences import (
-    SEQUENCE_TYPE_LABELS,
     get_fields_for_type,
+    label_for_type,
     load_sequences,
     save_sequences_yaml,
+    type_label,
     types_for_application,
     validate_sequences,
 )
@@ -72,7 +73,7 @@ class AddSequenceDialog(QDialog):
         self.typeCombo = QComboBox()
         available_types = types_for_application(self.application)
         for seq_type in available_types:
-            self.typeCombo.addItem(SEQUENCE_TYPE_LABELS.get(seq_type, seq_type), seq_type)
+            self.typeCombo.addItem(label_for_type(seq_type), seq_type)
         type_layout.addWidget(self.typeCombo)
         layout.addLayout(type_layout)
 

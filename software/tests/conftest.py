@@ -22,6 +22,13 @@ def qapp():
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
+# The two sequences the editor suites are built from: one fluidic row with
+# every port field, one that has none.
+FLOW = {"type": "flow_reagent", "fluidic_port": 1, "flow_rate": 500,
+        "volume": 500}
+TEMP = {"type": "set_temperature", "temperature": 37.0}
+
+
 @pytest.fixture
 def fixtures_dir():
     return FIXTURES_DIR
@@ -129,6 +136,18 @@ def moved_ul(sp, kind):
     every executed chain -- the figure a paused-and-resumed operation has to
     match against an uninterrupted one."""
     return sum(op[2] for op in sp.executed_ops if op[0] == kind)
+
+
+def in_a_fresh_interpreter(code):
+    """Run `code` in a new interpreter under software/ and return its
+    stdout. For the import-contract tests: this session has gui (and so
+    Qt) loaded already, which is exactly what they must not rely on."""
+    import subprocess
+    import sys
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                         text=True, cwd=str(Path(__file__).resolve().parent.parent))
+    assert out.returncode == 0, out.stderr
+    return out.stdout.strip()
 
 
 def hears(channel, event_type, key=lambda event: event):

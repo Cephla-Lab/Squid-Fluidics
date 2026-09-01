@@ -20,16 +20,8 @@ Two rules the list owns rather than any view:
   label into the file.
 """
 
-from pydantic import ValidationError
-
-from .sequences import (SEQUENCE_TYPE_LABELS, SequenceListAdapter,
-                        sequence_port_problems, sequence_type_problem)
-
-
-def type_label(seq):
-    """How a row titles itself when it carries no name of its own."""
-    seq_type = seq.get("type", "")
-    return SEQUENCE_TYPE_LABELS.get(seq_type, seq_type)
+from .sequences import (SequenceListAdapter, is_included, sequence_problem,
+                        type_label)
 
 
 class SequenceList:
@@ -51,11 +43,7 @@ class SequenceList:
     def __getitem__(self, row):
         return self._rows[row]
 
-    @staticmethod
-    def is_included(seq):
-        """The include field, defaulting on -- the one spelling of what the
-        checkbox means."""
-        return seq.get("include", True)
+    is_included = staticmethod(is_included)     # what a run takes, one rule
 
     def included_rows(self):
         """Rows a run takes, in order."""
@@ -154,30 +142,9 @@ class SequenceList:
             self._validate_row(row)
 
     def _validate_row(self, row):
-        problem = self._row_problem(self._rows[row])
+        problem = sequence_problem(self._rows[row], self.application,
+                                   self.port_limit)
         if problem is None:
             self._problems.pop(row, None)
         else:
             self._problems[row] = problem
-
-    def _row_problem(self, seq):
-        """A pure question: the row is never rewritten -- it holds what the
-        operator typed; the coercion happens on a copy here, and for real
-        in `validated`."""
-        # The type first: a wrong-application row is also union-valid, and
-        # for an unknown type this message beats the union's tag complaint.
-        type_problem = sequence_type_problem(seq, self.application)
-        if type_problem is not None:
-            return type_problem
-        try:
-            validated = SequenceListAdapter.validate_python([seq])
-        except ValidationError as e:
-            first = e.errors()[0]
-            field = ".".join(str(part) for part in first["loc"][2:]) or "sequence"
-            return f"{field}: {first['msg']}"
-        problems = sequence_port_problems(validated[0].model_dump(),
-                                          self.port_limit)
-        if problems:
-            return ("; ".join(problems)
-                    + f": this configuration has ports 1..{self.port_limit}")
-        return None

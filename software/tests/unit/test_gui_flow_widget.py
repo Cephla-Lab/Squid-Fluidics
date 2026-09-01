@@ -31,6 +31,7 @@ from qtpy.QtWidgets import QApplication
 from fluidics.control.flow_sensor import FlowSensorSimulation
 from fluidics.qt.sensor_plots import FlowSensorWidget
 
+from ..conftest import in_a_fresh_interpreter
 from .test_gui_helpers import (RecordingWriter, deliver_posted_events,
                                make_flow_fault)
 
@@ -125,18 +126,11 @@ def test_a_destroyed_widget_leaves_the_sensor_no_subscribers(qapp):
 
 def test_the_widgets_import_without_the_standalone_app():
     """Squid imports these modules directly. gui.py must not be on the
-    path to them -- checked in a fresh interpreter, since this suite has
-    gui imported already."""
-    import pathlib
-    import subprocess
-    import sys
-    code = ("import sys, fluidics.qt.sensor_plots, fluidics.qt.manual_control, "
-            "fluidics.qt.sequence_editor; print('gui' in sys.modules)")
-    out = subprocess.run([sys.executable, "-c", code], capture_output=True,
-                         text=True,
-                         cwd=str(pathlib.Path(__file__).resolve().parents[2]))
-    assert out.returncode == 0, out.stderr
-    assert out.stdout.strip() == "False", "the widgets dragged gui.py in"
+    path to them."""
+    dragged_in = in_a_fresh_interpreter(
+        "import sys, fluidics.qt.sensor_plots, fluidics.qt.manual_control, "
+        "fluidics.qt.sequence_editor; print('gui' in sys.modules)")
+    assert dragged_in == "False", "the widgets dragged gui.py in"
 
 
 def test_without_a_recording_a_fault_is_dropped_quietly(qapp):
