@@ -15,6 +15,7 @@ import pytest
 import shutil
 
 import gui
+import fluidics.qt.manual_control as manual_control
 
 
 def _bind(name, stub, cls=None):
@@ -997,7 +998,7 @@ class TestPortNames:
             def exec_(self):
                 return gui.QDialog.Accepted
 
-        monkeypatch.setattr(gui, "PortNamesDialog", FakeDialog)
+        monkeypatch.setattr(manual_control, "PortNamesDialog", FakeDialog)
         refreshed = []
         stub = SimpleNamespace(session=FakeSession(), config=config,
                                _refreshPortNames=lambda: refreshed.append(True))
@@ -1014,7 +1015,7 @@ class TestPortNames:
         monkeypatch.setattr(gui.QMessageBox, "warning",
                             lambda parent, title, text: warned.append(title))
         constructed = []
-        monkeypatch.setattr(gui, "PortNamesDialog",
+        monkeypatch.setattr(manual_control, "PortNamesDialog",
                             lambda *args: constructed.append(True))
         stub = SimpleNamespace(session=FakeSession(kind="manual"))
         gui.ManualControlWidget.editPortNames(stub)
@@ -1173,3 +1174,30 @@ class TestStaleStateNone:
         stub._renderRunControls = lambda: None
         gui.SequencesWidget._handle_state(stub)
         assert stopped == [True]
+
+
+class TestDetachOnDestroy:
+    """The embedded widgets must remove exactly the callbacks they registered:
+    Subscribers.unsubscribe deregisters by identity, and a fresh bound-method
+    access is a different object every time."""
+
+    def test_subscribe_until_detached_removes_exactly_what_it_registered(self):
+        from fluidics.qt.support import subscribe_until_detached
+
+        feeds = [Subscribers("warnings"), Subscribers("state"), Subscribers("events")]
+        callbacks = [(lambda *a: None), (lambda *a: None), (lambda *a: None)]
+        detach = subscribe_until_detached(*zip(feeds, callbacks))
+        for feed, callback in zip(feeds, callbacks):
+            assert feed._callbacks == [callback]
+        detach()
+        for feed in feeds:
+            assert feed._callbacks == []
+        detach()  # idempotent, like Subscribers.unsubscribe itself
+
+    def test_widgets_connect_the_detach_to_destroyed(self):
+        import inspect
+        from fluidics.qt import manual_control, sequence_editor
+
+        for cls in (sequence_editor.SequencesWidget, manual_control.ManualControlWidget):
+            src = inspect.getsource(cls.__init__)
+            assert "subscribe_until_detached(" in src and "self.destroyed.connect(detach)" in src

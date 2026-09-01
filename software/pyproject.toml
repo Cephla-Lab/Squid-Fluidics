@@ -9,9 +9,7 @@ version = "2.0.0"
 description = "Control software for the Fluidics v2 liquid-handling system (Squid)"
 requires-python = ">=3.10"
 dependencies = [
-    "PyQt5>=5.15",
     "cobs",
-    "matplotlib",
     "numpy",
     "pandas",
     "platformdirs",
@@ -22,11 +20,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest"]
+gui = ["PyQt5>=5.15", "qtpy", "matplotlib"]
+# The unit suite imports the gui modules, so [test] pulls [gui] along
+# (self-referential extras resolve against the local project on every pip
+# that can install it editable at all).
+test = ["pytest", "squid-fluidics[gui]"]
 
-# Only the fluidics package is importable; gui.py and run_sequences.py stay
-# top-level entry scripts run from this directory (console-script entry
-# points are a separate, later change -- see the refactor roadmap).
+# The fluidics package (fluidics.qt included, which needs the `gui` extra) is
+# importable; gui.py and run_sequences.py stay top-level entry scripts run from
+# this directory (console-script entry points are a later change).
 [tool.setuptools.packages.find]
 include = ["fluidics*"]
 
