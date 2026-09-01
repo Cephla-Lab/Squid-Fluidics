@@ -6,17 +6,21 @@ import csv
 import logging
 import os
 import re
+import time
 from datetime import datetime
 
 from qtpy.QtWidgets import (QWidget, QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
                             QPushButton, QSpinBox, QComboBox, QFileDialog, QMessageBox)
 
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
+# backend_qtagg, not backend_qt5agg: the qt5 spelling pins the Qt5
+# binding (and forces it outright on matplotlib >= 3.6), which is the
+# two-bindings-in-one-process crash qtpy is here to avoid.
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 from matplotlib.ticker import FuncFormatter
 
 from fluidics.qt.support import PostsToQtThread, subscribe_until_detached
-from fluidics.sensor_recorder import SensorSeries
+from fluidics.sensor_recorder import _FLUSH_INTERVAL_SECONDS, SensorSeries
 
 _logger = logging.getLogger("fluidics.gui")
 
@@ -56,6 +60,11 @@ class TimeSeriesPlotWidget(PostsToQtThread, QWidget):
         self.last_update = 0
         self.file = None
         self.writer = None
+        self._flushed_at = 0.0
+        # A recording outlives nothing: an embedded widget can be destroyed
+        # mid-recording, and close_recordings() only runs when the
+        # standalone window closes -- the buffered tail would never land.
+        self.destroyed.connect(lambda: self.close_recording())
 
     # --- subclass hooks ---
 
@@ -162,14 +171,17 @@ class TimeSeriesPlotWidget(PostsToQtThread, QWidget):
             if not path:
                 return
             try:
-                self.file = open(path, "w", newline="")
+                # utf-8, not the locale's: a fault row carries the sensor's
+                # name and the fault's own text (micro signs, dashes).
+                self.file = open(path, "w", newline="", encoding="utf-8")
             except OSError as e:
                 QMessageBox.critical(self, "Recording Not Started",
                                      f"Could not create {path}:\n{e}")
                 return
             TimeSeriesPlotWidget._last_record_dir = os.path.dirname(path)
             self.writer = csv.writer(self.file)
-            self.writer.writerow(self._record_header())
+            self._flushed_at = 0.0          # the header flushes immediately
+            self._write_row(self._record_header())
             self.record_btn.setText("Stop Recording")
         else:
             self.record_btn.setText("Start Recording")
@@ -177,6 +189,19 @@ class TimeSeriesPlotWidget(PostsToQtThread, QWidget):
             if saved_path:
                 QMessageBox.information(self, "Recording Saved",
                                         f"Recording saved to:\n{saved_path}")
+
+    def _write_row(self, row):
+        """One row of the recording, flushed on a cadence rather than per
+        row -- a flow sensor writes ~17 a second, and what a crash costs
+        should be bounded all the same. The same bound SensorRecorder
+        keeps, from the same constant."""
+        if self.writer is None:
+            return
+        self.writer.writerow(row)
+        now = time.monotonic()
+        if self.file is not None and now - self._flushed_at >= _FLUSH_INTERVAL_SECONDS:
+            self.file.flush()
+            self._flushed_at = now
 
     def close_recording(self):
         """Close the recording if one is open; returns its path, else None."""
@@ -275,8 +300,7 @@ class TemperatureChannelWidget(TimeSeriesPlotWidget):
         target = self.controller.target_temperatures[self.channel - 1]
         self.actual.append(temp, current_time)
         self.targets.append(target, current_time)
-        if self.writer is not None:
-            self.writer.writerow([datetime.fromtimestamp(current_time), temp, target])
+        self._write_row([datetime.fromtimestamp(current_time), temp, target])
         self._refresh_plot()
         self.last_update = current_time
 
@@ -449,18 +473,16 @@ class FlowSensorWidget(TimeSeriesPlotWidget):
         # exist. Its own row rather than a mark on the nearest reading, so the
         # verdict carries the tripping sample's timestamp even if the reading
         # row it belongs to was written a queue-slot earlier.
-        if self.writer is not None:
-            self.writer.writerow([datetime.fromtimestamp(timestamp), "",
-                                  f"{mode}: {fault}"])
+        self._write_row([datetime.fromtimestamp(timestamp), "",
+                         f"{mode}: {fault}"])
 
     def _on_reading(self, flow, current_time):
         # Write every sample to CSV regardless of the plot's query interval:
         # interval_input bottoms out at 1 Hz, which is roughly one sample in
         # every 17 at the 60 ms packet cadence and would erase anything the
         # recording is actually meant to catch (e.g. a ~180 ms dropout).
-        if self.writer is not None:
-            self.writer.writerow([datetime.fromtimestamp(current_time),
-                                  "" if flow is None else f"{flow:.2f}", ""])
+        self._write_row([datetime.fromtimestamp(current_time),
+                         "" if flow is None else f"{flow:.2f}", ""])
 
         if current_time - self.last_update < self.query_interval:
             return

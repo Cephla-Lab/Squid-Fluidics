@@ -201,12 +201,16 @@ class TestRecordingSaveDialog:
             self.record_btn = Button("Start Recording")
             self.file = None
             self.writer = None
+            self._flushed_at = 0.0
 
         def _record_filename(self):
             return "flow_test_20260819_000000.csv"
 
         def _record_header(self):
             return ["Time", "Flow Rate (uL/min)"]
+
+        def _write_row(self, row):
+            return gui.TimeSeriesPlotWidget._write_row(self, row)
 
         def close_recording(self):
             return gui.TimeSeriesPlotWidget.close_recording(self)
@@ -376,13 +380,17 @@ class TestFlowRecordingRows:
     """
 
     def stub(self, writer="unset"):
-        return SimpleNamespace(
+        stub = SimpleNamespace(
             writer=RecordingWriter() if writer == "unset" else writer,
             # Park the throttle so _on_reading returns right after the CSV
             # write instead of running the plot path, which needs widgets.
             last_update=float("inf"),
             query_interval=1,
+            file=None,              # nothing to flush; the writer records
+            _flushed_at=0.0,
         )
+        stub._write_row = lambda row: gui.TimeSeriesPlotWidget._write_row(stub, row)
+        return stub
 
     def test_every_row_matches_the_header_width(self):
         stub = self.stub()
@@ -391,6 +399,30 @@ class TestFlowRecordingRows:
         header = gui.FlowSensorWidget._record_header(stub)
         assert header == ["Time", "Flow Rate (uL/min)", "Fault"]
         assert all(len(row) == len(header) for row in stub.writer.rows)
+
+    def test_rows_are_flushed_on_a_cadence_not_per_row(self, tmp_path,
+                                                        monkeypatch):
+        """A flow sensor writes ~17 rows a second; flushing each one is a
+        syscall per sample on the reader's thread. What a crash costs is
+        bounded by the interval instead -- the same bound the long-format
+        recorder keeps."""
+        import csv
+        import fluidics.qt.sensor_plots as sensor_plots
+        clock = iter([1000.0, 1000.5, 1002.0])
+        monkeypatch.setattr(sensor_plots.time, "monotonic", lambda: next(clock))
+        path = tmp_path / "rec.csv"
+        stub = self.stub(writer=None)
+        stub.file = open(path, "w", newline="", encoding="utf-8")
+        stub.writer = csv.writer(stub.file)
+        try:
+            stub._write_row(["a"])                  # 1000.0: due, flushes
+            assert path.read_text().splitlines() == ["a"]
+            stub._write_row(["b"])                  # 1000.5: too soon
+            assert path.read_text().splitlines() == ["a"], "flushed per row"
+            stub._write_row(["c"])                  # 1002.0: due again
+            assert path.read_text().splitlines() == ["a", "b", "c"]
+        finally:
+            stub.file.close()
 
     def test_a_reading_row_leaves_the_fault_field_empty(self):
         stub = self.stub()

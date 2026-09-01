@@ -81,6 +81,27 @@ def test_the_plot_draws_the_window_not_the_whole_buffer(qapp):
         sensor.close()
 
 
+def test_a_destroyed_widget_closes_its_recording(qapp, tmp_path):
+    """An embedded widget can be destroyed mid-recording -- the standalone
+    window's close_recordings() never runs for it -- and the buffered tail
+    would go with it."""
+    import csv
+    sensor = FlowSensorSimulation(index=1, name="syringe_draw")
+    widget = gui.FlowSensorWidget(sensor, draw_protection=True)
+    path = tmp_path / "rec.csv"
+    handle = open(path, "w", newline="", encoding="utf-8")
+    widget.file = handle
+    widget.writer = csv.writer(handle)
+    widget._write_row(["Time", "Flow Rate (uL/min)", "Fault"])
+    widget._write_row(["t", "500.00", ""])
+    widget.deleteLater()
+    gui.QApplication.sendPostedEvents(None, gui.QEvent.DeferredDelete)
+    sensor.close()
+    assert handle.closed, "the recording was left open"
+    assert len(path.read_text().strip().splitlines()) == 2, \
+        "the buffered tail never reached disk"
+
+
 def test_without_a_recording_a_fault_is_dropped_quietly(qapp):
     sensor = FlowSensorSimulation(index=1, name="syringe_draw")
     widget = gui.FlowSensorWidget(sensor, draw_protection=True)

@@ -12,9 +12,9 @@ from fluidics.run_log import LOGGER_NAME
 class WorkerEvent(QEvent):
     EVENT_TYPE = QEvent.Type(QEvent.registerEventType())
 
-    def __init__(self, callback_name, *args):
+    def __init__(self, callback, *args):
         super().__init__(WorkerEvent.EVENT_TYPE)
-        self.callback_name = callback_name
+        self.callback = callback
         self.args = args
 
 
@@ -24,11 +24,16 @@ class PostsToQtThread:
     base class, so event() here sees the WorkerEvent first."""
 
     def _post_event(self, method_name, *args):
-        QCoreApplication.postEvent(self, WorkerEvent(method_name, *args))
+        # Resolved here, on the caller's thread, rather than by name at
+        # delivery: a renamed handler then fails at the call site instead
+        # of as an AttributeError inside event() on the Qt thread, where
+        # PyQt turns an escaping exception into a process abort.
+        QCoreApplication.postEvent(
+            self, WorkerEvent(getattr(self, method_name), *args))
 
     def event(self, event):
         if event.type() == WorkerEvent.EVENT_TYPE:
-            getattr(self, event.callback_name)(*event.args)
+            event.callback(*event.args)
             return True
         return super().event(event)
 
