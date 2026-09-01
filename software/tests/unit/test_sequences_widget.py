@@ -72,6 +72,14 @@ class TestTheModelIsTheTruth:
         field_item(widget, 0, "incubation_time").setText(1, "5")
         assert widget.getSequences()[0]["incubation_time"] == 5.0
 
+    def test_an_unnamed_row_is_titled_by_its_type(self, widget):
+        """The tree asks the model how a row is titled rather than
+        composing the fallback itself, so the name it shows and the name
+        an edit compares against cannot drift."""
+        widget.setSequences([FLOW, dict(TEMP, name="settle")])
+        assert widget.tree.topLevelItem(0).text(0) == "Flow Reagent"
+        assert widget.tree.topLevelItem(1).text(0) == "settle"
+
     def test_a_name_edit_lands_and_an_emptied_name_reads_as_the_type(self, widget):
         widget.setSequences([FLOW])
         top = widget.tree.topLevelItem(0)
