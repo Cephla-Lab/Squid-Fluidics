@@ -140,6 +140,9 @@ class FlowSensor:
         """
         self._fault_subscribers.subscribe(callback)
 
+    def unsubscribe_faults(self, callback):
+        self._fault_subscribers.unsubscribe(callback)
+
     def notify_fault(self, mode, fault, timestamp):
         self._fault_subscribers.notify(mode, fault, timestamp)
 
@@ -216,6 +219,9 @@ class FlowSensorSimulation:
 
     def subscribe_faults(self, callback):
         self._fault_subscribers.subscribe(callback)
+
+    def unsubscribe_faults(self, callback):
+        self._fault_subscribers.unsubscribe(callback)
 
     def notify_fault(self, mode, fault, timestamp):
         self._fault_subscribers.notify(mode, fault, timestamp)
