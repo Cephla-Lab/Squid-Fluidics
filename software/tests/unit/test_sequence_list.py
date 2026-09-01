@@ -74,6 +74,23 @@ class TestTheVerdicts:
         model.set_field(0, "volume", "750")
         assert model.problem(0) is None and model.blocking_error() is None
 
+    def test_zero_is_a_value_not_an_empty_field(self):
+        """Only the editor's empty cell means "unset". 0 is a real
+        temperature and a real incubation time, and a caller driving the
+        model headlessly has no empty string to offer."""
+        model = SequenceList("Flow Cell", port_limit=24,
+                             sequences=[dict(TEMP, incubation_time=5)])
+        model.set_field(0, "temperature", 0)
+        model.set_field(0, "incubation_time", 0.0)
+        assert model[0]["temperature"] == 0 and model[0]["incubation_time"] == 0.0
+        assert model.problem(0) is None, model.problem(0)
+        assert model.validated()[0]["temperature"] == 0
+
+    def test_an_emptied_cell_reads_as_unset(self):
+        model = flow_cell(dict(FLOW, fill_tubing_with=3))
+        model.set_field(0, "fill_tubing_with", "")
+        assert model[0]["fill_tubing_with"] is None
+
     def test_the_row_holds_what_was_typed_not_what_validates(self):
         """A half-typed field must stay as typed -- rewriting it under the
         operator is how an edit becomes unfinishable."""

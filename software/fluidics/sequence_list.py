@@ -138,9 +138,12 @@ class SequenceList:
         return seq["name"] or type_label(seq)
 
     def set_field(self, row, field, raw):
-        """Put a typed value in as typed -- an empty field reads as None.
-        Coercion waits for `validated`; what is held is what was typed."""
-        self._rows[row][field] = raw if raw else None
+        """Put a value in as given -- the editor's empty cell, and only
+        that, reads as None. Coercion waits for `validated`; what is held
+        is what was typed. Emptiness is the empty string, not falsiness:
+        0 is a temperature and an incubation time, and a caller driving
+        this model headlessly must be able to set one."""
+        self._rows[row][field] = None if raw == "" else raw
         self._validate_row(row)
 
     # --- validation ---
