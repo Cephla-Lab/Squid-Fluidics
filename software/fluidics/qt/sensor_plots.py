@@ -25,6 +25,12 @@ from fluidics.sensor_recorder import _FLUSH_INTERVAL_SECONDS, SensorSeries
 _logger = logging.getLogger("fluidics.gui")
 
 
+# The longest window the operator can ask for, and so exactly how much
+# history a plot's series needs to hold: appends are throttled to at most
+# one a second, so a sample per second covers it.
+MAX_WINDOW_SECONDS = 3600
+
+
 def _safe_filename_part(text):
     """Reduce free-form text to something safe to embed in a filename."""
     cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", text).strip("._")
@@ -53,9 +59,9 @@ class TimeSeriesPlotWidget(PostsToQtThread, QWidget):
     # recordings land next to each other. Session-only, no persistence.
     _last_record_dir = os.getcwd()
 
-    def __init__(self, parent=None):
+    def __init__(self, min_interval, parent=None):
         super().__init__(parent)
-        self.query_interval = 1
+        self.query_interval = min_interval
         self.window_size = 60
         self.last_update = 0
         self.file = None
@@ -82,14 +88,12 @@ class TimeSeriesPlotWidget(PostsToQtThread, QWidget):
 
     # --- shared UI ---
 
-    def _build_plot_box(self, title, min_interval):
+    def _build_plot_box(self, title):
         """Build the plot group: interval/window controls, canvas, record button.
 
         Sets self.interval_input, self.window_input, self.canvas, and
         self.record_btn, and wires them to the shared handlers.
         """
-        self.query_interval = min_interval
-
         plot_box = QGroupBox(title)
         plot_layout = QVBoxLayout()
 
@@ -97,14 +101,14 @@ class TimeSeriesPlotWidget(PostsToQtThread, QWidget):
         pc_layout = QHBoxLayout(plot_controls)
         pc_layout.addWidget(QLabel("Query Interval:"))
         self.interval_input = QSpinBox()
-        self.interval_input.setMinimum(min_interval)
-        self.interval_input.setValue(min_interval)
+        self.interval_input.setMinimum(self.query_interval)
+        self.interval_input.setValue(self.query_interval)
         self.interval_input.setSuffix(" s")
         pc_layout.addWidget(self.interval_input)
         pc_layout.addWidget(QLabel("Window Size:"))
         self.window_input = QSpinBox()
         self.window_input.setMinimum(10)
-        self.window_input.setMaximum(3600)
+        self.window_input.setMaximum(MAX_WINDOW_SECONDS)
         self.window_input.setValue(self.window_size)
         self.window_input.setSuffix(" s")
         pc_layout.addWidget(self.window_input)
@@ -132,11 +136,12 @@ class TimeSeriesPlotWidget(PostsToQtThread, QWidget):
 
     # --- shared plotting ---
 
-    def _finalize_plot(self, ax, ylabel, title, current_time):
+    def _finalize_plot(self, ylabel, title, current_time):
         """Apply the shared axis treatment and draw, anchored at the newest
         sample. Series are windowed at read time (SensorSeries.window), not
         trimmed on arrival, so widening the window shows the history that is
         already held instead of only what arrives after the change."""
+        ax = self.canvas.axes
         ax.set_xlim([current_time - self.window_size, current_time])
         ax.set_xlabel("Seconds Ago")
         ax.set_ylabel(ylabel)
@@ -214,7 +219,7 @@ class TimeSeriesPlotWidget(PostsToQtThread, QWidget):
         return saved_path
 
 
-class SensorTabWidget(PostsToQtThread, QWidget):
+class SensorTabWidget(QWidget):
     """Container laying out one plot widget per channel or sensor.
 
     Qt delivers closeEvent only to top-level windows, so a tab embedded in a
@@ -236,14 +241,15 @@ class TemperatureChannelWidget(TimeSeriesPlotWidget):
     record toggle, query interval, window size."""
 
     def __init__(self, controller, channel, parent=None):
-        super().__init__(parent)
+        # Temperature moves slowly; polling faster than 2 s buys nothing.
+        super().__init__(min_interval=2, parent=parent)
         self.controller = controller
         self.channel = channel  # 1-based
 
-        # Appended in one statement pair, so the two carry the same
-        # timestamps and one window slices both.
-        self.actual = SensorSeries()
-        self.targets = SensorSeries()
+        # One series of (actual, target) pairs rather than two series kept
+        # in step: they are written together and drawn together, so the
+        # alignment is the data's shape and not a rule about appending.
+        self.readings = SensorSeries(maxlen=MAX_WINDOW_SECONDS)
 
         self._build_ui()
         self.temp_input.setText(f"{self.controller.target_temperatures[channel - 1]:.2f}")
@@ -278,8 +284,7 @@ class TemperatureChannelWidget(TimeSeriesPlotWidget):
         control_layout.addLayout(row)
         control.setLayout(control_layout)
 
-        # Temperature moves slowly; polling faster than 2 s buys nothing.
-        plot_box = self._build_plot_box(f"Channel {self.channel} Plot", min_interval=2)
+        plot_box = self._build_plot_box(f"Channel {self.channel} Plot")
 
         layout.addWidget(control)
         layout.addWidget(plot_box)
@@ -298,17 +303,17 @@ class TemperatureChannelWidget(TimeSeriesPlotWidget):
             return
         self.temp_label.setText(f"{temp:.1f}°C")
         target = self.controller.target_temperatures[self.channel - 1]
-        self.actual.append(temp, current_time)
-        self.targets.append(target, current_time)
+        self.readings.append((temp, target), current_time)
         self._write_row([datetime.fromtimestamp(current_time), temp, target])
         self._refresh_plot()
         self.last_update = current_time
 
     def _refresh_plot(self):
-        times, temps = self.actual.window(self.window_size)
-        _, targets = self.targets.window(self.window_size)
+        times, readings = self.readings.window(self.window_size)
         if not times:
             return
+        temps = [actual for actual, _ in readings]
+        targets = [target for _, target in readings]
         ax = self.canvas.axes
         ax.clear()
         ax.plot(times, temps, "b-", label="Actual")
@@ -317,7 +322,7 @@ class TemperatureChannelWidget(TimeSeriesPlotWidget):
         if limits:
             ax.set_ylim(list(limits))
         ax.legend()
-        self._finalize_plot(ax, "Temperature (°C)",
+        self._finalize_plot("Temperature (°C)",
                             f"Channel {self.channel} Temperature", times[-1])
 
     def _set_clicked(self):
@@ -345,7 +350,7 @@ class TemperatureChannelWidget(TimeSeriesPlotWidget):
                           "enable" if checked else "disable", self.channel, e)
         self._sync_output_button()
 
-class TemperatureControlWidget(SensorTabWidget):
+class TemperatureControlWidget(PostsToQtThread, SensorTabWidget):
     """Container that lays out one TemperatureChannelWidget per channel."""
 
     def __init__(self, controller):
@@ -381,23 +386,17 @@ class FlowSensorWidget(TimeSeriesPlotWidget):
     """One flow sensor's readout, plot, and CSV recording."""
 
     def __init__(self, sensor, draw_protection=True, parent=None):
-        super().__init__(parent)
+        super().__init__(min_interval=1, parent=parent)
         self.sensor = sensor
         self.draw_protection = draw_protection
 
-        self.flows = SensorSeries()
+        self.flows = SensorSeries(maxlen=MAX_WINDOW_SECONDS)
 
         self._build_ui()
-        # Detached on destroyed: unsubscribe removes by identity, so the exact
-        # bound callbacks are retained (an embedded widget must not outlive itself).
-        reading_cb, fault_cb = self._on_callback, self._on_fault_callback
-        sensor.subscribe(reading_cb)
-        sensor.subscribe_faults(fault_cb)
-
-        def detach():
-            sensor.unsubscribe(reading_cb)
-            sensor.unsubscribe_faults(fault_cb)
-
+        # Detached on destroyed, like every other widget here: an embedded
+        # one must not outlive itself on a channel the rig keeps publishing.
+        detach = subscribe_until_detached((sensor, self._on_callback),
+                                          (sensor.faults, self._on_fault_callback))
         self.destroyed.connect(detach)
 
     def _record_filename(self):
@@ -448,7 +447,7 @@ class FlowSensorWidget(TimeSeriesPlotWidget):
         readout_layout.addWidget(self.monitor_combo)
         readout.setLayout(readout_layout)
 
-        plot_box = self._build_plot_box("Plot", min_interval=1)
+        plot_box = self._build_plot_box("Plot")
 
         layout.addWidget(readout)
         layout.addWidget(plot_box)
@@ -512,7 +511,7 @@ class FlowSensorWidget(TimeSeriesPlotWidget):
         if limits:
             ax.set_ylim(list(limits))
 
-        self._finalize_plot(ax, "Flow Rate (µL/min)", self.sensor.name, times[-1])
+        self._finalize_plot("Flow Rate (µL/min)", self.sensor.name, times[-1])
 
 
 class FlowSensorControlWidget(SensorTabWidget):

@@ -4,7 +4,9 @@
 append, a GUI reads a window on its own clock. The standalone tabs' plots
 hold their series in these (`fluidics.qt.sensor_plots`), and so does
 `SensorRecorder`, so there is one implementation of "keep the last N
-samples and hand me the last M seconds".
+samples and hand me the last M seconds". One implementation, not one
+stream: a plot's series holds what survived its query-interval throttle,
+while a recorder's holds every sample it was handed.
 
 `SensorRecorder` adds a CSV in long format -- `time,channel,value,step` --
 for an application embedding these widgets (Squid's Fluidics display tab)
@@ -12,13 +14,12 @@ that wants every channel in one file, tagged with the protocol step that
 was running. The standalone tabs deliberately do NOT record through it:
 each plot writes its own wide CSV, whose columns are named for what they
 hold and whose flow recording carries the draw-protection fault column
-(`fluidics.qt.sensor_plots.TimeSeriesPlotWidget`). Two artifacts, because
+(`fluidics.qt.sensor_plots.FlowSensorWidget`). Two artifacts, because
 they answer to different readers; one buffer, because that part is the
 same. Neither raises on I/O -- a recording that fails stops and says so
 in the log rather than taking the run with it.
 """
 
-import bisect
 import csv
 import logging
 import threading
@@ -37,7 +38,16 @@ _FLUSH_INTERVAL_SECONDS = 1.0
 
 
 class SensorSeries:
-    """One channel's samples, newest last, capped at `maxlen`."""
+    """One channel's samples, newest last, capped at `maxlen`.
+
+    Timestamps are expected in order -- `window` walks back from the
+    newest and stops at the cutoff, so a caller handing them back out of
+    order gets a short slice rather than an error (which is also why the
+    recorder's flush deadline reads the monotonic clock, not these).
+    `maxlen` is the caller's to size: hold what you can actually ask for.
+    The default is 10 hours at 1 Hz, about 35 minutes at a flow sensor's
+    full rate.
+    """
 
     def __init__(self, maxlen=36000):
         self._t = deque(maxlen=maxlen)
@@ -50,13 +60,26 @@ class SensorSeries:
             self._v.append(value)
 
     def window(self, seconds=None):
-        """(times, values) for the last `seconds`, or everything held."""
+        """(times, values) for the last `seconds`, or everything held.
+
+        Walked from the newest back to the cutoff rather than copied whole
+        and sliced: the window is small and the buffer need not be, so the
+        cost is the answer's size instead of the history's."""
         with self._lock:
-            ts, vs = list(self._t), list(self._v)
-        if seconds is not None and ts:
-            start = bisect.bisect_left(ts, ts[-1] - seconds)  # appended in order
-            ts, vs = ts[start:], vs[start:]
-        return ts, vs
+            if seconds is None:
+                return list(self._t), list(self._v)
+            if not self._t:
+                return [], []
+            cutoff = self._t[-1] - seconds
+            times, values = [], []
+            for t, v in zip(reversed(self._t), reversed(self._v)):
+                if t < cutoff:
+                    break
+                times.append(t)
+                values.append(v)
+        times.reverse()
+        values.reverse()
+        return times, values
 
 
 class SensorRecorder:
@@ -99,6 +122,15 @@ class SensorRecorder:
                 _logger.warning("Sensor CSV write failed; stopping the "
                                 "recording: %s", e)
                 self.stop_recording()
+
+    def record_fault(self, name, mode, fault, t=None):
+        """A draw-protection trip, filed on its own channel beside the
+        sensor's readings. The recording is the only durable trace a
+        `warn` leaves -- the operator's notice is cleared at the next run
+        -- so a long-format recording has to carry it too, or the rig
+        embedding these widgets keeps a record that quietly omits the one
+        event worth keeping."""
+        self.record(f"{name}.fault", f"{mode}: {fault}", t)
 
     def start_recording(self, path):
         """Open `path` and write the header; True if the recording started."""

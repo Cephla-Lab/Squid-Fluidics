@@ -5,8 +5,11 @@ lines -- and the output button following the driver."""
 
 import pytest
 
-import gui
+from qtpy.QtCore import QEvent
+from qtpy.QtWidgets import QApplication
+
 from fluidics.control.temperature_controller import TCMControllerSimulation
+from fluidics.qt.sensor_plots import TemperatureControlWidget
 
 from .test_gui_helpers import RecordingWriter, deliver_posted_events
 
@@ -22,7 +25,7 @@ def channel_widget(qapp):
     what the test publishes.
     """
     controller = TCMControllerSimulation(channels=1)
-    widget = gui.TemperatureControlWidget(controller)
+    widget = TemperatureControlWidget(controller)
     assert controller._polling_started   # the constructor starts the publisher
     controller._terminate_polling = True
     controller._polling_thread.join(5)

@@ -22,8 +22,14 @@ from datetime import datetime
 import pytest
 
 # Qt's offscreen platform and the shared qapp fixture live in tests/conftest.
-import gui
+# Imported from the package, not through gui: these widgets are meant to be
+# usable without the standalone application, and a test that goes through
+# gui.py would not notice the day they stop being.
+from qtpy.QtCore import QEvent
+from qtpy.QtWidgets import QApplication
+
 from fluidics.control.flow_sensor import FlowSensorSimulation
+from fluidics.qt.sensor_plots import FlowSensorWidget
 
 from .test_gui_helpers import (RecordingWriter, deliver_posted_events,
                                make_flow_fault)
@@ -31,7 +37,7 @@ from .test_gui_helpers import (RecordingWriter, deliver_posted_events,
 
 def test_a_fault_published_on_the_sensor_lands_in_the_recording(qapp):
     sensor = FlowSensorSimulation(index=1, name="syringe_draw")
-    widget = gui.FlowSensorWidget(sensor, draw_protection=True)
+    widget = FlowSensorWidget(sensor, draw_protection=True)
     try:
         widget.writer = RecordingWriter()
         sensor.notify_fault("warn", make_flow_fault(), 100.06)
@@ -50,7 +56,7 @@ def test_a_fault_waits_for_the_qt_thread_rather_than_landing_inline(qapp):
     the fault on the Qt thread, so nothing touches the recording (or the
     canvas) from the thread that read the sample."""
     sensor = FlowSensorSimulation(index=1, name="syringe_draw")
-    widget = gui.FlowSensorWidget(sensor, draw_protection=True)
+    widget = FlowSensorWidget(sensor, draw_protection=True)
     try:
         widget.writer = RecordingWriter()
         sensor.notify_fault("warn", make_flow_fault(), 100.06)
@@ -66,7 +72,7 @@ def test_the_plot_draws_the_window_not_the_whole_buffer(qapp):
     """The series holds far more than the plot shows; what is drawn is the
     window the operator asked for, cut at read time."""
     sensor = FlowSensorSimulation(index=1, name="syringe_draw")
-    widget = gui.FlowSensorWidget(sensor, draw_protection=True)
+    widget = FlowSensorWidget(sensor, draw_protection=True)
     try:
         widget.window_size = 10
         for n in range(100):
@@ -87,7 +93,7 @@ def test_a_destroyed_widget_closes_its_recording(qapp, tmp_path):
     would go with it."""
     import csv
     sensor = FlowSensorSimulation(index=1, name="syringe_draw")
-    widget = gui.FlowSensorWidget(sensor, draw_protection=True)
+    widget = FlowSensorWidget(sensor, draw_protection=True)
     path = tmp_path / "rec.csv"
     handle = open(path, "w", newline="", encoding="utf-8")
     widget.file = handle
@@ -95,16 +101,47 @@ def test_a_destroyed_widget_closes_its_recording(qapp, tmp_path):
     widget._write_row(["Time", "Flow Rate (uL/min)", "Fault"])
     widget._write_row(["t", "500.00", ""])
     widget.deleteLater()
-    gui.QApplication.sendPostedEvents(None, gui.QEvent.DeferredDelete)
+    QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
     sensor.close()
     assert handle.closed, "the recording was left open"
     assert len(path.read_text().strip().splitlines()) == 2, \
         "the buffered tail never reached disk"
 
 
+def test_a_destroyed_widget_leaves_the_sensor_no_subscribers(qapp):
+    """The detach is what lets an embedded tab close while the rig runs
+    on: both channels must come back empty, not just the reading one."""
+    sensor = FlowSensorSimulation(index=1, name="syringe_draw")
+    try:
+        widget = FlowSensorWidget(sensor, draw_protection=True)
+        assert sensor._subscribers._callbacks and sensor.faults._callbacks
+        widget.deleteLater()
+        QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+        assert sensor._subscribers._callbacks == [], "readings still subscribed"
+        assert sensor.faults._callbacks == [], "faults still subscribed"
+    finally:
+        sensor.close()
+
+
+def test_the_widgets_import_without_the_standalone_app():
+    """Squid imports these modules directly. gui.py must not be on the
+    path to them -- checked in a fresh interpreter, since this suite has
+    gui imported already."""
+    import pathlib
+    import subprocess
+    import sys
+    code = ("import sys, fluidics.qt.sensor_plots, fluidics.qt.manual_control, "
+            "fluidics.qt.sequence_editor; print('gui' in sys.modules)")
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                         text=True,
+                         cwd=str(pathlib.Path(__file__).resolve().parents[2]))
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "False", "the widgets dragged gui.py in"
+
+
 def test_without_a_recording_a_fault_is_dropped_quietly(qapp):
     sensor = FlowSensorSimulation(index=1, name="syringe_draw")
-    widget = gui.FlowSensorWidget(sensor, draw_protection=True)
+    widget = FlowSensorWidget(sensor, draw_protection=True)
     try:
         sensor.notify_fault("stop", make_flow_fault(), 100.06)  # must not raise
         deliver_posted_events()

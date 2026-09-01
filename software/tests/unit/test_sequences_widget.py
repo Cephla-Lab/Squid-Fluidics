@@ -14,6 +14,8 @@ from types import SimpleNamespace
 import pytest
 
 import gui
+from qtpy.QtCore import Qt, QEvent
+from qtpy.QtWidgets import QApplication
 from fluidics.control.config import available_port_count
 from fluidics.sequences import SequenceListAdapter
 from fluidics.subscribers import Subscribers
@@ -40,7 +42,7 @@ def widget(qapp, flow_cell_config):
     # never destroyed keeps its subscriptions -- the log handler among
     # them -- attached for the rest of the session.
     w.deleteLater()
-    gui.QApplication.sendPostedEvents(None, gui.QEvent.DeferredDelete)
+    QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 
 
 def field_item(widget, row, fname):
@@ -48,7 +50,7 @@ def field_item(widget, row, fname):
     top = widget.tree.topLevelItem(row)
     for j in range(top.childCount()):
         child = top.child(j)
-        if child.data(0, gui.Qt.UserRole) == fname:
+        if child.data(0, Qt.UserRole) == fname:
             return child
     raise AssertionError(f"no rendered row for {fname!r}")
 
@@ -83,7 +85,7 @@ class TestTheModelIsTheTruth:
 
     def test_the_checkbox_is_the_include_field(self, widget):
         widget.setSequences([FLOW, TEMP])
-        widget.tree.topLevelItem(0).setCheckState(0, gui.Qt.Unchecked)
+        widget.tree.topLevelItem(0).setCheckState(0, Qt.Unchecked)
         assert widget._sequences[0]["include"] is False
         selected = widget.getSequences(selected_only=True)
         assert [s["type"] for s in selected] == ["set_temperature"]
@@ -177,7 +179,7 @@ class TestLogPane:
         w = gui.SequencesWidget(flow_cell_config, system)
         assert len(logger.handlers) == before + 1
         w.deleteLater()
-        gui.QApplication.sendPostedEvents(None, gui.QEvent.DeferredDelete)
+        QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
         assert len(logger.handlers) == before, "the log handler outlived the tab"
 
 
@@ -332,7 +334,7 @@ class TestLiveValidation:
         widget.setSequences([FLOW, TEMP])
         field_item(widget, 0, "volume").setText(1, "abc")
         assert not widget.runButton.isEnabled()
-        widget.tree.topLevelItem(0).setCheckState(0, gui.Qt.Unchecked)
+        widget.tree.topLevelItem(0).setCheckState(0, Qt.Unchecked)
         assert widget.runButton.isEnabled()
 
 

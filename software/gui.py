@@ -1,24 +1,12 @@
 import argparse
-import csv
 import logging
 import os
-import re
 import sys
-import time
-from datetime import datetime
 # Through qtpy, like fluidics.qt: two Qt bindings in one process is a crash,
 # and qtpy resolves the binding once for the whole application (QT_API).
-from qtpy.QtWidgets import (QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout,
-                             QHBoxLayout, QPushButton, QTreeWidget, QTreeWidgetItem,
-                             QHeaderView, QCheckBox, QFileDialog, QMessageBox, QComboBox,
-                             QSpinBox, QLabel, QProgressBar, QLineEdit,
-                             QTableWidget, QTableWidgetItem,
-                             QGroupBox, QGridLayout, QSizePolicy, QDialog, QFormLayout,
-                             QDoubleSpinBox, QDialogButtonBox, QScrollArea,
-                             QPlainTextEdit, QSplitter)
-from qtpy.QtCore import (Qt, QTimer, QEvent, QCoreApplication,
-                        QSettings, QSignalBlocker)
-from qtpy.QtGui import QColor, QBrush
+from qtpy.QtWidgets import (QApplication, QMainWindow, QTabWidget,
+                            QFileDialog, QMessageBox)
+from qtpy.QtCore import QSettings
 
 from serial import SerialException
 
@@ -32,36 +20,26 @@ from fluidics.devices import (
     ISSUE_TEMPERATURE_CONTROLLER,
 )
 from fluidics.system import FluidicsSystem
-from fluidics.events import (RunEnded, RunStarted, SequenceCompleted,
-                             SequenceStarted, plan_seconds, repeat_suffix)
-from fluidics.files import atomic_write
-from fluidics.run_log import (LOGGER_NAME, setup_uncaught_exception_logging,
-                             start_log_file)
-from fluidics.sequences import (
-    load_sequences, save_sequences_yaml,
-    get_fields_for_type, validate_sequences, sequence_port_problems,
-    sequence_type_problem, types_for_application,
-    SEQUENCE_TYPES, SEQUENCE_TYPE_LABELS,
-    SequenceListAdapter,
-)
-from pydantic import ValidationError
+from fluidics.events import RunEnded  # noqa: F401  (re-exported; see below)
+from fluidics.run_log import setup_uncaught_exception_logging, start_log_file
 
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
-from matplotlib.figure import Figure
-from matplotlib.ticker import FuncFormatter
 import warnings
 warnings.filterwarnings('ignore')
 
 _logger = logging.getLogger("fluidics.gui")
 
-# Widgets extracted into the importable fluidics.qt subpackage; re-exported for back-compat
-from fluidics.qt.support import WorkerEvent, PostsToQtThread, GuiLogHandler, _ask_yes_no, _hms  # noqa: E402
-from fluidics.qt.sequence_editor import AddSequenceDialog, SequencesWidget  # noqa: E402
-from fluidics.qt.manual_control import PortNamesDialog, ManualControlWidget  # noqa: E402
-from fluidics.qt.sensor_plots import (_safe_filename_part, MplCanvas, TimeSeriesPlotWidget,  # noqa: E402
-                                      SensorTabWidget, TemperatureChannelWidget, TemperatureControlWidget,
-                                      FlowSensorWidget, FlowSensorControlWidget)
+# The widgets live in the importable fluidics.qt subpackage; this module
+# arranges them. Names this file does not use itself are re-exported on
+# purpose -- `gui.SequencesWidget` and friends are what the tests and any
+# older script reach for -- so a linter calling them unused is wrong, and
+# removing them breaks the suite.
+from fluidics.qt.support import (WorkerEvent, PostsToQtThread, GuiLogHandler,  # noqa: E402,F401
+                                 _ask_yes_no, _hms)
+from fluidics.qt.sequence_editor import AddSequenceDialog, SequencesWidget  # noqa: E402,F401
+from fluidics.qt.manual_control import PortNamesDialog, ManualControlWidget  # noqa: E402,F401
+from fluidics.qt.sensor_plots import (_safe_filename_part, TimeSeriesPlotWidget,  # noqa: E402,F401
+                                      TemperatureControlWidget, FlowSensorWidget,
+                                      FlowSensorControlWidget)
 
 def pick_config(cli_path=None):
     """The rig config to run with, loaded: the --config path if given, else

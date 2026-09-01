@@ -17,6 +17,7 @@ import shutil
 
 import gui
 import fluidics.qt.manual_control as manual_control
+from qtpy.QtWidgets import QDialog
 
 
 def _bind(name, stub, cls=None):
@@ -1037,7 +1038,7 @@ class TestPortNames:
                 self.result_mapping = {"port_1": "DAPI"}
 
             def exec_(self):
-                return gui.QDialog.Accepted
+                return QDialog.Accepted
 
         monkeypatch.setattr(manual_control, "PortNamesDialog", FakeDialog)
         refreshed = []
@@ -1236,9 +1237,17 @@ class TestDetachOnDestroy:
         detach()  # idempotent, like Subscribers.unsubscribe itself
 
     def test_widgets_connect_the_detach_to_destroyed(self):
+        """Every widget that subscribes must hand it back. Source-read
+        rather than driven, for the three whose feeds need a whole system
+        to build; the sensor widgets pin the same invariant by behaviour
+        in test_gui_flow_widget/test_gui_temperature_widget."""
         import inspect
-        from fluidics.qt import manual_control, sequence_editor
+        from fluidics.qt import manual_control, sensor_plots, sequence_editor
 
-        for cls in (sequence_editor.SequencesWidget, manual_control.ManualControlWidget):
+        for cls in (sequence_editor.SequencesWidget,
+                    manual_control.ManualControlWidget,
+                    sensor_plots.FlowSensorWidget,
+                    sensor_plots.TemperatureControlWidget):
             src = inspect.getsource(cls.__init__)
-            assert "subscribe_until_detached(" in src and "self.destroyed.connect(detach)" in src
+            assert "subscribe_until_detached(" in src, cls.__name__
+            assert "self.destroyed.connect(detach)" in src, cls.__name__
