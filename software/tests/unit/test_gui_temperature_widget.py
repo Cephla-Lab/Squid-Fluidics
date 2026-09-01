@@ -68,24 +68,39 @@ def test_the_output_button_follows_the_driver_on_each_reading(channel_widget):
 
 
 class TestSetControlsEnabled:
-    def test_channel_controls_follow_in_lockstep(self):
-        from types import SimpleNamespace
+    """An embedder's run owns the TEC: the setpoint controls freeze while
+    the plot and its recording carry on."""
 
-        from fluidics.qt.sensor_plots import TemperatureChannelWidget, TemperatureControlWidget
+    def _controls(self, channel):
+        return [channel.temp_input, channel.set_btn, channel.save_btn,
+                channel.output_btn]
 
-        calls = []
-        control = lambda name: SimpleNamespace(setEnabled=lambda on, n=name: calls.append((n, on)))  # noqa: E731
-        stub = SimpleNamespace(
-            temp_input=control("input"), set_btn=control("set"), save_btn=control("save"), output_btn=control("output")
-        )
-        TemperatureChannelWidget.set_controls_enabled(stub, False)
-        assert calls == [("input", False), ("set", False), ("save", False), ("output", False)]
+    def test_the_setpoint_controls_freeze_and_come_back(self, channel_widget):
+        _controller, channel = channel_widget
+        channel.setControlsEnabled(False)
+        assert not any(c.isEnabled() for c in self._controls(channel))
+        channel.setControlsEnabled(True)
+        assert all(c.isEnabled() for c in self._controls(channel))
 
-        class Channel(SimpleNamespace):
-            set_controls_enabled = TemperatureChannelWidget.set_controls_enabled
+    def test_the_plot_and_its_recording_are_left_alone(self, channel_widget):
+        _controller, channel = channel_widget
+        channel.setControlsEnabled(False)
+        assert channel.record_btn.isEnabled(), "the recording froze with them"
+        assert channel.interval_input.isEnabled()
+        assert channel.window_input.isEnabled()
 
-        channel = Channel(**vars(stub))
-        fanout = SimpleNamespace(plot_widgets=[channel, channel])
-        calls.clear()
-        TemperatureControlWidget.set_controls_enabled(fanout, True)
-        assert [on for _n, on in calls] == [True] * 8
+    def test_the_container_reaches_every_channel(self, qapp):
+        """Two channels, so freezing one twice cannot pass for freezing
+        both."""
+        controller = TCMControllerSimulation(channels=2)
+        widget = TemperatureControlWidget(controller)
+        controller._terminate_polling = True
+        controller._polling_thread.join(5)
+        try:
+            widget.setControlsEnabled(False)
+            assert [c.temp_input.isEnabled() for c in widget.plot_widgets] == \
+                [False, False]
+        finally:
+            widget.deleteLater()
+            QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+            controller.close()
