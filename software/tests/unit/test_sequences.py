@@ -10,6 +10,7 @@ from fluidics.sequences import (
     SequenceListAdapter,
     check_ports_against_config,
     check_types_against_application,
+    sequence_problem,
     sequence_type_problem,
     load_sequences,
     save_sequences_yaml,
@@ -332,12 +333,24 @@ class TestRoundLabel:
 
 
 class TestSequenceProblemWithoutALimit:
-    def test_none_limit_skips_ports_but_keeps_type_and_schema(self):
-        from fluidics.sequences import sequence_problem
+    """limit=None withholds the port verdict and nothing else."""
 
-        row = {"type": "flow_reagent", "fluidic_port": 999, "flow_rate": 500, "volume": 500}
-        assert sequence_problem(row, "Flow Cell", None) is None  # port stage skipped
-        assert sequence_problem(row, "Flow Cell", 24) is not None  # with a limit it fires
+    def row(self, **fields):
+        return dict({"type": "flow_reagent", "fluidic_port": 1,
+                     "flow_rate": 500, "volume": 500}, **fields)
+
+    def test_a_port_beyond_an_unknown_range_is_not_judged(self):
+        beyond = self.row(fluidic_port=999)
+        assert sequence_problem(beyond, "Flow Cell", None) is None
+        assert sequence_problem(beyond, "Flow Cell", 24) is not None
+
+    def test_the_models_own_floor_still_applies(self):
+        """Only the upper bound is the rig's to know; a port below 1 is
+        wrong on any rig."""
+        assert "greater than or equal to 1" in sequence_problem(
+            self.row(fluidic_port=0), "Flow Cell", None)
+
+    def test_the_type_and_schema_stages_still_run(self):
         assert sequence_problem({"type": "no_such"}, "Flow Cell", None) is not None
-        bad = {"type": "flow_reagent", "fluidic_port": 1, "flow_rate": "x", "volume": 500}
-        assert "flow_rate" in sequence_problem(bad, "Flow Cell", None)
+        assert "flow_rate" in sequence_problem(
+            self.row(flow_rate="x"), "Flow Cell", None)

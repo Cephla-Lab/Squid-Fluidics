@@ -273,6 +273,10 @@ class TemperatureChannelWidget(TimeSeriesPlotWidget):
         self.save_btn = QPushButton("Save")
         self.output_btn = QPushButton("Output OFF")
         self.output_btn.setCheckable(True)
+        # What an embedder's run freezes -- named here, beside the widgets
+        # themselves, so a control added to this row is not left thawed.
+        self._controls = (self.temp_input, self.set_btn, self.save_btn,
+                          self.output_btn)
         row.addWidget(QLabel("Current:"))
         row.addWidget(self.temp_label)
         row.addWidget(QLabel("Target:"))
@@ -327,11 +331,8 @@ class TemperatureChannelWidget(TimeSeriesPlotWidget):
 
     def setControlsEnabled(self, enabled):
         """An embedder's run can own the TEC: the setpoint controls follow,
-        while the plot and its recording stay live. Named as
-        ManualControlWidget.setControlsEnabled is -- one verb for freezing
-        a widget's controls, across the surface an embedder calls."""
-        for control in (self.temp_input, self.set_btn, self.save_btn,
-                        self.output_btn):
+        while the plot and its recording stay live."""
+        for control in self._controls:
             control.setEnabled(enabled)
 
     def _set_clicked(self):
@@ -380,8 +381,6 @@ class TemperatureControlWidget(PostsToQtThread, SensorTabWidget):
         self.controller.start()
 
     def setControlsEnabled(self, enabled):
-        """Every channel's setpoint controls at once -- the embedder's one
-        seam."""
         for widget in self.plot_widgets:
             widget.setControlsEnabled(enabled)
 

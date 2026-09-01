@@ -325,9 +325,12 @@ def sequence_problem(seq: dict, application: str, limit: Optional[int]) -> Optio
     question -- the caller's dict is never rewritten; the coercion happens
     on a copy here, and for real in SequenceListAdapter.
 
-    limit=None means the port range is not known yet (an embedder judging a
-    file before its rig config is loaded): the port stage is skipped, the
-    type and schema stages still run.
+    limit=None means the port range is not known yet: the port stage is
+    skipped, the type and schema stages still run (so the models' own
+    floor of 1 still refuses a port below it). `application` has no such
+    sentinel -- an unknown one offers no types and fails every row -- so
+    this is "the application is known, the port count is not", not a
+    rig-less mode.
     """
     type_problem = sequence_type_problem(seq, application)
     if type_problem is not None:

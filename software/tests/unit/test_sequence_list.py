@@ -53,17 +53,12 @@ class TestTheVerdicts:
         assert "volume" in model.problem(0)
         assert model.blocking_error().startswith("Sequence 1:")
 
-    def test_without_a_port_limit_the_range_is_left_unjudged(self):
-        """An embedder can judge a file before its rig config is loaded:
-        the ports go unjudged (the models still refuse one below 1), and
-        every other verdict still lands."""
+    def test_a_list_built_without_a_port_count_carries_that_through(self):
+        """What the limit does is sequence_problem's contract; what this
+        pins is that the list hands its own down -- None included."""
         unknown = SequenceList("Flow Cell", port_limit=None,
-                               sequences=[dict(FLOW, fluidic_port=999),
-                                          dict(FLOW, fluidic_port=0),
-                                          dict(FLOW, flow_rate="x")])
+                               sequences=[dict(FLOW, fluidic_port=999)])
         assert unknown.problem(0) is None, "a port was judged with no range"
-        assert "greater than or equal to 1" in unknown.problem(1)
-        assert "flow_rate" in unknown.problem(2)
         assert flow_cell(dict(FLOW, fluidic_port=999)).problem(0) is not None
 
     def test_a_port_the_rig_lacks_is_flagged(self):
