@@ -135,8 +135,10 @@ class FlowSensor:
         armed under ("warn" or "stop"); timestamp is the tripping sample's, on
         the same clock as the reading subscription.
 
-        No unsubscribe: the one subscriber (the GUI widget) lives as long as
-        the sensor, and close() drops the list. Add it when a caller needs it.
+        unsubscribe_faults() takes a callback back off, by identity: an
+        embedded widget can be destroyed while the rig runs on, so it hands
+        back the bound method it registered (fluidics.qt.support's
+        subscribe_until_detached). close() drops the whole list.
         """
         self._fault_subscribers.subscribe(callback)
 

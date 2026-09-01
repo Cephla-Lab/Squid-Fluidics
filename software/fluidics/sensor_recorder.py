@@ -30,7 +30,9 @@ _logger = logging.getLogger(__name__)
 # A recording is flushed at most this often rather than per sample: at a
 # flow sensor's ~17 Hz that would be a syscall per sample, taken on the
 # reader thread and under this recorder's lock. What a crash can cost is
-# bounded by this instead.
+# bounded by this instead -- measured on the monotonic clock, never on the
+# sample's own timestamp, which the caller supplies and may be historic,
+# replayed out of order, or stepped by NTP.
 _FLUSH_INTERVAL_SECONDS = 1.0
 
 
@@ -89,9 +91,10 @@ class SensorRecorder:
             try:
                 self._writer.writerow([f"{t:.3f}", name, value, self._step])
                 # Time-based, not per row: see _FLUSH_INTERVAL_SECONDS.
-                if t - self._flushed_at >= _FLUSH_INTERVAL_SECONDS:
+                now = time.monotonic()
+                if now - self._flushed_at >= _FLUSH_INTERVAL_SECONDS:
                     self._file.flush()
-                    self._flushed_at = t
+                    self._flushed_at = now
             except (OSError, csv.Error) as e:
                 _logger.warning("Sensor CSV write failed; stopping the "
                                 "recording: %s", e)
@@ -106,7 +109,7 @@ class SensorRecorder:
                 self._writer = csv.writer(self._file)
                 self._writer.writerow(["time", "channel", "value", "step"])
                 self._file.flush()
-                self._flushed_at = time.time()
+                self._flushed_at = time.monotonic()
                 return True
             except OSError as e:
                 _logger.warning("Could not start the sensor recording at "

@@ -75,7 +75,22 @@ def test_the_tail_is_flushed_when_the_recording_stops(tmp_path):
     path = tmp_path / "t.csv"
     assert recorder.start_recording(str(path))
     recorder.record("flow", 1.0, t=1.0)
-    recorder.record("flow", 2.0, t=1.01)     # inside the flush interval
+    recorder.record("flow", 2.0, t=2.0)
+    recorder.stop_recording()
+    assert len(path.read_text().strip().splitlines()) == 3
+
+
+def test_the_flush_cadence_ignores_the_samples_own_timestamps(tmp_path):
+    """Timestamps are the caller's and may be historic, replayed out of
+    order, or stepped by NTP -- none of which should decide when the file
+    is flushed, or the bound on what a crash costs is not a bound."""
+    recorder = SensorRecorder()
+    path = tmp_path / "t.csv"
+    assert recorder.start_recording(str(path))
+    recorder.record("flow", 1.0, t=0.0)
+    recorder.record("flow", 2.0, t=100_000.0)     # a day's jump in sample time
+    assert path.read_text().strip().splitlines() == ["time,channel,value,step"], \
+        "a sample timestamp drove the flush"
     recorder.stop_recording()
     assert len(path.read_text().strip().splitlines()) == 3
 
