@@ -80,10 +80,15 @@ def test_the_tail_is_flushed_when_the_recording_stops(tmp_path):
     assert len(path.read_text().strip().splitlines()) == 3
 
 
-def test_the_flush_cadence_ignores_the_samples_own_timestamps(tmp_path):
+def test_the_flush_cadence_ignores_the_samples_own_timestamps(tmp_path,
+                                                              monkeypatch):
     """Timestamps are the caller's and may be historic, replayed out of
     order, or stepped by NTP -- none of which should decide when the file
-    is flushed, or the bound on what a crash costs is not a bound."""
+    is flushed, or the bound on what a crash costs is not a bound. The
+    monotonic clock is held still here, so only a sample timestamp could
+    move the deadline."""
+    import fluidics.sensor_recorder as recorder_module
+    monkeypatch.setattr(recorder_module.time, "monotonic", lambda: 1000.0)
     recorder = SensorRecorder()
     path = tmp_path / "t.csv"
     assert recorder.start_recording(str(path))
@@ -92,6 +97,21 @@ def test_the_flush_cadence_ignores_the_samples_own_timestamps(tmp_path):
     assert path.read_text().strip().splitlines() == ["time,channel,value,step"], \
         "a sample timestamp drove the flush"
     recorder.stop_recording()
+    assert len(path.read_text().strip().splitlines()) == 3
+
+
+def test_the_cadence_does_flush_once_the_interval_passes(tmp_path, monkeypatch):
+    """The other half: the deadline is real, so a recording left running
+    reaches the disk without waiting to be stopped."""
+    import fluidics.sensor_recorder as recorder_module
+    clock = iter([1000.0, 1000.5, 1002.0])
+    monkeypatch.setattr(recorder_module.time, "monotonic", lambda: next(clock))
+    recorder = SensorRecorder()
+    path = tmp_path / "t.csv"
+    assert recorder.start_recording(str(path))          # 1000.0: the header
+    recorder.record("flow", 1.0, t=1.0)                 # 1000.5: too soon
+    assert len(path.read_text().strip().splitlines()) == 1
+    recorder.record("flow", 2.0, t=2.0)                 # 1002.0: due
     assert len(path.read_text().strip().splitlines()) == 3
 
 
