@@ -45,6 +45,23 @@ def test_a_fault_published_on_the_sensor_lands_in_the_recording(qapp):
         sensor.close()
 
 
+def test_a_fault_waits_for_the_qt_thread_rather_than_landing_inline(qapp):
+    """The sensor publishes from its reader thread. The widget must take
+    the fault on the Qt thread, so nothing touches the recording (or the
+    canvas) from the thread that read the sample."""
+    sensor = FlowSensorSimulation(index=1, name="syringe_draw")
+    widget = gui.FlowSensorWidget(sensor, draw_protection=True)
+    try:
+        widget.writer = RecordingWriter()
+        sensor.notify_fault("warn", make_flow_fault(), 100.06)
+        assert widget.writer.rows == [], "the fault was written inline"
+        deliver_posted_events()
+        assert len(widget.writer.rows) == 1
+    finally:
+        widget.deleteLater()
+        sensor.close()
+
+
 def test_without_a_recording_a_fault_is_dropped_quietly(qapp):
     sensor = FlowSensorSimulation(index=1, name="syringe_draw")
     widget = gui.FlowSensorWidget(sensor, draw_protection=True)

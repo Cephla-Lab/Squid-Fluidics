@@ -15,11 +15,19 @@ from .test_gui_helpers import RecordingWriter, deliver_posted_events
 def channel_widget(qapp):
     """A one-channel widget over the simulation, with the driver's poll loop
     stopped so the only publisher left is the synchronous one the test
-    drives; the driver is closed after the widget."""
+    drives; the driver is closed after the widget.
+
+    The poll thread is joined and its queued readings delivered before the
+    test starts, so nothing it published on the way out can be mistaken for
+    what the test publishes.
+    """
     controller = TCMControllerSimulation(channels=1)
     widget = gui.TemperatureControlWidget(controller)
     assert controller._polling_started   # the constructor starts the publisher
     controller._terminate_polling = True
+    controller._polling_thread.join(5)
+    assert not controller._polling_thread.is_alive(), "the poll loop is still publishing"
+    deliver_posted_events()
     try:
         yield controller, widget.plot_widgets[0]
     finally:
