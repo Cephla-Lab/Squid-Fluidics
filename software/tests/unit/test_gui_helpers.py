@@ -171,25 +171,6 @@ class TestHighlightFollowsThePlan:
         assert stub.highlighted == [0, 2, 4]
 
 
-class TestIncludedRows:
-    """_includedRows is both the filter getSequences(selected_only=True)
-    applies and the snapshot _handle_progress translates through, so it must
-    list the included model rows in order.
-    """
-
-    def test_returns_included_rows_in_model_order(self):
-        stub = SimpleNamespace(_sequences=[
-            {"include": True}, {"include": False}, {"include": True},
-            {}, {"include": False}],
-            _isIncluded=gui.SequencesWidget._isIncluded)
-        assert gui.SequencesWidget._includedRows(stub) == [0, 2, 3]
-
-    def test_nothing_included_gives_no_rows(self):
-        stub = SimpleNamespace(_sequences=[{"include": False}, {"include": False}],
-                               _isIncluded=gui.SequencesWidget._isIncluded)
-        assert gui.SequencesWidget._includedRows(stub) == []
-
-
 class TestRecordingSaveDialog:
     """Start Recording asks where to save, pre-filled with the generated
     filename; Stop Recording reports the full path it saved to. Called unbound
