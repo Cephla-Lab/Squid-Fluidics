@@ -95,7 +95,10 @@ class FluidicsControlGUI(PostsToQtThread, QMainWindow):
             raise SystemExit(1)
         # The one job on the rig -- a run or a manual move -- for both tabs.
         self.session = self.system.session
-        self.session.state.subscribe(lambda kind: self._post_event("_renderTabs", kind))
+        # The payload stays behind: the repaint reads the session as it
+        # stands at delivery, so a notification queued behind a modal
+        # cannot deaden a tab for a job that has already ended.
+        self.session.state.subscribe(lambda kind: self._post_event("_renderTabs"))
         self.temperatureController = self.system.devices.temperature_controller
         self.flowSensors = self.system.devices.flow_sensors
 
@@ -172,11 +175,17 @@ class FluidicsControlGUI(PostsToQtThread, QMainWindow):
 
     RUN_TAB, MANUAL_TAB = 0, 1
 
-    def _renderTabs(self, kind):
+    def _renderTabs(self):
         """The tab that did not start the job goes dead while it runs: a run
         must not start under a manual move (the operations' valve turn would
         pass its gate and change the reagent under a live draw), nor a manual
-        move under a run."""
+        move under a run.
+
+        Reads the session rather than the announcement it was posted with,
+        the way the run tab's display does: what is queued describes the
+        moment it was sent, and only the session knows the moment it
+        arrives."""
+        kind = self.session.kind
         self.tabWidget.setTabEnabled(self.RUN_TAB, kind != "manual")
         self.tabWidget.setTabEnabled(self.MANUAL_TAB, kind != "run")
 

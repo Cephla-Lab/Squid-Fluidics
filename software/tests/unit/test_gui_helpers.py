@@ -808,16 +808,29 @@ class TestMainWindowJobs:
     runs, and asks before closing under a live job (the system then stops it
     before the devices close)."""
 
-    def test_the_other_tab_goes_dead_for_the_length_of_the_job(self):
+    def _tabs(self, kind):
         enabled = {}
-        stub = SimpleNamespace(RUN_TAB=0, MANUAL_TAB=1,
+        stub = SimpleNamespace(RUN_TAB=0, MANUAL_TAB=1, session=FakeSession(kind=kind),
                                tabWidget=SimpleNamespace(setTabEnabled=enabled.__setitem__))
-        gui.FluidicsControlGUI._renderTabs(stub, "run")
-        assert enabled == {0: True, 1: False}
-        gui.FluidicsControlGUI._renderTabs(stub, "manual")
-        assert enabled == {0: False, 1: True}
-        gui.FluidicsControlGUI._renderTabs(stub, None)
-        assert enabled == {0: True, 1: True}
+        gui.FluidicsControlGUI._renderTabs(stub)
+        return enabled
+
+    def test_the_other_tab_goes_dead_for_the_length_of_the_job(self):
+        assert self._tabs("run") == {0: True, 1: False}
+        assert self._tabs("manual") == {0: False, 1: True}
+        assert self._tabs(None) == {0: True, 1: True}
+
+    def test_a_stale_announcement_cannot_deaden_a_tab(self):
+        """The notification is posted; by the time it lands the job it
+        described may be over -- and a dialog on the way is exactly what
+        holds it up. What the session says now is what the tabs show."""
+        enabled = {}
+        session = FakeSession(kind="run")
+        stub = SimpleNamespace(RUN_TAB=0, MANUAL_TAB=1, session=session,
+                               tabWidget=SimpleNamespace(setTabEnabled=enabled.__setitem__))
+        session.kind = None                  # the run ended while this waited
+        gui.FluidicsControlGUI._renderTabs(stub)
+        assert enabled == {0: True, 1: True}, "a tab stayed dead for a finished job"
 
     def _closing(self, busy):
         session = FakeSession(kind="run" if busy else None)
