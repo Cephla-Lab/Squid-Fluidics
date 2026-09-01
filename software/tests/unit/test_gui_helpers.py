@@ -1,8 +1,9 @@
 # tests/unit/test_gui_helpers.py
 """Tests for pure helpers in gui.py.
 
-Importing gui pulls in PyQt5, which is fine without a display as long as no
-QApplication is constructed. The widgets themselves have no test harness; only
+Importing gui pulls in Qt (through qtpy), which is fine without a display as
+long as no QApplication is constructed. The widgets themselves have no test
+harness; only
 module-level pure functions are covered here.
 """
 
@@ -16,6 +17,7 @@ import shutil
 
 import gui
 import fluidics.qt.manual_control as manual_control
+from qtpy.QtWidgets import QDialog
 
 
 def _bind(name, stub, cls=None):
@@ -200,12 +202,16 @@ class TestRecordingSaveDialog:
             self.record_btn = Button("Start Recording")
             self.file = None
             self.writer = None
+            self._flushed_at = 0.0
 
         def _record_filename(self):
             return "flow_test_20260819_000000.csv"
 
         def _record_header(self):
             return ["Time", "Flow Rate (uL/min)"]
+
+        def _write_row(self, row):
+            return gui.TimeSeriesPlotWidget._write_row(self, row)
 
         def close_recording(self):
             return gui.TimeSeriesPlotWidget.close_recording(self)
@@ -348,6 +354,14 @@ class RecordingWriter:
         self.rows.append(list(row))
 
 
+def deliver_posted_events():
+    """Run what _post_event queued. The sensor widgets marshal readings and
+    faults to the Qt thread the same way the rest of fluidics.qt does, so a
+    test publishing on the caller's thread must let the queue drain before
+    asserting -- which is also how the reading arrives in production."""
+    gui.QApplication.sendPostedEvents(None, gui.WorkerEvent.EVENT_TYPE)
+
+
 def make_flow_fault():
     """The canonical fault the recording tests format. Shared with
     test_gui_flow_widget so the two suites cannot drift onto different
@@ -367,13 +381,17 @@ class TestFlowRecordingRows:
     """
 
     def stub(self, writer="unset"):
-        return SimpleNamespace(
+        stub = SimpleNamespace(
             writer=RecordingWriter() if writer == "unset" else writer,
             # Park the throttle so _on_reading returns right after the CSV
             # write instead of running the plot path, which needs widgets.
             last_update=float("inf"),
             query_interval=1,
+            file=None,              # nothing to flush; the writer records
+            _flushed_at=0.0,
         )
+        stub._write_row = lambda row: gui.TimeSeriesPlotWidget._write_row(stub, row)
+        return stub
 
     def test_every_row_matches_the_header_width(self):
         stub = self.stub()
@@ -382,6 +400,30 @@ class TestFlowRecordingRows:
         header = gui.FlowSensorWidget._record_header(stub)
         assert header == ["Time", "Flow Rate (uL/min)", "Fault"]
         assert all(len(row) == len(header) for row in stub.writer.rows)
+
+    def test_rows_are_flushed_on_a_cadence_not_per_row(self, tmp_path,
+                                                        monkeypatch):
+        """A flow sensor writes ~17 rows a second; flushing each one is a
+        syscall per sample on the reader's thread. What a crash costs is
+        bounded by the interval instead -- the same bound the long-format
+        recorder keeps."""
+        import csv
+        import fluidics.qt.sensor_plots as sensor_plots
+        clock = iter([1000.0, 1000.5, 1002.0])
+        monkeypatch.setattr(sensor_plots.time, "monotonic", lambda: next(clock))
+        path = tmp_path / "rec.csv"
+        stub = self.stub(writer=None)
+        stub.file = open(path, "w", newline="", encoding="utf-8")
+        stub.writer = csv.writer(stub.file)
+        try:
+            stub._write_row(["a"])                  # 1000.0: due, flushes
+            assert path.read_text().splitlines() == ["a"]
+            stub._write_row(["b"])                  # 1000.5: too soon
+            assert path.read_text().splitlines() == ["a"], "flushed per row"
+            stub._write_row(["c"])                  # 1002.0: due again
+            assert path.read_text().splitlines() == ["a", "b", "c"]
+        finally:
+            stub.file.close()
 
     def test_a_reading_row_leaves_the_fault_field_empty(self):
         stub = self.stub()
@@ -996,7 +1038,7 @@ class TestPortNames:
                 self.result_mapping = {"port_1": "DAPI"}
 
             def exec_(self):
-                return gui.QDialog.Accepted
+                return QDialog.Accepted
 
         monkeypatch.setattr(manual_control, "PortNamesDialog", FakeDialog)
         refreshed = []
@@ -1022,7 +1064,7 @@ class TestPortNames:
         assert warned == ["Rig busy"] and constructed == []
 
     def test_the_repaint_keeps_the_selection_and_moves_no_valve(self, qapp):
-        from PyQt5.QtWidgets import QComboBox
+        from qtpy.QtWidgets import QComboBox
         combo = QComboBox()
         combo.addItems(["Port 1: ", "Port 2: ", "Port 3: "])
         combo.setCurrentIndex(2)
@@ -1043,7 +1085,7 @@ class TestUsageTable:
     names read fresh from the config at each paint, hidden when empty."""
 
     def _stub(self, rows):
-        from PyQt5.QtWidgets import QTableWidget
+        from qtpy.QtWidgets import QTableWidget
         table = QTableWidget(0, 3)
         stub = SimpleNamespace(
             usageTable=table,
@@ -1070,7 +1112,7 @@ class TestUsageTable:
 
 class TestHeldVolumePaint:
     def test_the_bar_paints_the_published_reading(self, qapp):
-        from PyQt5.QtWidgets import QProgressBar
+        from qtpy.QtWidgets import QProgressBar
         bar = QProgressBar()
         bar.setRange(0, 5000)
         stub = SimpleNamespace(plungerPositionBar=bar)
@@ -1176,6 +1218,23 @@ class TestStaleStateNone:
         assert stopped == [True]
 
 
+class TestPostsToQtThread:
+    def test_a_missing_handler_fails_where_it_was_posted(self, qapp):
+        """The target is resolved on the producer's thread. A renamed
+        handler must fail at the call site, not as an AttributeError
+        inside event() on the Qt thread -- where, per run_log's note on
+        sys.excepthook, PyQt can take the process with it."""
+        from qtpy.QtCore import QObject
+        from fluidics.qt.support import PostsToQtThread
+
+        class Poster(PostsToQtThread, QObject):
+            pass
+
+        poster = Poster()
+        with pytest.raises(AttributeError):
+            poster._post_event("_a_handler_that_was_renamed")
+
+
 class TestDetachOnDestroy:
     """The embedded widgets must remove exactly the callbacks they registered:
     Subscribers.unsubscribe deregisters by identity, and a fresh bound-method
@@ -1195,9 +1254,17 @@ class TestDetachOnDestroy:
         detach()  # idempotent, like Subscribers.unsubscribe itself
 
     def test_widgets_connect_the_detach_to_destroyed(self):
+        """Every widget that subscribes must hand it back. Source-read
+        rather than driven, for the three whose feeds need a whole system
+        to build; the sensor widgets pin the same invariant by behaviour
+        in test_gui_flow_widget/test_gui_temperature_widget."""
         import inspect
-        from fluidics.qt import manual_control, sequence_editor
+        from fluidics.qt import manual_control, sensor_plots, sequence_editor
 
-        for cls in (sequence_editor.SequencesWidget, manual_control.ManualControlWidget):
+        for cls in (sequence_editor.SequencesWidget,
+                    manual_control.ManualControlWidget,
+                    sensor_plots.FlowSensorWidget,
+                    sensor_plots.TemperatureControlWidget):
             src = inspect.getsource(cls.__init__)
-            assert "subscribe_until_detached(" in src and "self.destroyed.connect(detach)" in src
+            assert "subscribe_until_detached(" in src, cls.__name__
+            assert "self.destroyed.connect(detach)" in src, cls.__name__
