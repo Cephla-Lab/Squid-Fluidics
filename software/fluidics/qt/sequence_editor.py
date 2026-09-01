@@ -37,14 +37,12 @@ from fluidics.events import RunEnded, RunStarted, SequenceCompleted, SequenceSta
 from fluidics.files import atomic_write
 from fluidics.qt.support import GuiLogHandler, PostsToQtThread, _ask_yes_no, _hms, subscribe_until_detached
 from fluidics.run_log import LOGGER_NAME
+from fluidics.sequence_list import SequenceList, type_label
 from fluidics.sequences import (
     SEQUENCE_TYPE_LABELS,
-    SequenceListAdapter,
     get_fields_for_type,
     load_sequences,
     save_sequences_yaml,
-    sequence_port_problems,
-    sequence_type_problem,
     types_for_application,
     validate_sequences,
 )
@@ -156,10 +154,11 @@ class SequencesWidget(PostsToQtThread, QWidget):
     """Edits the sequence list and runs it through the system's session, which
     owns the run's thread and its end; this widget renders the callbacks.
 
-    The sequence list itself is `_sequences`, a list of dicts -- the tree
-    only renders it, and every edit routes back through it. The model holds
-    what the operator typed; getSequences() validates and coerces on the
-    way out, and live validation asks the same question per row as it goes.
+    The sequence list itself is `_model`, a Qt-free SequenceList -- the
+    tree only renders it, and every edit routes back through it. The model
+    holds what the operator typed, judges each row as it goes, and coerces
+    on the way out (getSequences); this widget paints those verdicts and
+    turns clicks into its verbs.
     """
 
     def __init__(self, config, system):
@@ -169,9 +168,11 @@ class SequencesWidget(PostsToQtThread, QWidget):
         self.session = system.session
         self.selectorValveSystem = system.devices.selector_valves
 
-        self._sequences = []     # THE sequence list; the tree renders it
-        self._invalid = {}       # model row -> live-validation message
-        self._port_limit = available_port_count(config)   # config-fixed
+        # THE sequence list (fluidics.sequence_list, Qt-free): it holds the
+        # dicts, validates them and performs the structural verbs; this
+        # widget renders it and turns clicks into its calls.
+        self._model = SequenceList(config.application,
+                                   available_port_count(config))
         self._plan = ()          # the running run's plan, rows = model rows
         # Which sequences the operator has open, by identity: a move swaps
         # the dicts themselves, so an open row follows its sequence rather
@@ -356,7 +357,7 @@ class SequencesWidget(PostsToQtThread, QWidget):
     def setSequences(self, sequences):
         """Replace the model and render it: the dicts are the truth, the
         tree their view."""
-        self._sequences = [dict(seq) for seq in sequences]
+        self._model.replace(sequences)
         # A new file's rows are not the old file's: it opens collapsed,
         # one line per sequence, whatever was open before. Not merely the
         # prune's job -- the old dicts are freed here, and a new one
@@ -365,10 +366,10 @@ class SequencesWidget(PostsToQtThread, QWidget):
         self._refresh()
 
     def _refresh(self, select=None):
-        """Re-validate and re-render the whole model -- the close of every
-        structural change (load, add, remove, move, duplicate). A field
-        edit updates in place instead, so it cannot steal the cursor."""
-        self._validateAll()
+        """Re-render the whole model -- the close of every structural
+        change (load, add, remove, move, duplicate); the model revalidates
+        itself as it changes. A field edit updates in place instead, so it
+        cannot steal the cursor."""
         self._renderTree()
         if select is not None and 0 <= select < self.tree.topLevelItemCount():
             self.tree.setCurrentItem(self.tree.topLevelItem(select))
@@ -378,10 +379,10 @@ class SequencesWidget(PostsToQtThread, QWidget):
         # Sequences that have left the model take their open state with
         # them -- and a later dict could otherwise be allocated at a
         # remembered address and render open for no reason.
-        self._opened &= {id(seq) for seq in self._sequences}
+        self._opened &= {id(seq) for seq in self._model}
         with QSignalBlocker(self.tree):
             self.tree.clear()
-            for seq in self._sequences:
+            for seq in self._model:
                 self._renderSequenceRow(seq)
         self._renderValidation()
 
@@ -390,10 +391,11 @@ class SequencesWidget(PostsToQtThread, QWidget):
         -- every field, defaults included, so a value at its default can
         still be edited."""
         seq_type = seq.get('type', '')
-        type_label = SEQUENCE_TYPE_LABELS.get(seq_type, seq_type)
-        item = QTreeWidgetItem([seq.get('name') or type_label, f"Type: {type_label}"])
+        label = type_label(seq)
+        item = QTreeWidgetItem([seq.get('name') or label, f"Type: {label}"])
         item.setFlags(item.flags() | Qt.ItemIsEditable)
-        item.setCheckState(0, Qt.Checked if self._isIncluded(seq) else Qt.Unchecked)
+        item.setCheckState(
+            0, Qt.Checked if SequenceList.is_included(seq) else Qt.Unchecked)
 
         try:
             type_fields = get_fields_for_type(seq_type)
@@ -449,9 +451,9 @@ class SequencesWidget(PostsToQtThread, QWidget):
         """Remember what the operator opened or closed. Rendering runs
         under QSignalBlocker, so only their own clicks reach here."""
         row = self.tree.indexOfTopLevelItem(item)
-        if not 0 <= row < len(self._sequences):
+        if not 0 <= row < len(self._model):
             return                       # a field row, or mid-rebuild
-        seq_id = id(self._sequences[row])
+        seq_id = id(self._model[row])
         self._opened.add(seq_id) if is_open else self._opened.discard(seq_id)
 
     def _onItemChanged(self, item, column):
@@ -460,61 +462,21 @@ class SequencesWidget(PostsToQtThread, QWidget):
         parent = item.parent()
         top = parent if parent is not None else item
         row = self.tree.indexOfTopLevelItem(top)
-        if not 0 <= row < len(self._sequences):
+        if not 0 <= row < len(self._model):
             return
-        seq = self._sequences[row]
         if parent is None:
-            seq['include'] = item.checkState(0) == Qt.Checked
-            name = item.text(0).strip()
-            type_label = SEQUENCE_TYPE_LABELS.get(seq.get('type'), '')
-            seq['name'] = name if name and name != type_label else None
+            self._model.set_included(row, item.checkState(0) == Qt.Checked)
             # The title renders from the model, always: an emptied name --
             # or the type's label typed out -- reads as the type again.
             with QSignalBlocker(self.tree):
-                item.setText(0, seq['name'] or type_label)
+                item.setText(0, self._model.set_name(row, item.text(0)))
         else:
-            fname = item.data(0, Qt.UserRole)
-            raw = item.text(1).strip()
-            seq[fname] = raw if raw else None
-        self._validateRow(row)
+            self._model.set_field(row, item.data(0, Qt.UserRole),
+                                  item.text(1).strip())
         self._renderValidation()
         self._renderRunControls()
 
-    # --- live validation ---
-
-    def _validateAll(self):
-        self._invalid = {}
-        for row in range(len(self._sequences)):
-            self._validateRow(row)
-
-    def _validateRow(self, row):
-        problem = self._rowProblem(self._sequences[row])
-        if problem is None:
-            self._invalid.pop(row, None)
-        else:
-            self._invalid[row] = problem
-
-    def _rowProblem(self, seq):
-        """The verdict on one row, as a message or None. A pure question:
-        the model is never rewritten -- it holds what the operator typed;
-        the coercion happens on a copy here, and for real in getSequences."""
-        # The type first: a wrong-application row is also union-valid, and
-        # for an unknown type this message beats the union's tag complaint.
-        type_problem = sequence_type_problem(seq, self.config.application)
-        if type_problem is not None:
-            return type_problem
-        try:
-            validated = SequenceListAdapter.validate_python([seq])
-        except ValidationError as e:
-            first = e.errors()[0]
-            field = ".".join(str(part) for part in first["loc"][2:]) or "sequence"
-            return f"{field}: {first['msg']}"
-        problems = sequence_port_problems(validated[0].model_dump(),
-                                          self._port_limit)
-        if problems:
-            return ("; ".join(problems)
-                    + f": this configuration has ports 1..{self._port_limit}")
-        return None
+    # --- live validation (judged by the model, painted here) ---
 
     def _renderValidation(self):
         """Paint the verdicts: an invalid row is red, with the error as its
@@ -524,41 +486,25 @@ class SequencesWidget(PostsToQtThread, QWidget):
         with QSignalBlocker(self.tree):
             for row in range(self.tree.topLevelItemCount()):
                 item = self.tree.topLevelItem(row)
-                message = self._invalid.get(row)
+                message = self._model.problem(row)
                 for column in (0, 1):
                     item.setForeground(column, red if message else clear)
                 item.setToolTip(0, message or '')
 
     def _blockingError(self):
-        """The first error among the rows a run would actually take --
-        an invalid row that is not checked blocks nothing."""
-        for row in self._includedRows():
-            if row in self._invalid:
-                return f"Sequence {row + 1}: {self._invalid[row]}"
-        return None
+        """What stops a run, as the operator should hear it."""
+        return self._model.blocking_error()
 
     # --- reading the model out ---
 
-    @staticmethod
-    def _isIncluded(seq):
-        """The include field, defaulting on -- the one spelling of what the
-        checkbox means."""
-        return seq.get('include', True)
-
     def _includedRows(self):
         """Model rows a run takes, in order."""
-        return [row for row, seq in enumerate(self._sequences)
-                if self._isIncluded(seq)]
+        return self._model.included_rows()
 
     def getSequences(self, selected_only=False):
         """The model, validated and coerced -- the dicts a run or a save
-        takes. selected_only reads exactly _includedRows(), so a snapshot
-        of that list stays index-aligned with the sequences handed to the
-        worker."""
-        rows = self._includedRows() if selected_only else range(len(self._sequences))
-        validated = SequenceListAdapter.validate_python(
-            [self._sequences[row] for row in rows])
-        return [s.model_dump() for s in validated]
+        takes."""
+        return self._model.validated(included_only=selected_only)
 
     def loadSequences(self):
         fileName, _ = QFileDialog.getOpenFileName(
@@ -586,8 +532,7 @@ class SequencesWidget(PostsToQtThread, QWidget):
         port_names = self.selectorValveSystem.get_port_names()
         dialog = AddSequenceDialog(self, self.config.application, port_names)
         if dialog.exec_() == QDialog.Accepted and dialog.result_dict:
-            self._sequences.append(dict(dialog.result_dict))
-            self._refresh(select=len(self._sequences) - 1)
+            self._refresh(select=self._model.add(dialog.result_dict))
 
     def _currentRow(self):
         """The model row of the selected sequence -- a selected child means
@@ -604,15 +549,13 @@ class SequencesWidget(PostsToQtThread, QWidget):
         row = self._currentRow()
         if row is None:
             return
-        self._sequences.pop(row)
-        self._refresh(select=min(row, len(self._sequences) - 1))
+        self._refresh(select=self._model.remove(row))
 
     def duplicateSequence(self):
         row = self._currentRow()
         if row is None:
             return
-        self._sequences.insert(row + 1, dict(self._sequences[row]))
-        self._refresh(select=row + 1)
+        self._refresh(select=self._model.duplicate(row))
 
     def moveSequenceUp(self):
         self._moveSequence(-1)
@@ -624,12 +567,9 @@ class SequencesWidget(PostsToQtThread, QWidget):
         row = self._currentRow()
         if row is None:
             return
-        target = row + delta
-        if not 0 <= target < len(self._sequences):
-            return
-        seqs = self._sequences
-        seqs[row], seqs[target] = seqs[target], seqs[row]
-        self._refresh(select=target)
+        target = self._model.move(row, delta)
+        if target is not None:
+            self._refresh(select=target)
 
     def selectAll(self):
         self._setAllIncluded(True)
@@ -638,8 +578,7 @@ class SequencesWidget(PostsToQtThread, QWidget):
         self._setAllIncluded(False)
 
     def _setAllIncluded(self, included):
-        for seq in self._sequences:
-            seq['include'] = included
+        self._model.set_all_included(included)
         self._refresh()
 
     def highlightRow(self, row_index):
@@ -660,7 +599,7 @@ class SequencesWidget(PostsToQtThread, QWidget):
             item.setBackground(1, blue_brush)
 
     def runSelectedSequences(self):
-        if not self._sequences:
+        if not len(self._model):
             return
         try:
             selected = self.getSequences(selected_only=True)
