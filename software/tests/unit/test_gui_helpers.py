@@ -1,8 +1,9 @@
 # tests/unit/test_gui_helpers.py
 """Tests for pure helpers in gui.py.
 
-Importing gui pulls in PyQt5, which is fine without a display as long as no
-QApplication is constructed. The widgets themselves have no test harness; only
+Importing gui pulls in Qt (through qtpy), which is fine without a display as
+long as no QApplication is constructed. The widgets themselves have no test
+harness; only
 module-level pure functions are covered here.
 """
 
@@ -346,6 +347,14 @@ class RecordingWriter:
 
     def writerow(self, row):
         self.rows.append(list(row))
+
+
+def deliver_posted_events():
+    """Run what _post_event queued. The sensor widgets marshal readings and
+    faults to the Qt thread the same way the rest of fluidics.qt does, so a
+    test publishing on the caller's thread must let the queue drain before
+    asserting -- which is also how the reading arrives in production."""
+    gui.QApplication.sendPostedEvents(None, gui.WorkerEvent.EVENT_TYPE)
 
 
 def make_flow_fault():
@@ -1022,7 +1031,7 @@ class TestPortNames:
         assert warned == ["Rig busy"] and constructed == []
 
     def test_the_repaint_keeps_the_selection_and_moves_no_valve(self, qapp):
-        from PyQt5.QtWidgets import QComboBox
+        from qtpy.QtWidgets import QComboBox
         combo = QComboBox()
         combo.addItems(["Port 1: ", "Port 2: ", "Port 3: "])
         combo.setCurrentIndex(2)
@@ -1043,7 +1052,7 @@ class TestUsageTable:
     names read fresh from the config at each paint, hidden when empty."""
 
     def _stub(self, rows):
-        from PyQt5.QtWidgets import QTableWidget
+        from qtpy.QtWidgets import QTableWidget
         table = QTableWidget(0, 3)
         stub = SimpleNamespace(
             usageTable=table,
@@ -1070,7 +1079,7 @@ class TestUsageTable:
 
 class TestHeldVolumePaint:
     def test_the_bar_paints_the_published_reading(self, qapp):
-        from PyQt5.QtWidgets import QProgressBar
+        from qtpy.QtWidgets import QProgressBar
         bar = QProgressBar()
         bar.setRange(0, 5000)
         stub = SimpleNamespace(plungerPositionBar=bar)

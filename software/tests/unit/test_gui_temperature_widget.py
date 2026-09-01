@@ -8,7 +8,7 @@ import pytest
 import gui
 from fluidics.control.temperature_controller import TCMControllerSimulation
 
-from .test_gui_helpers import RecordingWriter
+from .test_gui_helpers import RecordingWriter, deliver_posted_events
 
 
 @pytest.fixture
@@ -36,6 +36,7 @@ def test_a_publish_on_the_controller_lands_in_the_recording(channel_widget):
     channel.last_update = 0.0
     controller.actual_temperatures = [25.0]
     controller._publish()
+    deliver_posted_events()
     rows = channel.writer.rows
     assert len(rows) == 1
     assert rows[0][1] == 25.0
@@ -47,7 +48,9 @@ def test_the_output_button_follows_the_driver_on_each_reading(channel_widget):
     controller, channel = channel_widget
     controller.set_output_enabled(1, True)
     controller._publish()
+    deliver_posted_events()
     assert channel.output_btn.isChecked()
     controller.set_output_enabled(1, False)
     controller._publish()
+    deliver_posted_events()
     assert not channel.output_btn.isChecked()

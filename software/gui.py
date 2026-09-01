@@ -6,7 +6,9 @@ import re
 import sys
 import time
 from datetime import datetime
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout,
+# Through qtpy, like fluidics.qt: two Qt bindings in one process is a crash,
+# and qtpy resolves the binding once for the whole application (QT_API).
+from qtpy.QtWidgets import (QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QTreeWidget, QTreeWidgetItem,
                              QHeaderView, QCheckBox, QFileDialog, QMessageBox, QComboBox,
                              QSpinBox, QLabel, QProgressBar, QLineEdit,
@@ -14,9 +16,9 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QTabWidget, QWidget, QVB
                              QGroupBox, QGridLayout, QSizePolicy, QDialog, QFormLayout,
                              QDoubleSpinBox, QDialogButtonBox, QScrollArea,
                              QPlainTextEdit, QSplitter)
-from PyQt5.QtCore import (Qt, QTimer, pyqtSignal, QEvent, QCoreApplication,
-                          QSettings, QSignalBlocker)
-from PyQt5.QtGui import QColor, QBrush
+from qtpy.QtCore import (Qt, QTimer, QEvent, QCoreApplication,
+                        QSettings, QSignalBlocker)
+from qtpy.QtGui import QColor, QBrush
 
 from serial import SerialException
 

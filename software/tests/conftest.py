@@ -16,7 +16,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 def qapp():
     """The process's one QApplication, for the widget tests. Lazy: nothing
     Qt is imported or constructed unless a test asks for it."""
-    from PyQt5.QtWidgets import QApplication
+    from qtpy.QtWidgets import QApplication
     yield QApplication.instance() or QApplication([])
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"

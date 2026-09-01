@@ -11,9 +11,10 @@ published on the sensor must come out as a CSV row. The row's exact format is
 TestFlowRecordingRows' contract, not ours -- assertions here stop at "the
 right fault arrived at the right time".
 
-Same-thread emit means Qt delivers the signal synchronously (direct
-connection), so no event loop needs to run; the cross-thread queued delivery
-is Qt's contract, not ours to test.
+The readings and faults cross to the Qt thread through _post_event, so a
+test publishing on its own thread drains the queue before asserting
+(deliver_posted_events) -- the same delivery the sensor's reader thread
+gets, without an event loop.
 """
 
 from datetime import datetime
@@ -24,7 +25,8 @@ import pytest
 import gui
 from fluidics.control.flow_sensor import FlowSensorSimulation
 
-from .test_gui_helpers import RecordingWriter, make_flow_fault
+from .test_gui_helpers import (RecordingWriter, deliver_posted_events,
+                               make_flow_fault)
 
 
 def test_a_fault_published_on_the_sensor_lands_in_the_recording(qapp):
@@ -33,6 +35,7 @@ def test_a_fault_published_on_the_sensor_lands_in_the_recording(qapp):
     try:
         widget.writer = RecordingWriter()
         sensor.notify_fault("warn", make_flow_fault(), 100.06)
+        deliver_posted_events()
         rows = widget.writer.rows
         assert len(rows) == 1
         assert rows[0][0] == datetime.fromtimestamp(100.06)
@@ -47,6 +50,7 @@ def test_without_a_recording_a_fault_is_dropped_quietly(qapp):
     widget = gui.FlowSensorWidget(sensor, draw_protection=True)
     try:
         sensor.notify_fault("stop", make_flow_fault(), 100.06)  # must not raise
+        deliver_posted_events()
         assert widget.writer is None
     finally:
         widget.deleteLater()

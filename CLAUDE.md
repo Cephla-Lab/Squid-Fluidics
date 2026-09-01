@@ -76,6 +76,8 @@ These must stay in sync. Same applies to `VALVE_POSITIONS`/`ValvesStates_t` and 
 - **`fluidics/subscribers.py`** — `Subscribers`: the callback list with isolated dispatch that the MCU packet stream, the flow sensors, the TCM and the run session all publish through
 - **`fluidics/time_estimate.py`** — `plan_run(config, sequences)`: the run plan, each entry priced by replaying the sequences against a simulated twin of the config; never touches hardware, falls back rather than blocking a run (`estimate_run_time` wraps it for pricing-only callers)
 - **`fluidics/run_session.py`** — `RunSession(devices)`: the one job on the rig at a time (a run or a manual move) — starts it off the caller's thread, says whether the rig is busy, stops it, waits for it, resets the run's signal when it ends
+- **`fluidics/sensor_recorder.py`** — `SensorSeries`, the one sample buffer (producers append, a GUI reads a window on its own clock; the plots hold their series in these), plus `SensorRecorder`, a Qt-free long-format CSV for an embedding application. The standalone tabs record their own wide per-plot CSV instead — see the module docstring for why both exist
+- **`fluidics/qt/`** — the importable Qt widgets (`support`, `sequence_editor`, `manual_control`, `sensor_plots`); `gui.py` is the standalone application that arranges them
 - **`fluidics/system.py`** — `FluidicsSystem`: the rig as one object — `build(config, simulation)` brings the devices up and assembles `devices`, `operations`, `manual`, `session` and a `warnings` channel; `run()`, `run_manual()`, and `close(timeout)`, which stops whatever job is running before the devices go. What the GUI, the CLI and scripts hold
 
 ### Firmware Module Structure

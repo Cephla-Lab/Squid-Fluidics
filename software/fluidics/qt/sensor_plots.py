@@ -8,7 +8,6 @@ import os
 import re
 from datetime import datetime
 
-from qtpy.QtCore import Signal
 from qtpy.QtWidgets import (QWidget, QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
                             QPushButton, QSpinBox, QComboBox, QFileDialog, QMessageBox)
 
@@ -16,7 +15,8 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 from matplotlib.ticker import FuncFormatter
 
-from fluidics.qt.support import subscribe_until_detached
+from fluidics.qt.support import PostsToQtThread, subscribe_until_detached
+from fluidics.sensor_recorder import SensorSeries
 
 _logger = logging.getLogger("fluidics.gui")
 
@@ -34,12 +34,15 @@ class MplCanvas(FigureCanvasQTAgg):
         super(MplCanvas, self).__init__(fig)
 
 
-class TimeSeriesPlotWidget(QWidget):
+class TimeSeriesPlotWidget(PostsToQtThread, QWidget):
     """Shared scaffolding for the live sensor plots.
 
     Owns the rolling time window, the query-interval throttle, and the CSV
-    recording lifecycle. Subclasses own their data series and how they draw
-    them, via the four hooks below.
+    recording lifecycle. Subclasses own their data series -- SensorSeries,
+    the one sample buffer in this package -- and how they draw them, via
+    the three hooks below. Readings arrive on device threads and cross to
+    the Qt thread through _post_event, the idiom the other fluidics.qt
+    widgets already use.
     """
 
     # Where the save dialog opens; every plot shares it, so consecutive
@@ -48,7 +51,6 @@ class TimeSeriesPlotWidget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.times = []
         self.query_interval = 1
         self.window_size = 60
         self.last_update = 0
@@ -121,22 +123,11 @@ class TimeSeriesPlotWidget(QWidget):
 
     # --- shared plotting ---
 
-    def _trim_window(self, *series):
-        """Drop samples now outside the window, keeping series aligned to times.
-
-        The caller appends to self.times and its own lists, then names those
-        lists here. Keeping the append and the trim at one call site is why
-        there is no _series() hook: a hook would split the correspondence
-        across two methods, where a wrong order silently misfiles values.
-        """
-        while self.times and self.times[-1] - self.times[0] > self.window_size:
-            self.times.pop(0)
-            for data in series:
-                data.pop(0)
-
-    def _finalize_plot(self, ax, ylabel, title):
-        """Apply the shared axis treatment and draw."""
-        current_time = self.times[-1]
+    def _finalize_plot(self, ax, ylabel, title, current_time):
+        """Apply the shared axis treatment and draw, anchored at the newest
+        sample. Series are windowed at read time (SensorSeries.window), not
+        trimmed on arrival, so widening the window shows the history that is
+        already held instead of only what arrives after the change."""
         ax.set_xlim([current_time - self.window_size, current_time])
         ax.set_xlabel("Seconds Ago")
         ax.set_ylabel(ylabel)
@@ -198,7 +189,7 @@ class TimeSeriesPlotWidget(QWidget):
         return saved_path
 
 
-class SensorTabWidget(QWidget):
+class SensorTabWidget(PostsToQtThread, QWidget):
     """Container laying out one plot widget per channel or sensor.
 
     Qt delivers closeEvent only to top-level windows, so a tab embedded in a
@@ -219,17 +210,15 @@ class TemperatureChannelWidget(TimeSeriesPlotWidget):
     """One channel's worth of temperature UI: target/actual readout, plot,
     record toggle, query interval, window size."""
 
-    reading_signal = Signal(float, float)  # (temp, current_time)
-
     def __init__(self, controller, channel, parent=None):
         super().__init__(parent)
         self.controller = controller
         self.channel = channel  # 1-based
 
-        self.temps = []
-        self.targets = []
-
-        self.reading_signal.connect(self._on_reading)
+        # Appended in one statement pair, so the two carry the same
+        # timestamps and one window slices both.
+        self.actual = SensorSeries()
+        self.targets = SensorSeries()
 
         self._build_ui()
         self.temp_input.setText(f"{self.controller.target_temperatures[channel - 1]:.2f}")
@@ -284,27 +273,28 @@ class TemperatureChannelWidget(TimeSeriesPlotWidget):
             return
         self.temp_label.setText(f"{temp:.1f}°C")
         target = self.controller.target_temperatures[self.channel - 1]
-        self.times.append(current_time)
-        self.temps.append(temp)
-        self.targets.append(target)
-        self._trim_window(self.temps, self.targets)
+        self.actual.append(temp, current_time)
+        self.targets.append(target, current_time)
         if self.writer is not None:
             self.writer.writerow([datetime.fromtimestamp(current_time), temp, target])
         self._refresh_plot()
         self.last_update = current_time
 
     def _refresh_plot(self):
-        if not self.temps or not self.times:
+        times, temps = self.actual.window(self.window_size)
+        _, targets = self.targets.window(self.window_size)
+        if not times:
             return
         ax = self.canvas.axes
         ax.clear()
-        ax.plot(self.times, self.temps, "b-", label="Actual")
-        ax.plot(self.times, self.targets, "r--", label="Target")
-        limits = self._padded_limits(self.temps + self.targets)
+        ax.plot(times, temps, "b-", label="Actual")
+        ax.plot(times, targets, "r--", label="Target")
+        limits = self._padded_limits(temps + targets)
         if limits:
             ax.set_ylim(list(limits))
         ax.legend()
-        self._finalize_plot(ax, "Temperature (°C)", f"Channel {self.channel} Temperature")
+        self._finalize_plot(ax, "Temperature (°C)",
+                            f"Channel {self.channel} Temperature", times[-1])
 
     def _set_clicked(self):
         try:
@@ -334,8 +324,6 @@ class TemperatureChannelWidget(TimeSeriesPlotWidget):
 class TemperatureControlWidget(SensorTabWidget):
     """Container that lays out one TemperatureChannelWidget per channel."""
 
-    readings_signal = Signal(list)  # list[float] of length controller.channels
-
     def __init__(self, controller):
         super().__init__()
         self.controller = controller
@@ -346,7 +334,6 @@ class TemperatureControlWidget(SensorTabWidget):
             self.plot_widgets.append(cw)
             layout.addWidget(cw)
 
-        self.readings_signal.connect(self._fanout)
         # Just another subscriber; the GUI starts the publisher because its
         # plots are what consume it (see TCMController.start). Detached on
         # destroyed: an embedded widget must not outlive itself.
@@ -356,29 +343,26 @@ class TemperatureControlWidget(SensorTabWidget):
 
     def _on_callback(self, temps):
         # Runs in the controller's polling thread; marshal to the GUI thread.
-        self.readings_signal.emit(list(temps))
+        self._post_event("_fanout", list(temps))
 
     def _fanout(self, temps):
+        # Already on the Qt thread: the channels are handed their reading
+        # directly rather than posted a second time.
         current_time = datetime.now().timestamp()
         for cw, t in zip(self.plot_widgets, temps):
-            cw.reading_signal.emit(t, current_time)
+            cw._on_reading(t, current_time)
 
 
 class FlowSensorWidget(TimeSeriesPlotWidget):
     """One flow sensor's readout, plot, and CSV recording."""
-
-    reading_signal = Signal(object, float)  # (flow_ul_min or None, timestamp)
-    fault_signal = Signal(str, object, float)  # (mode, FlowFault, timestamp)
 
     def __init__(self, sensor, draw_protection=True, parent=None):
         super().__init__(parent)
         self.sensor = sensor
         self.draw_protection = draw_protection
 
-        self.flows = []
+        self.flows = SensorSeries()
 
-        self.reading_signal.connect(self._on_reading)
-        self.fault_signal.connect(self._on_fault)
         self._build_ui()
         # Detached on destroyed: unsubscribe removes by identity, so the exact
         # bound callbacks are retained (an embedded widget must not outlive itself).
@@ -452,11 +436,11 @@ class FlowSensorWidget(TimeSeriesPlotWidget):
 
     def _on_callback(self, flow, timestamp):
         # Runs in the controller's reader thread; marshal to the GUI thread.
-        self.reading_signal.emit(flow, timestamp)
+        self._post_event("_on_reading", flow, timestamp)
 
     def _on_fault_callback(self, mode, fault, timestamp):
         # Runs in the controller's reader thread; marshal to the GUI thread.
-        self.fault_signal.emit(mode, fault, timestamp)
+        self._post_event("_on_fault", mode, fault, timestamp)
 
     def _on_fault(self, mode, fault, timestamp):
         # A draw-protection trip, filed beside the readings it was judged
@@ -488,26 +472,25 @@ class FlowSensorWidget(TimeSeriesPlotWidget):
 
         # None is appended as-is: matplotlib renders it as a gap, which is
         # what an invalid reading should look like rather than a 3276.7 spike.
-        self.times.append(current_time)
-        self.flows.append(flow)
-        self._trim_window(self.flows)
+        self.flows.append(flow, current_time)
 
         self._refresh_plot()
         self.last_update = current_time
 
     def _refresh_plot(self):
-        if not self.times:
+        times, flows = self.flows.window(self.window_size)
+        if not times:
             return
         ax = self.canvas.axes
         ax.clear()
-        ax.plot(self.times, self.flows, "b-")
+        ax.plot(times, flows, "b-")
 
         # Scale to the real readings only; invalid samples carry no magnitude.
-        limits = self._padded_limits([f for f in self.flows if f is not None])
+        limits = self._padded_limits([f for f in flows if f is not None])
         if limits:
             ax.set_ylim(list(limits))
 
-        self._finalize_plot(ax, "Flow Rate (µL/min)", self.sensor.name)
+        self._finalize_plot(ax, "Flow Rate (µL/min)", self.sensor.name, times[-1])
 
 
 class FlowSensorControlWidget(SensorTabWidget):

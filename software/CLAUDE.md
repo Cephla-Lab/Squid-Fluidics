@@ -110,7 +110,7 @@ Speed codes (0–40) map to stroke times via `SPEED_SEC_MAPPING`. Use `flow_rate
 
 Per sensor, `monitor` is `off` (plot only), `warn` (log and carry on), or `stop` (halt the draw and raise `FlowFault`). Config sets the starting mode; the Flow Sensors tab switches it at runtime. Each draw reads the mode once when it arms.
 
-Notices go to `MERFISHOperations(on_warning=...)`, which becomes the `DrawGuard`'s `log`. It defaults to the fluidics logger's WARNING (console + run log); the GUI passes a channel that marshals to the GUI thread and shows a non-modal line under the progress bar. A `warn` fault also lands in the flow CSV's Fault column when recording.
+Notices go to `MERFISHOperations(on_warning=...)`, which becomes the `DrawGuard`'s `log`. It defaults to the fluidics logger's WARNING (console + run log); the GUI passes a channel that marshals to the GUI thread and shows a non-modal line under the progress bar. A `warn` fault also lands in the flow CSV's Fault column when recording -- its own row, carrying the tripping sample's timestamp.
 
 **Only Flow Cell is guarded.** `OpenChamberOperations` is never handed the sensors, so a `warn`/`stop` mode configured on an Open Chamber machine is inert; the GUI says so at startup, forces the mode to `off`, and disables the per-sensor control.
 
@@ -125,7 +125,16 @@ Not guarded: the dispense-to-waste inside `_empty_syringe_pump_on_full`, and `Pr
 
 ### GUI Structure
 
-`gui.py` is a single-file PyQt5 application (~1200 lines) with tabs for sequence editing, hardware control, sensor monitoring, and real-time plotting. It instantiates the same hardware classes and `ExperimentWorker` as the CLI.
+`gui.py` is the standalone application: it builds the `FluidicsSystem`, lays the tabs out, and owns the window's lifecycle. The widgets themselves live in `fluidics/qt/`, so an embedding application (Squid's fluidics-protocol GUI) can import them without the standalone app:
+
+- **`fluidics/qt/support.py`** — `PostsToQtThread` (the one cross-thread idiom: `_post_event(name, *args)` runs a method on the Qt thread), `GuiLogHandler` (feeds the run tab's log pane), `subscribe_until_detached`, and the small dialog/format helpers
+- **`fluidics/qt/sequence_editor.py`** — `SequencesWidget` (the sequence list, the run controls, the log pane) and `AddSequenceDialog`
+- **`fluidics/qt/manual_control.py`** — `ManualControlWidget`
+- **`fluidics/qt/sensor_plots.py`** — the live temperature and flow plots, their rolling windows and per-plot CSV recording
+
+Qt is reached through `qtpy` everywhere, `gui.py` included — two bindings in one process is a crash, and qtpy resolves it once (`QT_API`). PyQt5 and matplotlib are the `[gui]` extra, so the core package (sequences, control, worker, CLI) installs headless.
+
+**Widgets that outlive nothing.** An embedded widget can be destroyed while the rig keeps running, so every subscription a widget makes is undone on `destroyed`: `subscribe_until_detached` for the device and session channels (`Subscribers.unsubscribe` deregisters by identity, so the bound method registered is the one handed back), and `GuiLogHandler.detach()` for the log handler, which logging would otherwise hold globally.
 
 ## Key Conventions
 
