@@ -65,3 +65,27 @@ def test_the_output_button_follows_the_driver_on_each_reading(channel_widget):
     controller._publish()
     deliver_posted_events()
     assert not channel.output_btn.isChecked()
+
+
+class TestSetControlsEnabled:
+    def test_channel_controls_follow_in_lockstep(self):
+        from types import SimpleNamespace
+
+        from fluidics.qt.sensor_plots import TemperatureChannelWidget, TemperatureControlWidget
+
+        calls = []
+        control = lambda name: SimpleNamespace(setEnabled=lambda on, n=name: calls.append((n, on)))  # noqa: E731
+        stub = SimpleNamespace(
+            temp_input=control("input"), set_btn=control("set"), save_btn=control("save"), output_btn=control("output")
+        )
+        TemperatureChannelWidget.set_controls_enabled(stub, False)
+        assert calls == [("input", False), ("set", False), ("save", False), ("output", False)]
+
+        class Channel(SimpleNamespace):
+            set_controls_enabled = TemperatureChannelWidget.set_controls_enabled
+
+        channel = Channel(**vars(stub))
+        fanout = SimpleNamespace(plot_widgets=[channel, channel])
+        calls.clear()
+        TemperatureControlWidget.set_controls_enabled(fanout, True)
+        assert [on for _n, on in calls] == [True] * 8

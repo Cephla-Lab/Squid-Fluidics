@@ -316,7 +316,7 @@ def validate_sequences(sequences: list[dict], config) -> None:
     check_types_against_application(sequences, config)
 
 
-def sequence_problem(seq: dict, application: str, limit: int) -> Optional[str]:
+def sequence_problem(seq: dict, application: str, limit: Optional[int]) -> Optional[str]:
     """The verdict on one sequence, as a message or None -- the order the
     complaints are asked in, in one place.
 
@@ -324,6 +324,10 @@ def sequence_problem(seq: dict, application: str, limit: int) -> Optional[str]:
     an unknown type this message beats the union's tag complaint. A pure
     question -- the caller's dict is never rewritten; the coercion happens
     on a copy here, and for real in SequenceListAdapter.
+
+    limit=None means the port range is not known yet (an embedder judging a
+    file before its rig config is loaded): the port stage is skipped, the
+    type and schema stages still run.
     """
     type_problem = sequence_type_problem(seq, application)
     if type_problem is not None:
@@ -334,6 +338,8 @@ def sequence_problem(seq: dict, application: str, limit: int) -> Optional[str]:
         first = e.errors()[0]
         field = ".".join(str(part) for part in first["loc"][2:]) or "sequence"
         return f"{field}: {first['msg']}"
+    if limit is None:
+        return None
     problems = sequence_port_problems(validated[0].model_dump(), limit)
     if problems:
         return "; ".join(problems) + f": {port_range_note(limit)}"

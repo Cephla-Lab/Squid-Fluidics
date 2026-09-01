@@ -329,3 +329,15 @@ class TestRoundLabel:
             [{"type": "flow_reagent", "fluidic_port": 1, "flow_rate": 500, "volume": 500}]
         )[0]
         assert row.round is None
+
+
+class TestSequenceProblemWithoutALimit:
+    def test_none_limit_skips_ports_but_keeps_type_and_schema(self):
+        from fluidics.sequences import sequence_problem
+
+        row = {"type": "flow_reagent", "fluidic_port": 999, "flow_rate": 500, "volume": 500}
+        assert sequence_problem(row, "Flow Cell", None) is None  # port stage skipped
+        assert sequence_problem(row, "Flow Cell", 24) is not None  # with a limit it fires
+        assert sequence_problem({"type": "no_such"}, "Flow Cell", None) is not None
+        bad = {"type": "flow_reagent", "fluidic_port": 1, "flow_rate": "x", "volume": 500}
+        assert "flow_rate" in sequence_problem(bad, "Flow Cell", None)

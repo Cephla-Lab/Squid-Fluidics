@@ -325,6 +325,12 @@ class TemperatureChannelWidget(TimeSeriesPlotWidget):
         self._finalize_plot("Temperature (°C)",
                             f"Channel {self.channel} Temperature", times[-1])
 
+    def set_controls_enabled(self, enabled):
+        """An embedder's run can own the TEC: the setpoint controls follow, while the
+        plot and its recording stay live."""
+        for control in (self.temp_input, self.set_btn, self.save_btn, self.output_btn):
+            control.setEnabled(enabled)
+
     def _set_clicked(self):
         try:
             t = float(self.temp_input.text())
@@ -369,6 +375,11 @@ class TemperatureControlWidget(PostsToQtThread, SensorTabWidget):
         detach = subscribe_until_detached((self.controller, self._on_callback))
         self.destroyed.connect(detach)
         self.controller.start()
+
+    def set_controls_enabled(self, enabled):
+        """Every channel's setpoint controls at once - the embedder's one seam."""
+        for widget in self.plot_widgets:
+            widget.set_controls_enabled(enabled)
 
     def _on_callback(self, temps):
         # Runs in the controller's polling thread; marshal to the GUI thread.
