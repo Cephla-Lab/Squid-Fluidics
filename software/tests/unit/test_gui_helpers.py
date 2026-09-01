@@ -1218,6 +1218,23 @@ class TestStaleStateNone:
         assert stopped == [True]
 
 
+class TestPostsToQtThread:
+    def test_a_missing_handler_fails_where_it_was_posted(self, qapp):
+        """The target is resolved on the producer's thread. A renamed
+        handler must fail at the call site, not as an AttributeError
+        inside event() on the Qt thread -- where, per run_log's note on
+        sys.excepthook, PyQt can take the process with it."""
+        from qtpy.QtCore import QObject
+        from fluidics.qt.support import PostsToQtThread
+
+        class Poster(PostsToQtThread, QObject):
+            pass
+
+        poster = Poster()
+        with pytest.raises(AttributeError):
+            poster._post_event("_a_handler_that_was_renamed")
+
+
 class TestDetachOnDestroy:
     """The embedded widgets must remove exactly the callbacks they registered:
     Subscribers.unsubscribe deregisters by identity, and a fresh bound-method
