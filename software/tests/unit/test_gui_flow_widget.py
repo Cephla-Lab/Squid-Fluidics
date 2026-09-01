@@ -62,6 +62,25 @@ def test_a_fault_waits_for_the_qt_thread_rather_than_landing_inline(qapp):
         sensor.close()
 
 
+def test_the_plot_draws_the_window_not_the_whole_buffer(qapp):
+    """The series holds far more than the plot shows; what is drawn is the
+    window the operator asked for, cut at read time."""
+    sensor = FlowSensorSimulation(index=1, name="syringe_draw")
+    widget = gui.FlowSensorWidget(sensor, draw_protection=True)
+    try:
+        widget.window_size = 10
+        for n in range(100):
+            widget.flows.append(float(n), t=1000.0 + n)
+        widget._refresh_plot()
+        drawn = list(widget.canvas.axes.lines[0].get_xdata())
+        assert len(widget.flows.window()[0]) == 100, "the buffer keeps it all"
+        assert drawn == [1000.0 + n for n in range(89, 100)], \
+            "the plot drew outside its window"
+    finally:
+        widget.deleteLater()
+        sensor.close()
+
+
 def test_without_a_recording_a_fault_is_dropped_quietly(qapp):
     sensor = FlowSensorSimulation(index=1, name="syringe_draw")
     widget = gui.FlowSensorWidget(sensor, draw_protection=True)

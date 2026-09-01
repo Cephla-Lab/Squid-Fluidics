@@ -120,8 +120,7 @@ class SensorRecorder:
         with self._lock:
             if self._file is not None:
                 try:
-                    self._file.flush()      # the tail since the last flush
-                    self._file.close()
+                    self._file.close()      # flushes the tail on the way out
                 except OSError as e:
                     _logger.warning("Sensor recording did not close "
                                     "cleanly: %s", e)
