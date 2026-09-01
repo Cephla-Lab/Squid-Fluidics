@@ -7,8 +7,6 @@ and every structural verb can be exercised (or driven by a script, or a
 headless embedder) with no GUI in the process.
 """
 
-import pytest
-
 from fluidics.sequence_list import SequenceList
 from fluidics.sequences import type_label
 
@@ -24,12 +22,6 @@ class TestWhatARunWouldTake:
         model = flow_cell(FLOW, TEMP)
         assert [s["type"] for s in model.validated()] == \
             ["flow_reagent", "set_temperature"]
-
-    def test_the_caller_s_dicts_stay_the_caller_s(self):
-        original = dict(FLOW)
-        model = flow_cell(original)
-        model.set_field(0, "volume", "750")
-        assert original["volume"] == 500, "the model edited the caller's dict"
 
     def test_included_rows_in_model_order(self):
         model = flow_cell({"include": True}, {"include": False},
@@ -73,6 +65,7 @@ class TestTheVerdicts:
         model.set_field(0, "volume", "750")
         assert model.problem(0) is None and model.blocking_error() is None
 
+class TestWhatSetFieldTakes:
     def test_zero_is_a_value_not_an_empty_field(self):
         """Only the editor's empty cell means "unset". 0 is a real
         temperature and a real incubation time, and a caller driving the
@@ -105,11 +98,13 @@ class TestStructuralVerbs:
         assert model.add(TEMP) == 1
         assert [s["type"] for s in model] == ["flow_reagent", "set_temperature"]
 
-    def test_remove_says_what_to_select_next(self):
+    def test_remove_drops_the_row(self):
         model = flow_cell(FLOW, TEMP, FLOW)
-        assert model.remove(1) == 1
-        assert len(model) == 2
-        assert model.remove(1) == 0, "removing the last row selects the one before"
+        model.remove(1)
+        assert [s["type"] for s in model] == ["flow_reagent", "flow_reagent"]
+        model.remove(0)
+        model.remove(0)
+        assert len(model) == 0, "the list empties without complaint"
 
     def test_duplicate_inserts_an_independent_copy_after(self):
         model = flow_cell(FLOW, TEMP)
@@ -146,25 +141,34 @@ class TestStructuralVerbs:
         model.replace([TEMP])
         assert len(model) == 1 and model.problem(0) is None
 
+    def test_the_caller_s_dicts_stay_the_caller_s(self):
+        original = dict(FLOW)
+        model = flow_cell(original)
+        model.set_field(0, "volume", "750")
+        assert original["volume"] == 500, "the model edited the caller's dict"
+
 
 class TestTheNameSentinel:
     def test_a_blank_name_is_no_name(self):
         model = flow_cell(dict(FLOW, name="prime"))
-        assert model.set_name(0, "   ") == type_label(model[0])
+        model.set_name(0, "   ")
         assert model[0]["name"] is None
+        assert model.title(0) == type_label(model[0])
 
     def test_typing_the_type_s_own_label_back_is_no_name(self):
         """The row titles itself from the type when unnamed, so that title
         typed back must not freeze into the file as a name."""
         model = flow_cell(FLOW)
         label = type_label(model[0])
-        assert model.set_name(0, label) == label
+        model.set_name(0, label)
         assert model[0]["name"] is None
+        assert model.title(0) == label
 
     def test_a_real_name_sticks_and_titles_the_row(self):
         model = flow_cell(FLOW)
-        assert model.set_name(0, "  prime  ") == "prime"
+        model.set_name(0, "  prime  ")
         assert model[0]["name"] == "prime"
+        assert model.title(0) == "prime"
 
 
 def test_the_model_needs_no_qt():
@@ -174,5 +178,5 @@ def test_the_model_needs_no_qt():
         "import sys; import fluidics.sequence_list as m; "
         "m.SequenceList('Flow Cell', 24, [{'type': 'priming', "
         "'fluidic_port': 1, 'flow_rate': 1, 'volume': 1}]).validated(); "
-        "print([n for n in sys.modules if 'qt' in n.lower() or 'PyQt' in n])")
+        "print([n for n in sys.modules if 'qt' in n.lower()])")
     assert loaded == "[]", f"Qt was imported: {loaded}"

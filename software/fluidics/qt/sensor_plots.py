@@ -20,7 +20,7 @@ from matplotlib.figure import Figure
 from matplotlib.ticker import FuncFormatter
 
 from fluidics.qt.support import PostsToQtThread, subscribe_until_detached
-from fluidics.sensor_recorder import _FLUSH_INTERVAL_SECONDS, SensorSeries
+from fluidics.sensor_recorder import FLUSH_INTERVAL_SECONDS, SensorSeries
 
 _logger = logging.getLogger("fluidics.gui")
 
@@ -204,7 +204,7 @@ class TimeSeriesPlotWidget(PostsToQtThread, QWidget):
             return
         self.writer.writerow(row)
         now = time.monotonic()
-        if self.file is not None and now - self._flushed_at >= _FLUSH_INTERVAL_SECONDS:
+        if self.file is not None and now - self._flushed_at >= FLUSH_INTERVAL_SECONDS:
             self.file.flush()
             self._flushed_at = now
 

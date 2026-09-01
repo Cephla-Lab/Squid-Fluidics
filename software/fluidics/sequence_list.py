@@ -1,23 +1,33 @@
-"""The sequence list as data: what the operator typed, what a run would
-take, and what is wrong with each row.
+"""The sequence list as data: the editor's model, with no Qt in it.
 
-The editor's model, with no Qt in it. `SequenceList` holds the dicts --
-exactly as typed, never rewritten behind the operator's back -- answers
-what a run would take (`validated`, `included_rows`), what is wrong with
-each row (`problem`, `blocking_error`), and performs the structural
-verbs (add, remove, duplicate, move). A GUI renders it and translates
+`SequenceList` holds the dicts, answers what a run would take
+(`included`, `validated`), what is wrong with each row (`problem`,
+`problems`, `blocking_error`), and performs the verbs that change it
+(`replace`, `add`, `remove`, `duplicate`, `move`, `set_included`,
+`set_all_included`, `set_name`, `set_field`). A GUI renders it and turns
 clicks into these calls; a script, a headless embedder or a future API
 can hold one without importing Qt at all.
 
 Two rules the list owns rather than any view:
 
-- **Coercion happens on the way out.** `problem` validates a copy, so a
-  half-typed field is a red row and not a rewritten one; `validated`
+- **Coercion happens on the way out.** A row holds what was typed --
+  never rewritten behind the operator -- and `problem` judges it by
+  validating into a model rather than over the row itself; `validated`
   returns the coerced dicts a run or a save takes.
 - **A name that equals the type's label is no name.** The row titles
   itself from the type when unnamed, so typing that title back (or
   emptying the field) must read as "unnamed" rather than freezing the
   label into the file.
+
+The list does not announce its own changes: it is mutated by whoever
+renders it, on that caller's thread, and every verb leaves it consistent
+to read. A second reader would want a channel -- the shape the rest of
+this package uses -- rather than polling.
+
+There is no set_type verb. The editor retypes a row by removing and
+adding, and a naive one would have to prune the old type's fields: the
+models forbid extras, so a retyped row that kept them is invalid for
+good.
 """
 
 from .sequences import (SequenceListAdapter, is_included, sequence_problem,
@@ -25,12 +35,28 @@ from .sequences import (SequenceListAdapter, is_included, sequence_problem,
 
 
 class SequenceList:
+    """The rows, the verdicts, and the verbs that reorder them.
+
+    application: the rig's application ("Flow Cell" / "Open Chamber"),
+    which decides the sequence types on offer. port_limit: how many
+    fluidic ports the rig has. Both are the config's, and both are read
+    by every verdict -- set_config revalidates when a caller changes rigs
+    under the same list.
+    """
+
     def __init__(self, application, port_limit, sequences=()):
-        self.application = application
-        self.port_limit = port_limit
+        self._application = application
+        self._port_limit = port_limit
         self._rows = []
         self._problems = {}
         self.replace(sequences)
+
+    def set_config(self, application, port_limit):
+        """Point the list at a different rig, and re-judge it: a verdict
+        outlives the config it was reached under otherwise."""
+        self._application = application
+        self._port_limit = port_limit
+        self._revalidate()
 
     # --- reading ---
 
@@ -54,6 +80,11 @@ class SequenceList:
         """The verdict on one row, as a message, or None."""
         return self._problems.get(row)
 
+    def problems(self):
+        """{row: message} for every row that has one -- what an editor
+        paints, and what a save has to refuse over."""
+        return dict(self._problems)
+
     def blocking_error(self):
         """The first problem among the rows a run would actually take --
         an invalid row that is not checked blocks nothing."""
@@ -64,10 +95,18 @@ class SequenceList:
 
     def validated(self, included_only=False):
         """The list, validated and coerced -- the dicts a run or a save
-        takes. `included_only` reads exactly `included_rows()`, so a
-        snapshot of that list stays index-aligned with what is handed to
-        the worker."""
-        rows = self.included_rows() if included_only else range(len(self._rows))
+        takes."""
+        return self.included()[1] if included_only else self._coerced(
+            range(len(self._rows)))
+
+    def included(self):
+        """(rows, sequences) for what a run would take: one read, so the
+        rows a caller labels a plan with and the dicts it runs cannot come
+        from two different moments."""
+        rows = self.included_rows()
+        return rows, self._coerced(rows)
+
+    def _coerced(self, rows):
         validated = SequenceListAdapter.validate_python(
             [self._rows[row] for row in rows])
         return [seq.model_dump() for seq in validated]
@@ -86,10 +125,9 @@ class SequenceList:
         return len(self._rows) - 1
 
     def remove(self, row):
-        """Drop `row`; returns the row to select in its place."""
+        """Drop `row`. Where the cursor goes next is the view's call."""
         self._rows.pop(row)
         self._revalidate()
-        return min(row, len(self._rows) - 1)
 
     def duplicate(self, row):
         """Copy `row` in after itself; returns the copy's row. The copy is
@@ -116,14 +154,20 @@ class SequenceList:
         for seq in self._rows:
             seq["include"] = bool(included)
 
+    def title(self, row):
+        """How the row names itself: its own name, else its type's label.
+        The one place that rule is spelled -- a renderer and an edit both
+        ask it rather than each composing the fallback."""
+        seq = self._rows[row]
+        return seq.get("name") or type_label(seq)
+
     def set_name(self, row, name):
         """Name the row, or unname it: blank, or the type's own label typed
-        back, both mean unnamed. Returns the title the row now shows."""
+        back, both mean unnamed."""
         seq = self._rows[row]
         name = (name or "").strip()
         seq["name"] = name if name and name != type_label(seq) else None
         self._validate_row(row)
-        return seq["name"] or type_label(seq)
 
     def set_field(self, row, field, raw):
         """Put a value in as given -- the editor's empty cell, and only
@@ -142,8 +186,8 @@ class SequenceList:
             self._validate_row(row)
 
     def _validate_row(self, row):
-        problem = sequence_problem(self._rows[row], self.application,
-                                   self.port_limit)
+        problem = sequence_problem(self._rows[row], self._application,
+                                   self._port_limit)
         if problem is None:
             self._problems.pop(row, None)
         else:

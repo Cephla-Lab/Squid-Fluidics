@@ -368,10 +368,23 @@ def check_ports_against_config(sequences: list[dict], config) -> None:
                          + "; ".join(problems))
 
 
+_INCLUDE = TypeAdapter(bool)
+
+
 def is_included(seq: dict) -> bool:
     """The include field, defaulting on -- the one spelling of what the
-    editor's checkbox means and of what a run takes."""
-    return seq.get("include", True)
+    editor's checkbox means and of what a run takes.
+
+    Coerced the way the models coerce it, not by truthiness: a caller
+    driving the list programmatically can hand in "false", and what a run
+    takes must not disagree with what the row validates as. A value even
+    pydantic cannot read counts as included, where the row's own verdict
+    stops it.
+    """
+    try:
+        return _INCLUDE.validate_python(seq.get("include", True))
+    except ValidationError:
+        return True
 
 
 def get_included_sequences(sequences: list[dict]) -> list[dict]:

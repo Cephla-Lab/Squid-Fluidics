@@ -97,6 +97,27 @@ class TestTheModelIsTheTruth:
         assert widget.getSequences()[0]["volume"] == 750
 
 
+class TestSaving:
+    def test_a_bad_row_stops_the_save_in_the_model_s_words(self, widget,
+                                                           monkeypatch):
+        """Save takes every row, checked or not. The operator should read
+        the same verdict the tree is showing in red -- not pydantic's dump
+        of the tagged union, which is what an unchecked bad row used to
+        produce when the coercion failed inside the writer."""
+        said = []
+        asked = []
+        monkeypatch.setattr(gui.QMessageBox, "critical",
+                            lambda *args: said.append(args[2]))
+        monkeypatch.setattr(gui.QFileDialog, "getSaveFileName",
+                            lambda *a, **k: asked.append(True) or ("", ""))
+        widget.setSequences([FLOW, dict(TEMP, include=False)])
+        field_item(widget, 1, "temperature").setText(1, "abc")
+        widget.saveSequences()
+        assert asked == [], "it asked where to save a list it cannot write"
+        assert said and said[0].startswith("Sequence 2:")
+        assert "temperature" in said[0]
+
+
 class TestLogPane:
     """The run tab shows what the run log is saying, and exports what it
     is showing."""

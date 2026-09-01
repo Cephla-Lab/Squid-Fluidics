@@ -1,10 +1,11 @@
-"""The standalone sequence editor and run display (SequencesWidget) and its Add-sequence dialog.
-Moved verbatim from gui.py; imports go through qtpy."""
+"""The sequence editor and run display (SequencesWidget) and its
+Add-sequence dialog. Extracted from gui.py so an embedding application
+can import them; the list itself is fluidics.sequence_list, which this
+renders."""
 
 import logging
 import time
 
-from pydantic import ValidationError
 from qtpy.QtCore import Qt, QSignalBlocker, QTimer
 from qtpy.QtGui import QBrush, QColor
 from qtpy.QtWidgets import (
@@ -43,7 +44,6 @@ from fluidics.sequences import (
     label_for_type,
     load_sequences,
     save_sequences_yaml,
-    type_label,
     types_for_application,
     validate_sequences,
 )
@@ -392,7 +392,7 @@ class SequencesWidget(PostsToQtThread, QWidget):
         -- every field, defaults included, so a value at its default can
         still be edited."""
         seq_type = seq.get('type', '')
-        label = type_label(seq)
+        label = label_for_type(seq_type)
         item = QTreeWidgetItem([seq.get('name') or label, f"Type: {label}"])
         item.setFlags(item.flags() | Qt.ItemIsEditable)
         item.setCheckState(
@@ -469,8 +469,9 @@ class SequencesWidget(PostsToQtThread, QWidget):
             self._model.set_included(row, item.checkState(0) == Qt.Checked)
             # The title renders from the model, always: an emptied name --
             # or the type's label typed out -- reads as the type again.
+            self._model.set_name(row, item.text(0))
             with QSignalBlocker(self.tree):
-                item.setText(0, self._model.set_name(row, item.text(0)))
+                item.setText(0, self._model.title(row))
         else:
             self._model.set_field(row, item.data(0, Qt.UserRole),
                                   item.text(1).strip())
@@ -518,6 +519,16 @@ class SequencesWidget(PostsToQtThread, QWidget):
                 QMessageBox.critical(self, "Error", f"Failed to load sequences: {str(e)}")
 
     def saveSequences(self):
+        # A save takes every row, checked or not, so an unchecked bad row
+        # stops it -- said in the model's words, which are the ones the
+        # tree is already showing in red, rather than pydantic's dump of
+        # the whole tagged union.
+        problems = self._model.problems()
+        if problems:
+            row = min(problems)
+            QMessageBox.critical(self, "Cannot Save",
+                                 f"Sequence {row + 1}: {problems[row]}")
+            return
         fileName, _ = QFileDialog.getSaveFileName(
             self, "Save Sequences", "",
             "YAML Files (*.yaml)")
@@ -550,7 +561,9 @@ class SequencesWidget(PostsToQtThread, QWidget):
         row = self._currentRow()
         if row is None:
             return
-        self._refresh(select=self._model.remove(row))
+        self._model.remove(row)
+        # The row below takes the cursor, or the last row if there is none.
+        self._refresh(select=min(row, len(self._model) - 1))
 
     def duplicateSequence(self):
         row = self._currentRow()
@@ -600,10 +613,12 @@ class SequencesWidget(PostsToQtThread, QWidget):
             item.setBackground(1, blue_brush)
 
     def runSelectedSequences(self):
-        if not len(self._model):
+        if not self._model:
             return
         try:
-            selected = self.getSequences(selected_only=True)
+            # One read: the rows the plan is relabelled with below and the
+            # dicts the run takes come from the same moment.
+            rows, selected = self._model.included()
             # A port this rig does not have, or a wrong-application type,
             # must fail here, at the button, not hours in -- live
             # validation paints the same verdicts, but this is the gate.
@@ -625,7 +640,6 @@ class SequencesWidget(PostsToQtThread, QWidget):
         # The plan's rows index `selected`; this widget's rows include the
         # unchecked ones. Relabel once, so highlight and resume land on
         # tree rows without a translation table riding alongside.
-        rows = self._includedRows()
         plan = tuple(entry._replace(row=rows[entry.row]) for entry in plan)
 
         self._warnings.clear()
