@@ -325,6 +325,13 @@ def _yaml_faithful(value):
     return value
 
 
+def port_range_note(limit: int) -> str:
+    """How the rig's port range is put to the operator, wherever it is
+    said -- the time-zero gate, the editor's live verdict, and the valve
+    system's own refusal at run time."""
+    return f"this configuration has ports 1..{limit}"
+
+
 def available_port_count(config: FluidicsConfig) -> int:
     """How many fluidic ports the configured cascade offers.
 

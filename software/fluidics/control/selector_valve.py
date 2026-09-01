@@ -2,7 +2,7 @@ import logging
 
 from ..errors import DeviceError, RunControl
 from ._def import CMD_SET
-from .config import available_port_count, port_key
+from .config import available_port_count, port_key, port_range_note
 
 _logger = logging.getLogger(__name__)
 
@@ -78,8 +78,8 @@ class SelectorValveSystem():
             # last open selected -- the draw then pulled the wrong reagent
             # with nothing saying so.
             raise ValueError(
-                f"Fluidic port {port_index} is out of range: this "
-                f"configuration has ports 1..{self.available_port_number}")
+                f"Fluidic port {port_index} is out of range: "
+                + port_range_note(self.available_port_number))
 
         ports_processed = 0
         for valve in self.valves[:-1]:  # Process all valves except the last one

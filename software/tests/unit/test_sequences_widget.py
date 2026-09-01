@@ -22,9 +22,7 @@ from fluidics.subscribers import Subscribers
 
 from .test_gui_helpers import FakeSession
 
-FLOW = {"type": "flow_reagent", "fluidic_port": 1, "flow_rate": 500,
-        "volume": 500}
-TEMP = {"type": "set_temperature", "temperature": 37.0}
+from ..conftest import FLOW, TEMP
 
 
 @pytest.fixture
@@ -74,6 +72,14 @@ class TestTheModelIsTheTruth:
         field_item(widget, 0, "incubation_time").setText(1, "5")
         assert widget.getSequences()[0]["incubation_time"] == 5.0
 
+    def test_an_unnamed_row_is_titled_by_its_type(self, widget):
+        """The tree asks the model how a row is titled rather than
+        composing the fallback itself, so the name it shows and the name
+        an edit compares against cannot drift."""
+        widget.setSequences([FLOW, dict(TEMP, name="settle")])
+        assert widget.tree.topLevelItem(0).text(0) == "Flow Reagent"
+        assert widget.tree.topLevelItem(1).text(0) == "settle"
+
     def test_a_name_edit_lands_and_an_emptied_name_reads_as_the_type(self, widget):
         widget.setSequences([FLOW])
         top = widget.tree.topLevelItem(0)
@@ -86,7 +92,7 @@ class TestTheModelIsTheTruth:
     def test_the_checkbox_is_the_include_field(self, widget):
         widget.setSequences([FLOW, TEMP])
         widget.tree.topLevelItem(0).setCheckState(0, Qt.Unchecked)
-        assert widget._sequences[0]["include"] is False
+        assert widget._model[0]["include"] is False
         selected = widget.getSequences(selected_only=True)
         assert [s["type"] for s in selected] == ["set_temperature"]
 
@@ -95,8 +101,29 @@ class TestTheModelIsTheTruth:
         agree on the raw text, and getSequences coerces on the way out."""
         widget.setSequences([FLOW])
         field_item(widget, 0, "volume").setText(1, "750")
-        assert widget._sequences[0]["volume"] == "750"
+        assert widget._model[0]["volume"] == "750"
         assert widget.getSequences()[0]["volume"] == 750
+
+
+class TestSaving:
+    def test_a_bad_row_stops_the_save_in_the_model_s_words(self, widget,
+                                                           monkeypatch):
+        """Save takes every row, checked or not. The operator should read
+        the same verdict the tree is showing in red -- not pydantic's dump
+        of the tagged union, which is what an unchecked bad row used to
+        produce when the coercion failed inside the writer."""
+        said = []
+        monkeypatch.setattr(gui.QMessageBox, "critical",
+                            lambda parent, title, text: said.append(text))
+        monkeypatch.setattr(
+            gui.QFileDialog, "getSaveFileName",
+            lambda *a, **k: pytest.fail("asked where to save a list it "
+                                        "cannot write"))
+        widget.setSequences([FLOW, dict(TEMP, include=False)])
+        field_item(widget, 1, "temperature").setText(1, "abc")
+        widget.saveSequences()
+        assert said and said[0].startswith("Sequence 2:")
+        assert "temperature" in said[0]
 
 
 class TestLogPane:
@@ -220,7 +247,7 @@ class TestExpansion:
         widget.tree.topLevelItem(0).setExpanded(True)
         widget.tree.setCurrentItem(widget.tree.topLevelItem(0))
         widget.moveSequenceDown()
-        assert [s["type"] for s in widget._sequences] == \
+        assert [s["type"] for s in widget._model] == \
             ["set_temperature", "flow_reagent"]
         assert self._opened(widget) == [1], \
             "the open row stayed at the index instead of following the move"
@@ -253,22 +280,22 @@ class TestStructuralOps:
         # Independent: editing the copy leaves the original alone -- an
         # aliased duplicate would edit both rows at once.
         field_item(widget, 1, "volume").setText(1, "900")
-        assert widget._sequences[0]["volume"] == 500
-        assert widget._sequences[1]["volume"] == "900"
+        assert widget._model[0]["volume"] == 500
+        assert widget._model[1]["volume"] == "900"
 
     def test_move_down_swaps_and_the_edges_hold(self, widget):
         widget.setSequences([FLOW, TEMP])
         widget.tree.setCurrentItem(widget.tree.topLevelItem(0))
         widget.moveSequenceDown()
-        assert [s["type"] for s in widget._sequences] == \
+        assert [s["type"] for s in widget._model] == \
             ["set_temperature", "flow_reagent"]
         # The moved row stays selected, so a second press keeps moving it --
         # and at the edge, nothing happens.
         widget.moveSequenceDown()
-        assert [s["type"] for s in widget._sequences] == \
+        assert [s["type"] for s in widget._model] == \
             ["set_temperature", "flow_reagent"]
         widget.moveSequenceUp()
-        assert [s["type"] for s in widget._sequences] == \
+        assert [s["type"] for s in widget._model] == \
             ["flow_reagent", "set_temperature"]
 
     def test_remove_takes_the_selected_sequence_out(self, widget):
@@ -276,14 +303,14 @@ class TestStructuralOps:
         # A selected child means its parent.
         widget.tree.setCurrentItem(widget.tree.topLevelItem(0).child(0))
         widget.removeSequence()
-        assert [s["type"] for s in widget._sequences] == ["set_temperature"]
+        assert [s["type"] for s in widget._model] == ["set_temperature"]
 
     def test_select_all_and_none_write_the_model(self, widget):
         widget.setSequences([FLOW, TEMP])
         widget.selectNone()
-        assert widget._includedRows() == []
+        assert widget._model.included_rows() == []
         widget.selectAll()
-        assert widget._includedRows() == [0, 1]
+        assert widget._model.included_rows() == [0, 1]
 
 
 class TestLiveValidation:
@@ -291,8 +318,8 @@ class TestLiveValidation:
         widget.setSequences([FLOW])
         assert widget.runButton.isEnabled()
         field_item(widget, 0, "volume").setText(1, "abc")
-        assert "volume" in widget._invalid[0]
-        assert widget.tree.topLevelItem(0).toolTip(0) == widget._invalid[0]
+        assert "volume" in widget._model.problem(0)
+        assert widget.tree.topLevelItem(0).toolTip(0) == widget._model.problem(0)
         assert not widget.runButton.isEnabled()
         assert "volume" in widget.runButton.toolTip()
 
@@ -300,14 +327,14 @@ class TestLiveValidation:
         widget.setSequences([FLOW])
         beyond = available_port_count(widget.config) + 1
         field_item(widget, 0, "fluidic_port").setText(1, str(beyond))
-        assert f"fluidic_port={beyond}" in widget._invalid[0]
+        assert f"fluidic_port={beyond}" in widget._model.problem(0)
 
     def test_fixing_the_field_clears_the_verdict_and_frees_the_run(self, widget):
         widget.setSequences([FLOW])
         volume = field_item(widget, 0, "volume")
         volume.setText(1, "abc")
         volume.setText(1, "750")
-        assert widget._invalid == {}
+        assert widget._model.problem(0) is None
         assert widget.tree.topLevelItem(0).toolTip(0) == ""
         assert widget.runButton.isEnabled()
         assert widget.getSequences()[0]["volume"] == 750
@@ -345,7 +372,7 @@ class TestApplicationTypes:
         to be refused."""
         widget.setSequences([FLOW, {"type": "add_reagent", "fluidic_port": 2,
                                     "flow_rate": 500, "volume": 100}])
-        assert "not a Flow Cell sequence type" in widget._invalid[1]
+        assert "not a Flow Cell sequence type" in widget._model.problem(1)
         assert not widget.runButton.isEnabled()
         widget.tree.setCurrentItem(widget.tree.topLevelItem(1))
         widget.removeSequence()
@@ -365,14 +392,14 @@ class TestResumeRunsTheTail:
         widget.setSequences([FLOW, dict(FLOW, include=False), FLOW, TEMP])
         from fluidics.time_estimate import plan_run
         plan = plan_run(widget.config, widget.getSequences(selected_only=True))
-        rows = widget._includedRows()
+        rows = widget._model.included_rows()
         widget._plan = tuple(e._replace(row=rows[e.row]) for e in plan)
         handed = []
         widget.system.run = lambda seqs, plan=None: handed.append(plan)
         widget._handle_run_event(
             gui.RunEnded("run-1", "stopped", None, 0.0, position=1))
         assert [entry.row for entry in handed[0]] == [2, 3]
-        assert widget._includedRows() == [0, 2, 3], "the checkboxes changed"
+        assert widget._model.included_rows() == [0, 2, 3], "the checkboxes changed"
 
 
 class TestRunStartRelabelsThePlan:
@@ -392,3 +419,27 @@ class TestRunStartRelabelsThePlan:
         widget.system.run = lambda seqs, plan=None: handed.append(plan)
         widget.runSelectedSequences()
         assert [entry.row for entry in handed[0]] == [0, 2]
+
+    def test_the_run_takes_one_reading_of_the_list(self, widget, monkeypatch):
+        """The confirm dialog is a nested event loop: the rows the plan is
+        relabelled with and the sequences the run takes must come from the
+        same reading, or a list that changed across the dialog labels the
+        plan with rows the run never took."""
+        from tests.worker_helpers import plan_for
+        widget.setSequences([FLOW, FLOW, FLOW])
+        handed = []
+        widget.system.plan = lambda seqs: plan_for(
+            [{"type": "flow_reagent"}] * len(seqs))
+        widget.system.run = lambda seqs, plan=None: handed.append((seqs, plan))
+
+        def confirm_then_change(*args):
+            # What a modal lets in: the list changes while the operator
+            # reads the estimate.
+            widget._model.set_included(0, False)
+            return gui.QMessageBox.Yes
+
+        monkeypatch.setattr(gui.QMessageBox, "question", confirm_then_change)
+        widget.runSelectedSequences()
+        sequences, plan = handed[0]
+        assert len(sequences) == 3, "the run took a different list than it priced"
+        assert [entry.row for entry in plan] == [0, 1, 2]

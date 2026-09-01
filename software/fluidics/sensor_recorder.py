@@ -34,7 +34,7 @@ _logger = logging.getLogger(__name__)
 # bounded by this instead -- measured on the monotonic clock, never on the
 # sample's own timestamp, which the caller supplies and may be historic,
 # replayed out of order, or stepped by NTP.
-_FLUSH_INTERVAL_SECONDS = 1.0
+FLUSH_INTERVAL_SECONDS = 1.0
 
 
 class SensorSeries:
@@ -113,9 +113,9 @@ class SensorRecorder:
                 return
             try:
                 self._writer.writerow([f"{t:.3f}", name, value, self._step])
-                # Time-based, not per row: see _FLUSH_INTERVAL_SECONDS.
+                # Time-based, not per row: see FLUSH_INTERVAL_SECONDS.
                 now = time.monotonic()
-                if now - self._flushed_at >= _FLUSH_INTERVAL_SECONDS:
+                if now - self._flushed_at >= FLUSH_INTERVAL_SECONDS:
                     self._file.flush()
                     self._flushed_at = now
             except (OSError, csv.Error) as e:

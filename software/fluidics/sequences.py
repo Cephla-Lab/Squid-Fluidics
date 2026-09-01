@@ -6,9 +6,10 @@ import re
 from typing import Annotated, Literal, Optional, Union, get_args
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Discriminator, Field, TypeAdapter
+from pydantic import (BaseModel, ConfigDict, Discriminator, Field, TypeAdapter,
+                      ValidationError)
 
-from .control.config import available_port_count
+from .control.config import available_port_count, port_range_note
 from .files import atomic_write
 
 
@@ -259,9 +260,17 @@ def types_for_application(application: str) -> list[str]:
     return APPLICATION_SEQUENCES.get(application, [])
 
 
+def label_for_type(seq_type: str) -> str:
+    """A sequence type as the operator reads it, or the raw type if this
+    rig has no label for it -- the one lookup over SEQUENCE_TYPE_LABELS."""
+    return SEQUENCE_TYPE_LABELS.get(seq_type, seq_type)
+
+
 def sequence_label(seq: dict) -> Optional[str]:
-    """How a sequence is named to the operator in messages and logs: its
-    own name, else its type -- the one spelling of that fallback."""
+    """How a sequence is named in messages and logs: its own name, else
+    its raw type. The machine-readable half of the pair -- what the
+    editor shows a row is SequenceList.title(), which falls back to the
+    type's operator-facing label instead."""
     return seq.get("name") or seq.get("type")
 
 
@@ -307,6 +316,30 @@ def validate_sequences(sequences: list[dict], config) -> None:
     check_types_against_application(sequences, config)
 
 
+def sequence_problem(seq: dict, application: str, limit: int) -> Optional[str]:
+    """The verdict on one sequence, as a message or None -- the order the
+    complaints are asked in, in one place.
+
+    The type first: a wrong-application row is also union-valid, and for
+    an unknown type this message beats the union's tag complaint. A pure
+    question -- the caller's dict is never rewritten; the coercion happens
+    on a copy here, and for real in SequenceListAdapter.
+    """
+    type_problem = sequence_type_problem(seq, application)
+    if type_problem is not None:
+        return type_problem
+    try:
+        validated = SequenceListAdapter.validate_python([seq])
+    except ValidationError as e:
+        first = e.errors()[0]
+        field = ".".join(str(part) for part in first["loc"][2:]) or "sequence"
+        return f"{field}: {first['msg']}"
+    problems = sequence_port_problems(validated[0].model_dump(), limit)
+    if problems:
+        return "; ".join(problems) + f": {port_range_note(limit)}"
+    return None
+
+
 def check_ports_against_config(sequences: list[dict], config) -> None:
     """Raise ValueError if any sequence names a port the rig does not have.
 
@@ -322,14 +355,36 @@ def check_ports_against_config(sequences: list[dict], config) -> None:
         problems.extend(f"sequence {index} ({sequence_label(seq)}): {problem}"
                         for problem in sequence_port_problems(seq, limit))
     if problems:
-        raise ValueError(
-            f"Ports out of range -- this configuration has ports "
-            f"1..{limit}: " + "; ".join(problems))
+        raise ValueError(f"Ports out of range -- {port_range_note(limit)}: "
+                         + "; ".join(problems))
+
+
+# Tied to the field it has to agree with, rather than spelled again.
+_INCLUDE = TypeAdapter(SequenceBase.model_fields["include"].annotation)
+
+
+def is_included(seq: dict) -> bool:
+    """The include field, defaulting on -- the one spelling of what the
+    editor's checkbox means and of what a run takes.
+
+    Coerced the way the models coerce it, not by truthiness, so what a
+    run takes cannot disagree with what the row validates as; a value
+    even pydantic cannot read counts as included, where the row's own
+    verdict stops it. Already-boolean values (every row the loaders and
+    the checkbox produce) skip the adapter.
+    """
+    value = seq.get("include", True)
+    if value is True or value is False:
+        return value
+    try:
+        return _INCLUDE.validate_python(value)
+    except ValidationError:
+        return True
 
 
 def get_included_sequences(sequences: list[dict]) -> list[dict]:
     """Return only sequences where include is True."""
-    return [seq for seq in sequences if seq.get("include", True)]
+    return [seq for seq in sequences if is_included(seq)]
 
 
 def get_fields_for_type(seq_type: str) -> dict:

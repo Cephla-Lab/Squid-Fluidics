@@ -171,25 +171,6 @@ class TestHighlightFollowsThePlan:
         assert stub.highlighted == [0, 2, 4]
 
 
-class TestIncludedRows:
-    """_includedRows is both the filter getSequences(selected_only=True)
-    applies and the snapshot _handle_progress translates through, so it must
-    list the included model rows in order.
-    """
-
-    def test_returns_included_rows_in_model_order(self):
-        stub = SimpleNamespace(_sequences=[
-            {"include": True}, {"include": False}, {"include": True},
-            {}, {"include": False}],
-            _isIncluded=gui.SequencesWidget._isIncluded)
-        assert gui.SequencesWidget._includedRows(stub) == [0, 2, 3]
-
-    def test_nothing_included_gives_no_rows(self):
-        stub = SimpleNamespace(_sequences=[{"include": False}, {"include": False}],
-                               _isIncluded=gui.SequencesWidget._isIncluded)
-        assert gui.SequencesWidget._includedRows(stub) == []
-
-
 class TestRecordingSaveDialog:
     """Start Recording asks where to save, pre-filled with the generated
     filename; Stop Recording reports the full path it saved to. Called unbound
@@ -827,16 +808,20 @@ class TestMainWindowJobs:
     runs, and asks before closing under a live job (the system then stops it
     before the devices close)."""
 
-    def test_the_other_tab_goes_dead_for_the_length_of_the_job(self):
+    def _tabs(self, kind):
         enabled = {}
-        stub = SimpleNamespace(RUN_TAB=0, MANUAL_TAB=1,
+        stub = SimpleNamespace(RUN_TAB=0, MANUAL_TAB=1, session=FakeSession(kind=kind),
                                tabWidget=SimpleNamespace(setTabEnabled=enabled.__setitem__))
-        gui.FluidicsControlGUI._renderTabs(stub, "run")
-        assert enabled == {0: True, 1: False}
-        gui.FluidicsControlGUI._renderTabs(stub, "manual")
-        assert enabled == {0: False, 1: True}
-        gui.FluidicsControlGUI._renderTabs(stub, None)
-        assert enabled == {0: True, 1: True}
+        gui.FluidicsControlGUI._renderTabs(stub)
+        return enabled
+
+    def test_the_other_tab_goes_dead_for_the_length_of_the_job(self):
+        """The tabs follow the session, not the announcement they were
+        posted with: _renderTabs takes no kind, so a notification held up
+        behind a modal cannot deaden a tab for a job that has ended."""
+        assert self._tabs("run") == {0: True, 1: False}
+        assert self._tabs("manual") == {0: False, 1: True}
+        assert self._tabs(None) == {0: True, 1: True}
 
     def _closing(self, busy):
         session = FakeSession(kind="run" if busy else None)
@@ -1126,7 +1111,7 @@ class TestResumeOffer:
     checkboxes are never touched. Called unbound against stubs."""
 
     def _stub(self, monkeypatch, answer=gui.QMessageBox.No, plan=(),
-              sequences=None):
+              titled=None):
         asked = []
 
         def question(*args):
@@ -1137,7 +1122,9 @@ class TestResumeOffer:
         started = []
         stub = SimpleNamespace(
             _plan=plan,
-            _sequences=[] if sequences is None else sequences,
+            # What the tree would say now, so a regression that asks the
+            # model instead of the plan prints this and fails.
+            _model=SimpleNamespace(title=lambda row: titled),
             system=SimpleNamespace(
                 run=lambda seqs, plan=None: started.append(plan)),
             _beginRunDisplay=lambda count: started.append(("display", count)),
@@ -1149,16 +1136,10 @@ class TestResumeOffer:
 
     def test_yes_runs_exactly_the_tail(self, monkeypatch):
         plan = plan_of([10.0, 20.0, 30.0], rows=[0, 2, 3])
-        # One dict per tree row 0..3, so a regression back to writing
-        # _sequences[entry.row] lands on a row and trips the pin below.
-        checked = [{"include": True, "type": "flow_reagent"} for _ in range(4)]
-        stub = self._stub(monkeypatch, answer=gui.QMessageBox.Yes, plan=plan,
-                          sequences=checked)
+        stub = self._stub(monkeypatch, answer=gui.QMessageBox.Yes, plan=plan)
         gui.SequencesWidget._offerResume(stub, 1)
         assert stub.started == [plan[1:], ("display", 2)], \
             "the run must be the interrupted plan's tail, nothing else"
-        assert all(s["include"] for s in checked), \
-            "the checkboxes are not the offer's to touch"
 
     def test_no_runs_nothing(self, monkeypatch):
         stub = self._stub(monkeypatch, plan=plan_of([10.0, 20.0]))
@@ -1171,12 +1152,9 @@ class TestResumeOffer:
         from ..worker_helpers import plan_for
         plan = plan_for([{"type": "priming", "name": "prime", "repeat": 2}],
                         seconds=[45.0, 45.0])
-        # The tree's copy was renamed mid-run: the offer must name what the
-        # plan captured -- what will actually execute.
-        stub = self._stub(
-            monkeypatch, plan=plan,
-            sequences=[{"include": True, "type": "priming",
-                        "name": "renamed later"}])
+        # The row was renamed mid-run: the offer must name what the plan
+        # captured -- what will actually execute.
+        stub = self._stub(monkeypatch, plan=plan, titled="renamed later")
         gui.SequencesWidget._offerResume(stub, 1)
         text = stub.asked[0]
         assert "prime" in text and "renamed later" not in text

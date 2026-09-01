@@ -128,7 +128,7 @@ Not guarded: the dispense-to-waste inside `_empty_syringe_pump_on_full`, and `Pr
 `gui.py` is the standalone application: it builds the `FluidicsSystem`, lays the tabs out, and owns the window's lifecycle. The widgets themselves live in `fluidics/qt/`, so an embedding application (Squid's fluidics-protocol GUI) can import them without the standalone app:
 
 - **`fluidics/qt/support.py`** — `PostsToQtThread` (the one cross-thread idiom: `_post_event(name, *args)` runs a method on the Qt thread), `GuiLogHandler` (feeds the run tab's log pane), `subscribe_until_detached`, and the small dialog/format helpers
-- **`fluidics/qt/sequence_editor.py`** — `SequencesWidget` (the sequence list, the run controls, the log pane) and `AddSequenceDialog`
+- **`fluidics/qt/sequence_editor.py`** — `SequencesWidget` (renders the sequence list, the run controls, the log pane) and `AddSequenceDialog`
 - **`fluidics/qt/manual_control.py`** — `ManualControlWidget`
 - **`fluidics/qt/sensor_plots.py`** — the live temperature and flow plots, their rolling windows and per-plot CSV recording
 
