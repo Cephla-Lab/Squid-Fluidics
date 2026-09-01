@@ -36,7 +36,11 @@ def widget(qapp, flow_cell_config):
     )
     w = gui.SequencesWidget(config, system)
     yield w
+    # Actually destroy it: deleteLater only queues, and a widget that is
+    # never destroyed keeps its subscriptions -- the log handler among
+    # them -- attached for the rest of the session.
     w.deleteLater()
+    gui.QApplication.sendPostedEvents(None, gui.QEvent.DeferredDelete)
 
 
 def field_item(widget, row, fname):
@@ -91,6 +95,150 @@ class TestTheModelIsTheTruth:
         field_item(widget, 0, "volume").setText(1, "750")
         assert widget._sequences[0]["volume"] == "750"
         assert widget.getSequences()[0]["volume"] == 750
+
+
+class TestLogPane:
+    """The run tab shows what the run log is saying, and exports what it
+    is showing."""
+
+    def test_a_logged_line_reaches_the_pane(self, widget, caplog):
+        import logging
+        # The app's own configure_console puts the logger at DEBUG; the
+        # test session leaves it higher, so say what the app says.
+        caplog.set_level(logging.DEBUG, logger="fluidics")
+        logging.getLogger("fluidics").info("Sequence 1/3 (prime)")
+        # The handler posts to the Qt thread; deliver what it queued.
+        gui.QApplication.processEvents()
+        assert "Sequence 1/3 (prime)" in widget.logView.toPlainText()
+
+    def test_debug_chatter_stays_out_of_the_pane(self, widget, caplog):
+        """The pane is the console's level, not the log file's: per-move
+        valve traffic would bury the run's own narration."""
+        import logging
+        caplog.set_level(logging.DEBUG, logger="fluidics")
+        logging.getLogger("fluidics").debug("Valve 0: open port 1")
+        gui.QApplication.processEvents()
+        assert "open port 1" not in widget.logView.toPlainText()
+
+    def test_the_pane_keeps_only_its_last_lines(self, widget):
+        for n in range(widget.LOG_LINES + 50):
+            widget._handle_log_line(f"line {n}")
+        text = widget.logView.toPlainText()
+        assert "line 0" not in text and f"line {widget.LOG_LINES + 49}" in text
+
+    def test_export_writes_exactly_what_is_shown(self, widget, tmp_path,
+                                                 monkeypatch):
+        widget._handle_log_line("first line")
+        widget._handle_log_line("second line")
+        out = tmp_path / "exported.txt"
+        monkeypatch.setattr(gui.QFileDialog, "getSaveFileName",
+                            lambda *a, **k: (str(out), ""))
+        widget.exportLog()
+        assert out.read_text().splitlines() == ["first line", "second line"]
+
+    def test_a_cancelled_export_writes_nothing_and_says_nothing(
+            self, widget, tmp_path, monkeypatch):
+        """Cancel is not an error: no file, and no dialog either. The
+        second assertion also keeps a regression here from opening a real
+        modal, which would hang the suite rather than fail it."""
+        said = []
+        monkeypatch.setattr(gui.QFileDialog, "getSaveFileName",
+                            lambda *a, **k: ("", ""))
+        monkeypatch.setattr(gui.QMessageBox, "critical",
+                            lambda *args: said.append(args[1]))
+        widget.exportLog()
+        assert list(tmp_path.iterdir()) == []
+        assert said == []
+
+    def test_an_export_that_fails_says_so_and_raises_nothing(
+            self, widget, tmp_path, monkeypatch):
+        blocked = tmp_path / "blocked"
+        blocked.mkdir()
+        said = []
+        monkeypatch.setattr(gui.QFileDialog, "getSaveFileName",
+                            lambda *a, **k: (str(blocked), ""))
+        monkeypatch.setattr(gui.QMessageBox, "critical",
+                            lambda *args: said.append(args[1]))
+        widget.exportLog()
+        assert said == ["Export Failed"]
+
+    def test_the_handler_detaches_with_the_widget(self, qapp,
+                                                  flow_cell_config):
+        """logging keeps handlers globally: one left attached would post
+        to a destroyed widget, and take the process with it."""
+        import logging
+        from fluidics.subscribers import Subscribers
+        system = SimpleNamespace(
+            devices=SimpleNamespace(selector_valves=SimpleNamespace(
+                get_port_names=lambda: ["Port 1"])),
+            session=FakeSession(), warnings=Subscribers("test warnings"))
+        logger = logging.getLogger("fluidics")
+        before = len(logger.handlers)
+        w = gui.SequencesWidget(flow_cell_config, system)
+        assert len(logger.handlers) == before + 1
+        w.deleteLater()
+        gui.QApplication.sendPostedEvents(None, gui.QEvent.DeferredDelete)
+        assert len(logger.handlers) == before, "the log handler outlived the tab"
+
+
+class TestExpansion:
+    """A loaded file opens collapsed -- one line per sequence, not a wall
+    of every field -- and what the operator opens stays open."""
+
+    def _opened(self, widget):
+        return [row for row in range(widget.tree.topLevelItemCount())
+                if widget.tree.topLevelItem(row).isExpanded()]
+
+    def test_a_loaded_file_opens_collapsed(self, widget):
+        widget.setSequences([FLOW, TEMP, FLOW])
+        assert self._opened(widget) == []
+        assert widget.tree.topLevelItem(0).childCount() > 0, \
+            "collapsed, not empty: the fields are there to open"
+
+    def test_loading_again_collapses_what_the_last_file_had_open(self, widget):
+        widget.setSequences([FLOW, TEMP])
+        widget.tree.topLevelItem(0).setExpanded(True)
+        widget.setSequences([TEMP, FLOW])
+        assert self._opened(widget) == [], \
+            "a new file's rows are not the old file's"
+
+    def test_a_structural_change_leaves_the_open_rows_open(self, widget):
+        """Adding, moving or removing re-renders every row; a row the
+        operator opened to edit must not close under them."""
+        widget.setSequences([FLOW, TEMP])
+        widget.tree.topLevelItem(1).setExpanded(True)
+        widget.tree.setCurrentItem(widget.tree.topLevelItem(1))
+        widget.duplicateSequence()
+        assert self._opened(widget) == [1]
+
+    def test_an_open_row_follows_its_sequence_through_a_move(self, widget):
+        """Open state belongs to the sequence, not the position: move the
+        row you opened and it is still the one standing open."""
+        widget.setSequences([FLOW, TEMP])
+        widget.tree.topLevelItem(0).setExpanded(True)
+        widget.tree.setCurrentItem(widget.tree.topLevelItem(0))
+        widget.moveSequenceDown()
+        assert [s["type"] for s in widget._sequences] == \
+            ["set_temperature", "flow_reagent"]
+        assert self._opened(widget) == [1], \
+            "the open row stayed at the index instead of following the move"
+
+    def test_a_removed_sequence_takes_its_open_state_with_it(self, widget):
+        """Its identity must not linger: a later sequence allocated at the
+        same address would otherwise render open for no reason."""
+        widget.setSequences([FLOW, TEMP])
+        widget.tree.topLevelItem(1).setExpanded(True)
+        widget.tree.setCurrentItem(widget.tree.topLevelItem(1))
+        widget.removeSequence()
+        assert self._opened(widget) == []
+        assert widget._opened == set(), "a dead sequence's id was kept"
+
+    def test_a_row_the_operator_closed_stays_closed(self, widget):
+        widget.setSequences([FLOW, TEMP])
+        widget.tree.topLevelItem(0).setExpanded(True)
+        widget.tree.topLevelItem(0).setExpanded(False)
+        widget._refresh()
+        assert self._opened(widget) == []
 
 
 class TestStructuralOps:

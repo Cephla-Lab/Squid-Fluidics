@@ -309,3 +309,23 @@ class TestCheckTypesAgainstApplication:
                                       flow_cell_config.application)
         assert "not a Flow Cell sequence type" in wrong
         assert "flow_reagent" in wrong, "the message should say what is offered"
+
+
+class TestRoundLabel:
+    def test_round_label_is_accepted_and_survives_a_round_trip(self, tmp_path):
+        rows = [
+            {"type": "flow_reagent", "round": "R01", "fluidic_port": 1, "flow_rate": 500, "volume": 500},
+            {"type": "priming", "round": "setup", "fluidic_port": 2, "flow_rate": 500, "volume": 500},
+        ]
+        validated = SequenceListAdapter.validate_python(rows)
+        assert validated[0].round == "R01" and validated[1].round == "setup"
+        path = str(tmp_path / "p.yaml")
+        save_sequences_yaml(rows, path)
+        again = load_sequences(path)
+        assert again[0]["round"] == "R01" and again[1]["round"] == "setup"
+
+    def test_round_is_optional_and_defaults_to_none(self):
+        row = SequenceListAdapter.validate_python(
+            [{"type": "flow_reagent", "fluidic_port": 1, "flow_rate": 500, "volume": 500}]
+        )[0]
+        assert row.round is None

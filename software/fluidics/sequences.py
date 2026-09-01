@@ -22,6 +22,7 @@ class SequenceBase(BaseModel):
     repeat: int = Field(default=1, ge=1)
     include: bool = True
     incubation_time: float = Field(default=0, ge=0)
+    round: Optional[str] = None  # free grouping label (Squid renders rounds; harmless elsewhere)
 
 
 class FluidicSequence(SequenceBase):
