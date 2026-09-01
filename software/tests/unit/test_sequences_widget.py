@@ -411,3 +411,27 @@ class TestRunStartRelabelsThePlan:
         widget.system.run = lambda seqs, plan=None: handed.append(plan)
         widget.runSelectedSequences()
         assert [entry.row for entry in handed[0]] == [0, 2]
+
+    def test_the_run_takes_one_reading_of_the_list(self, widget, monkeypatch):
+        """The confirm dialog is a nested event loop: the rows the plan is
+        relabelled with and the sequences the run takes must come from the
+        same reading, or a list that changed across the dialog labels the
+        plan with rows the run never took."""
+        from tests.worker_helpers import plan_for
+        widget.setSequences([FLOW, FLOW, FLOW])
+        handed = []
+        widget.system.plan = lambda seqs: plan_for(
+            [{"type": "flow_reagent"}] * len(seqs))
+        widget.system.run = lambda seqs, plan=None: handed.append((seqs, plan))
+
+        def confirm_then_change(*args):
+            # What a modal lets in: the list changes while the operator
+            # reads the estimate.
+            widget._model.set_included(0, False)
+            return gui.QMessageBox.Yes
+
+        monkeypatch.setattr(gui.QMessageBox, "question", confirm_then_change)
+        widget.runSelectedSequences()
+        sequences, plan = handed[0]
+        assert len(sequences) == 3, "the run took a different list than it priced"
+        assert [entry.row for entry in plan] == [0, 1, 2]

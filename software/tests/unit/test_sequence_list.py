@@ -32,6 +32,14 @@ class TestWhatARunWouldTake:
         model = flow_cell({"include": False}, {"include": False})
         assert model.included_rows() == []
 
+    def test_a_string_include_is_read_the_way_the_models_read_it(self):
+        """A caller driving the list programmatically can hand in "false".
+        What a run takes must not disagree with what the row validates
+        as -- which is what truthiness would do here."""
+        model = flow_cell(dict(FLOW, include="false"), TEMP)
+        assert model.included_rows() == [1]
+        assert model.validated()[0]["include"] is False
+
     def test_only_the_included_come_out_when_asked(self):
         model = flow_cell(FLOW, dict(TEMP, include=False))
         assert [s["type"] for s in model.validated(included_only=True)] == \
