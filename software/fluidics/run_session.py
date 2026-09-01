@@ -41,7 +41,11 @@ class RunSession:
         # happen under the session's lock, which is re-entrant so a subscriber may
         # start the next job from the end of this one (a waiter then waits
         # for that one too). Subscribers must not block on another thread
-        # that needs the session; the GUI posts an event.
+        # that needs the session; the GUI posts an event -- and a subscriber
+        # that defers its work that way must re-read the session when it
+        # runs rather than trust the kind it was handed, which describes
+        # the moment it was sent. The payload is exact for whoever acts on
+        # it synchronously (the ordering tests do).
         self.state = Subscribers("run session")
         # The run's boundary facts (fluidics.events): the worker publishes
         # the in-run ones; the session publishes RunEnded once the rig is

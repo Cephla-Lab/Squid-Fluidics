@@ -41,6 +41,7 @@ from fluidics.run_log import LOGGER_NAME
 from fluidics.sequence_list import SequenceList
 from fluidics.sequences import (
     get_fields_for_type,
+    is_included,
     label_for_type,
     load_sequences,
     save_sequences_yaml,
@@ -157,8 +158,9 @@ class SequencesWidget(PostsToQtThread, QWidget):
 
     The sequence list itself is `_model`, a Qt-free SequenceList -- the
     tree only renders it, and every edit routes back through it. The model
-    holds what the operator typed, judges each row as it goes, and coerces
-    on the way out (getSequences); this widget paints those verdicts and
+    holds what the operator typed, judges each row as it goes, and
+    coerces on the way out (its validated()/included(), which this
+    widget's getSequences wraps); this widget paints those verdicts and
     turns clicks into its verbs.
     """
 
@@ -383,20 +385,19 @@ class SequencesWidget(PostsToQtThread, QWidget):
         self._opened &= {id(seq) for seq in self._model}
         with QSignalBlocker(self.tree):
             self.tree.clear()
-            for seq in self._model:
-                self._renderSequenceRow(seq)
+            for row, seq in enumerate(self._model):
+                self._renderSequenceRow(row, seq)
         self._renderValidation()
 
-    def _renderSequenceRow(self, seq):
+    def _renderSequenceRow(self, row, seq):
         """One top-level item per sequence; one child per field of its type
         -- every field, defaults included, so a value at its default can
         still be edited."""
         seq_type = seq.get('type', '')
-        label = label_for_type(seq_type)
-        item = QTreeWidgetItem([seq.get('name') or label, f"Type: {label}"])
+        item = QTreeWidgetItem([self._model.title(row),
+                                f"Type: {label_for_type(seq_type)}"])
         item.setFlags(item.flags() | Qt.ItemIsEditable)
-        item.setCheckState(
-            0, Qt.Checked if SequenceList.is_included(seq) else Qt.Unchecked)
+        item.setCheckState(0, Qt.Checked if is_included(seq) else Qt.Unchecked)
 
         try:
             type_fields = get_fields_for_type(seq_type)
@@ -499,14 +500,11 @@ class SequencesWidget(PostsToQtThread, QWidget):
 
     # --- reading the model out ---
 
-    def _includedRows(self):
-        """Model rows a run takes, in order."""
-        return self._model.included_rows()
-
     def getSequences(self, selected_only=False):
         """The model, validated and coerced -- the dicts a run or a save
-        takes."""
-        return self._model.validated(included_only=selected_only)
+        takes. The widget's public reader, for an embedding application."""
+        return (self._model.included().sequences if selected_only
+                else self._model.validated())
 
     def loadSequences(self):
         fileName, _ = QFileDialog.getOpenFileName(
@@ -523,11 +521,9 @@ class SequencesWidget(PostsToQtThread, QWidget):
         # stops it -- said in the model's words, which are the ones the
         # tree is already showing in red, rather than pydantic's dump of
         # the whole tagged union.
-        problems = self._model.problems()
-        if problems:
-            row = min(problems)
-            QMessageBox.critical(self, "Cannot Save",
-                                 f"Sequence {row + 1}: {problems[row]}")
+        error = self._model.first_problem()      # a save takes every row
+        if error:
+            QMessageBox.critical(self, "Cannot Save", error)
             return
         fileName, _ = QFileDialog.getSaveFileName(
             self, "Save Sequences", "",
@@ -639,7 +635,12 @@ class SequencesWidget(PostsToQtThread, QWidget):
             return
         # The plan's rows index `selected`; this widget's rows include the
         # unchecked ones. Relabel once, so highlight and resume land on
-        # tree rows without a translation table riding alongside.
+        # tree rows without a translation table riding alongside. The
+        # labels stay true because the verbs that reorder rows are the
+        # ones greyed out during a run -- field edits and checkboxes stay
+        # live, and neither moves a row. A holder without those buttons
+        # (a script, an API) would need the plan to carry identity, the
+        # way the open-state set does.
         plan = tuple(entry._replace(row=rows[entry.row]) for entry in plan)
 
         self._warnings.clear()
@@ -840,9 +841,8 @@ class SequencesWidget(PostsToQtThread, QWidget):
         self._startRun(None, tail)
 
     def _onSessionState(self, kind):
-        # On the session's thread; the display change crosses to Qt. The
-        # payload stays behind: the repaint reads the session as it stands
-        # at delivery, so no queued notification can be stale.
+        # On the session's thread; the display change crosses to Qt, so
+        # the payload stays behind (RunSession.state says why).
         self._post_event('_handle_state')
 
     def _handle_state(self):
@@ -855,10 +855,10 @@ class SequencesWidget(PostsToQtThread, QWidget):
         leaning on the main window's tab guard.
 
         Repaints from the session's current state, never from what was
-        announced: the resume offer starts the tail from inside the old
-        run's RunEnded dialog chain, and the old run's state(None) can
-        still be queued behind it -- a reset keyed to the delivery would
-        stop the new run's clock and clear its display."""
+        announced -- here that is not just hygiene: the resume offer
+        starts the tail from inside the old run's RunEnded dialog chain,
+        so the old run's state(None) can still be queued behind it, and a
+        reset keyed to the delivery would stop the new run's clock."""
         if self.session.kind is None:
             self.timer.stop()
             self.progressBar.setValue(0)

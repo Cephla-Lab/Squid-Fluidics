@@ -816,21 +816,12 @@ class TestMainWindowJobs:
         return enabled
 
     def test_the_other_tab_goes_dead_for_the_length_of_the_job(self):
+        """The tabs follow the session, not the announcement they were
+        posted with: _renderTabs takes no kind, so a notification held up
+        behind a modal cannot deaden a tab for a job that has ended."""
         assert self._tabs("run") == {0: True, 1: False}
         assert self._tabs("manual") == {0: False, 1: True}
         assert self._tabs(None) == {0: True, 1: True}
-
-    def test_a_stale_announcement_cannot_deaden_a_tab(self):
-        """The notification is posted; by the time it lands the job it
-        described may be over -- and a dialog on the way is exactly what
-        holds it up. What the session says now is what the tabs show."""
-        enabled = {}
-        session = FakeSession(kind="run")
-        stub = SimpleNamespace(RUN_TAB=0, MANUAL_TAB=1, session=session,
-                               tabWidget=SimpleNamespace(setTabEnabled=enabled.__setitem__))
-        session.kind = None                  # the run ended while this waited
-        gui.FluidicsControlGUI._renderTabs(stub)
-        assert enabled == {0: True, 1: True}, "a tab stayed dead for a finished job"
 
     def _closing(self, busy):
         session = FakeSession(kind="run" if busy else None)
@@ -1120,7 +1111,7 @@ class TestResumeOffer:
     checkboxes are never touched. Called unbound against stubs."""
 
     def _stub(self, monkeypatch, answer=gui.QMessageBox.No, plan=(),
-              sequences=None):
+              titled=None):
         asked = []
 
         def question(*args):
@@ -1131,7 +1122,9 @@ class TestResumeOffer:
         started = []
         stub = SimpleNamespace(
             _plan=plan,
-            _sequences=[] if sequences is None else sequences,
+            # What the tree would say now, so a regression that asks the
+            # model instead of the plan prints this and fails.
+            _model=SimpleNamespace(title=lambda row: titled),
             system=SimpleNamespace(
                 run=lambda seqs, plan=None: started.append(plan)),
             _beginRunDisplay=lambda count: started.append(("display", count)),
@@ -1143,16 +1136,10 @@ class TestResumeOffer:
 
     def test_yes_runs_exactly_the_tail(self, monkeypatch):
         plan = plan_of([10.0, 20.0, 30.0], rows=[0, 2, 3])
-        # One dict per tree row 0..3, so a regression back to writing
-        # _sequences[entry.row] lands on a row and trips the pin below.
-        checked = [{"include": True, "type": "flow_reagent"} for _ in range(4)]
-        stub = self._stub(monkeypatch, answer=gui.QMessageBox.Yes, plan=plan,
-                          sequences=checked)
+        stub = self._stub(monkeypatch, answer=gui.QMessageBox.Yes, plan=plan)
         gui.SequencesWidget._offerResume(stub, 1)
         assert stub.started == [plan[1:], ("display", 2)], \
             "the run must be the interrupted plan's tail, nothing else"
-        assert all(s["include"] for s in checked), \
-            "the checkboxes are not the offer's to touch"
 
     def test_no_runs_nothing(self, monkeypatch):
         stub = self._stub(monkeypatch, plan=plan_of([10.0, 20.0]))
@@ -1165,12 +1152,9 @@ class TestResumeOffer:
         from ..worker_helpers import plan_for
         plan = plan_for([{"type": "priming", "name": "prime", "repeat": 2}],
                         seconds=[45.0, 45.0])
-        # The tree's copy was renamed mid-run: the offer must name what the
-        # plan captured -- what will actually execute.
-        stub = self._stub(
-            monkeypatch, plan=plan,
-            sequences=[{"include": True, "type": "priming",
-                        "name": "renamed later"}])
+        # The row was renamed mid-run: the offer must name what the plan
+        # captured -- what will actually execute.
+        stub = self._stub(monkeypatch, plan=plan, titled="renamed later")
         gui.SequencesWidget._offerResume(stub, 1)
         text = stub.asked[0]
         assert "prime" in text and "renamed later" not in text

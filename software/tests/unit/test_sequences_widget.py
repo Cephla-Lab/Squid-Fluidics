@@ -105,15 +105,15 @@ class TestSaving:
         of the tagged union, which is what an unchecked bad row used to
         produce when the coercion failed inside the writer."""
         said = []
-        asked = []
         monkeypatch.setattr(gui.QMessageBox, "critical",
-                            lambda *args: said.append(args[2]))
-        monkeypatch.setattr(gui.QFileDialog, "getSaveFileName",
-                            lambda *a, **k: asked.append(True) or ("", ""))
+                            lambda parent, title, text: said.append(text))
+        monkeypatch.setattr(
+            gui.QFileDialog, "getSaveFileName",
+            lambda *a, **k: pytest.fail("asked where to save a list it "
+                                        "cannot write"))
         widget.setSequences([FLOW, dict(TEMP, include=False)])
         field_item(widget, 1, "temperature").setText(1, "abc")
         widget.saveSequences()
-        assert asked == [], "it asked where to save a list it cannot write"
         assert said and said[0].startswith("Sequence 2:")
         assert "temperature" in said[0]
 
@@ -300,9 +300,9 @@ class TestStructuralOps:
     def test_select_all_and_none_write_the_model(self, widget):
         widget.setSequences([FLOW, TEMP])
         widget.selectNone()
-        assert widget._includedRows() == []
+        assert widget._model.included_rows() == []
         widget.selectAll()
-        assert widget._includedRows() == [0, 1]
+        assert widget._model.included_rows() == [0, 1]
 
 
 class TestLiveValidation:
@@ -384,14 +384,14 @@ class TestResumeRunsTheTail:
         widget.setSequences([FLOW, dict(FLOW, include=False), FLOW, TEMP])
         from fluidics.time_estimate import plan_run
         plan = plan_run(widget.config, widget.getSequences(selected_only=True))
-        rows = widget._includedRows()
+        rows = widget._model.included_rows()
         widget._plan = tuple(e._replace(row=rows[e.row]) for e in plan)
         handed = []
         widget.system.run = lambda seqs, plan=None: handed.append(plan)
         widget._handle_run_event(
             gui.RunEnded("run-1", "stopped", None, 0.0, position=1))
         assert [entry.row for entry in handed[0]] == [2, 3]
-        assert widget._includedRows() == [0, 2, 3], "the checkboxes changed"
+        assert widget._model.included_rows() == [0, 2, 3], "the checkboxes changed"
 
 
 class TestRunStartRelabelsThePlan:

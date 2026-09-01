@@ -21,17 +21,19 @@ Two rules the list owns rather than any view:
 
 The list does not announce its own changes: it is mutated by whoever
 renders it, on that caller's thread, and every verb leaves it consistent
-to read. A second reader would want a channel -- the shape the rest of
-this package uses -- rather than polling.
+to read.
 
-There is no set_type verb. The editor retypes a row by removing and
-adding, and a naive one would have to prune the old type's fields: the
-models forbid extras, so a retyped row that kept them is invalid for
-good.
+No set_type verb: the models forbid extras, so a row that changed type
+while keeping the old type's fields would be invalid for good.
 """
 
-from .sequences import (SequenceListAdapter, is_included, sequence_problem,
-                        type_label)
+from collections import namedtuple
+
+from .sequences import (SequenceListAdapter, is_included, label_for_type,
+                        sequence_problem)
+
+# What a run takes, answered in one read.
+Included = namedtuple("Included", "rows sequences")
 
 
 class SequenceList:
@@ -39,9 +41,8 @@ class SequenceList:
 
     application: the rig's application ("Flow Cell" / "Open Chamber"),
     which decides the sequence types on offer. port_limit: how many
-    fluidic ports the rig has. Both are the config's, and both are read
-    by every verdict -- set_config revalidates when a caller changes rigs
-    under the same list.
+    fluidic ports the rig has. Both are the config's, fixed for the life
+    of the list -- every verdict is reached under them.
     """
 
     def __init__(self, application, port_limit, sequences=()):
@@ -50,13 +51,6 @@ class SequenceList:
         self._rows = []
         self._problems = {}
         self.replace(sequences)
-
-    def set_config(self, application, port_limit):
-        """Point the list at a different rig, and re-judge it: a verdict
-        outlives the config it was reached under otherwise."""
-        self._application = application
-        self._port_limit = port_limit
-        self._revalidate()
 
     # --- reading ---
 
@@ -69,42 +63,42 @@ class SequenceList:
     def __getitem__(self, row):
         return self._rows[row]
 
-    is_included = staticmethod(is_included)     # what a run takes, one rule
-
     def included_rows(self):
         """Rows a run takes, in order."""
-        return [row for row, seq in enumerate(self._rows)
-                if self.is_included(seq)]
+        included = is_included
+        return [row for row, seq in enumerate(self._rows) if included(seq)]
 
     def problem(self, row):
         """The verdict on one row, as a message, or None."""
         return self._problems.get(row)
 
-    def problems(self):
-        """{row: message} for every row that has one -- what an editor
-        paints, and what a save has to refuse over."""
-        return dict(self._problems)
-
-    def blocking_error(self):
-        """The first problem among the rows a run would actually take --
-        an invalid row that is not checked blocks nothing."""
-        for row in self.included_rows():
+    def first_problem(self, rows=None):
+        """The first problem over `rows` (every row by default), phrased
+        as the operator should hear it -- the one place a row is numbered
+        to them."""
+        if not self._problems:          # nothing is wrong: no row to find
+            return None
+        for row in range(len(self._rows)) if rows is None else rows:
             if row in self._problems:
                 return f"Sequence {row + 1}: {self._problems[row]}"
         return None
 
-    def validated(self, included_only=False):
-        """The list, validated and coerced -- the dicts a run or a save
-        takes."""
-        return self.included()[1] if included_only else self._coerced(
-            range(len(self._rows)))
+    def blocking_error(self):
+        """What stops a run: the first problem among the rows it would
+        actually take -- an invalid row that is not checked blocks
+        nothing. A save asks first_problem() instead, over every row."""
+        return self.first_problem(self.included_rows())
+
+    def validated(self):
+        """Every row, validated and coerced -- the dicts a save writes."""
+        return self._coerced(range(len(self._rows)))
 
     def included(self):
-        """(rows, sequences) for what a run would take: one read, so the
-        rows a caller labels a plan with and the dicts it runs cannot come
-        from two different moments."""
+        """What a run would take, rows and dicts from one read, so the
+        rows a caller labels a plan with and the sequences it runs cannot
+        come from two different moments."""
         rows = self.included_rows()
-        return rows, self._coerced(rows)
+        return Included(rows, self._coerced(rows))
 
     def _coerced(self, rows):
         validated = SequenceListAdapter.validate_python(
@@ -159,22 +153,21 @@ class SequenceList:
         The one place that rule is spelled -- a renderer and an edit both
         ask it rather than each composing the fallback."""
         seq = self._rows[row]
-        return seq.get("name") or type_label(seq)
+        return seq.get("name") or label_for_type(seq.get("type", ""))
 
     def set_name(self, row, name):
         """Name the row, or unname it: blank, or the type's own label typed
         back, both mean unnamed."""
         seq = self._rows[row]
         name = (name or "").strip()
-        seq["name"] = name if name and name != type_label(seq) else None
+        label = label_for_type(seq.get("type", ""))
+        seq["name"] = name if name and name != label else None
         self._validate_row(row)
 
     def set_field(self, row, field, raw):
         """Put a value in as given -- the editor's empty cell, and only
-        that, reads as None. Coercion waits for `validated`; what is held
-        is what was typed. Emptiness is the empty string, not falsiness:
-        0 is a temperature and an incubation time, and a caller driving
-        this model headlessly must be able to set one."""
+        that, reads as None. Emptiness is the empty string, not
+        falsiness: 0 is a real value for several fields."""
         self._rows[row][field] = None if raw == "" else raw
         self._validate_row(row)
 

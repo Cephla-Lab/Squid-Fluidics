@@ -8,7 +8,7 @@ headless embedder) with no GUI in the process.
 """
 
 from fluidics.sequence_list import SequenceList
-from fluidics.sequences import type_label
+from fluidics.sequences import label_for_type
 
 from ..conftest import FLOW, TEMP, in_a_fresh_interpreter
 
@@ -42,7 +42,7 @@ class TestWhatARunWouldTake:
 
     def test_only_the_included_come_out_when_asked(self):
         model = flow_cell(FLOW, dict(TEMP, include=False))
-        assert [s["type"] for s in model.validated(included_only=True)] == \
+        assert [s["type"] for s in model.included().sequences] == \
             ["flow_reagent"]
 
 
@@ -161,13 +161,13 @@ class TestTheNameSentinel:
         model = flow_cell(dict(FLOW, name="prime"))
         model.set_name(0, "   ")
         assert model[0]["name"] is None
-        assert model.title(0) == type_label(model[0])
+        assert model.title(0) == label_for_type(model[0]["type"])
 
     def test_typing_the_type_s_own_label_back_is_no_name(self):
         """The row titles itself from the type when unnamed, so that title
         typed back must not freeze into the file as a name."""
         model = flow_cell(FLOW)
-        label = type_label(model[0])
+        label = label_for_type(model[0]["type"])
         model.set_name(0, label)
         assert model[0]["name"] is None
         assert model.title(0) == label

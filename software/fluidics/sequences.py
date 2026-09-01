@@ -9,7 +9,7 @@ import yaml
 from pydantic import (BaseModel, ConfigDict, Discriminator, Field, TypeAdapter,
                       ValidationError)
 
-from .control.config import available_port_count
+from .control.config import available_port_count, port_range_note
 from .files import atomic_write
 
 
@@ -266,14 +266,11 @@ def label_for_type(seq_type: str) -> str:
     return SEQUENCE_TYPE_LABELS.get(seq_type, seq_type)
 
 
-def type_label(seq: dict) -> str:
-    """How a row titles itself when it carries no name of its own."""
-    return label_for_type(seq.get("type", ""))
-
-
 def sequence_label(seq: dict) -> Optional[str]:
-    """How a sequence is named to the operator in messages and logs: its
-    own name, else its type -- the one spelling of that fallback."""
+    """How a sequence is named in messages and logs: its own name, else
+    its raw type. The machine-readable half of the pair -- what the
+    editor shows a row is SequenceList.title(), which falls back to the
+    type's operator-facing label instead."""
     return seq.get("name") or seq.get("type")
 
 
@@ -319,12 +316,6 @@ def validate_sequences(sequences: list[dict], config) -> None:
     check_types_against_application(sequences, config)
 
 
-def port_range_note(limit: int) -> str:
-    """How the rig's port range is put to the operator, wherever it is
-    said -- the time-zero gate and the editor's live verdict."""
-    return f"this configuration has ports 1..{limit}"
-
-
 def sequence_problem(seq: dict, application: str, limit: int) -> Optional[str]:
     """The verdict on one sequence, as a message or None -- the order the
     complaints are asked in, in one place.
@@ -368,21 +359,25 @@ def check_ports_against_config(sequences: list[dict], config) -> None:
                          + "; ".join(problems))
 
 
-_INCLUDE = TypeAdapter(bool)
+# Tied to the field it has to agree with, rather than spelled again.
+_INCLUDE = TypeAdapter(SequenceBase.model_fields["include"].annotation)
 
 
 def is_included(seq: dict) -> bool:
     """The include field, defaulting on -- the one spelling of what the
     editor's checkbox means and of what a run takes.
 
-    Coerced the way the models coerce it, not by truthiness: a caller
-    driving the list programmatically can hand in "false", and what a run
-    takes must not disagree with what the row validates as. A value even
-    pydantic cannot read counts as included, where the row's own verdict
-    stops it.
+    Coerced the way the models coerce it, not by truthiness, so what a
+    run takes cannot disagree with what the row validates as; a value
+    even pydantic cannot read counts as included, where the row's own
+    verdict stops it. Already-boolean values (every row the loaders and
+    the checkbox produce) skip the adapter.
     """
+    value = seq.get("include", True)
+    if value is True or value is False:
+        return value
     try:
-        return _INCLUDE.validate_python(seq.get("include", True))
+        return _INCLUDE.validate_python(value)
     except ValidationError:
         return True
 

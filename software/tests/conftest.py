@@ -1,4 +1,6 @@
 import os
+import subprocess
+import sys
 import threading
 import time as _time
 from pathlib import Path
@@ -142,8 +144,6 @@ def in_a_fresh_interpreter(code):
     """Run `code` in a new interpreter under software/ and return its
     stdout. For the import-contract tests: this session has gui (and so
     Qt) loaded already, which is exactly what they must not rely on."""
-    import subprocess
-    import sys
     out = subprocess.run([sys.executable, "-c", code], capture_output=True,
                          text=True, cwd=str(Path(__file__).resolve().parent.parent))
     assert out.returncode == 0, out.stderr

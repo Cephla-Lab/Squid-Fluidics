@@ -95,9 +95,7 @@ class FluidicsControlGUI(PostsToQtThread, QMainWindow):
             raise SystemExit(1)
         # The one job on the rig -- a run or a manual move -- for both tabs.
         self.session = self.system.session
-        # The payload stays behind: the repaint reads the session as it
-        # stands at delivery, so a notification queued behind a modal
-        # cannot deaden a tab for a job that has already ended.
+        # Posted, so the payload stays behind (RunSession.state says why).
         self.session.state.subscribe(lambda kind: self._post_event("_renderTabs"))
         self.temperatureController = self.system.devices.temperature_controller
         self.flowSensors = self.system.devices.flow_sensors
@@ -181,10 +179,8 @@ class FluidicsControlGUI(PostsToQtThread, QMainWindow):
         pass its gate and change the reagent under a live draw), nor a manual
         move under a run.
 
-        Reads the session rather than the announcement it was posted with,
-        the way the run tab's display does: what is queued describes the
-        moment it was sent, and only the session knows the moment it
-        arrives."""
+        Reads the session rather than the announcement it was posted
+        with -- the rule for deferred subscribers, on RunSession.state."""
         kind = self.session.kind
         self.tabWidget.setTabEnabled(self.RUN_TAB, kind != "manual")
         self.tabWidget.setTabEnabled(self.MANUAL_TAB, kind != "run")
