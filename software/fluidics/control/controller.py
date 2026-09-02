@@ -460,12 +460,13 @@ class FluidController(Microcontroller, PacketSubscribers):
         while not self._terminate_reader:
             try:
                 msg = self.read_received_packet_nowait()
+                self._flush_reader_error()      # the read returned: the run,
+                                                # if any, is over
                 if msg is None:
                     sleep(READER_IDLE_SLEEP_S)
                     continue
                 if len(msg) != MCU_MSG_LENGTH:
                     continue
-                self._flush_reader_error()      # the run, if any, is over
                 self._publish_status(self._parse_packet(msg))
             except Exception as e:
                 # A corrupt COBS frame raises from cobs.decode, and the port
@@ -476,6 +477,8 @@ class FluidController(Microcontroller, PacketSubscribers):
                 if not self._terminate_reader:
                     self._log_reader_error(e)
                 sleep(READER_IDLE_SLEEP_S)
+        # A burst that runs until the port closes still gets its tally.
+        self._flush_reader_error()
 
     def start_reading(self):
         '''Begin consuming packets. The reader thread owns the serial port.'''

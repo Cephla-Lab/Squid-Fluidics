@@ -1,4 +1,5 @@
 # tests/unit/control/test_controller.py
+import logging
 import warnings
 
 import numpy as np
@@ -491,6 +492,60 @@ class _FakeThreadingNamespace:
 
         def join(self, timeout=None):
             pass
+
+
+class TestReaderErrorLog:
+    """A dropped frame is telemetry lost for 60 ms, not a command gone wrong.
+    At 17 frames a second a line each buried the run log under a burst and
+    said no more than a count would, so a run of the same fault collapses
+    into one line plus the frames it cost.
+    """
+
+    def _bursting_controller(self, faults):
+        """A controller whose reads raise the given texts in order, then stop
+        the loop. A None in the list is a frame that read cleanly."""
+        fc = _bare_controller()
+        fc._init_status_state()
+        remaining = list(faults)
+
+        def read(discard_buffer=False):
+            if not remaining:
+                fc._terminate_reader = True
+                return None
+            text = remaining.pop(0)
+            if text is None:
+                return None
+            raise RuntimeError(text)
+
+        fc.read_received_packet_nowait = read
+        return fc
+
+    def test_a_burst_of_one_fault_logs_once(self, caplog):
+        """Forty dropped frames: one line naming the fault, and the tally
+        when the loop ends -- not forty lines."""
+        fc = self._bursting_controller(["not enough input bytes"] * 40)
+        with caplog.at_level(logging.ERROR, logger="fluidics.control.controller"):
+            fc._reader_loop()
+        assert len(caplog.records) == 2
+        assert "not enough input bytes" in caplog.records[0].getMessage()
+        assert "39 more frames dropped" in caplog.records[1].getMessage()
+
+    def test_the_burst_reports_what_it_cost_once_it_stops(self, caplog):
+        """The count arrives when the run ends -- while it is still running
+        there is no total to report."""
+        fc = self._bursting_controller(["boom"] * 40 + [None])
+        with caplog.at_level(logging.ERROR, logger="fluidics.control.controller"):
+            fc._reader_loop()
+        assert len(caplog.records) == 2
+        assert "39 more frames dropped" in caplog.records[1].getMessage()
+
+    def test_a_different_fault_gets_its_own_line(self, caplog):
+        fc = self._bursting_controller(["boom", "boom", "other"])
+        with caplog.at_level(logging.ERROR, logger="fluidics.control.controller"):
+            fc._reader_loop()
+        # boom, boom's count, other
+        assert len(caplog.records) == 3
+        assert "other" in caplog.records[2].getMessage()
 
 
 class TestReaderLifecycle:
