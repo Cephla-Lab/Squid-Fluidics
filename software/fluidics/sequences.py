@@ -295,8 +295,8 @@ def check_types_against_application(sequences: list[dict], config) -> None:
     Until now only the GUI's Add dialog consulted APPLICATION_SEQUENCES: a
     wrong-application file passed loading and the port check, silently
     degraded the estimate to its fallback, and failed only at run time --
-    mid-experiment, hours in. Both entry points call this before anything
-    moves, next to check_ports_against_config.
+    mid-experiment, hours in. Reached through validate_sequences, beside
+    check_ports_against_config.
     """
     problems = []
     for index, seq in enumerate(sequences):
@@ -311,11 +311,14 @@ def validate_sequences(sequences: list[dict], config) -> None:
     """Everything a run must pass at time zero, in one call: ports within
     the rig's range, types the rig's application offers.
 
-    FluidicsSystem.run calls this, so every run passes it whoever starts
-    one. The GUI and the CLI also call it before they get there, to say
-    it their own way at the button and at the command line -- a check
-    added here cannot be missing from any of them (types were, until
-    #36; the system facade itself was, until this gate moved into it)."""
+    FluidicsSystem.run calls this, so nothing starts without it, whoever
+    starts the run -- a script or an embedded application reaching the
+    facade had no gate at all until it moved there, and a port the rig
+    lacks then surfaced from SelectorValveSystem mid-experiment, hours
+    in. Two callers check earlier for reasons the facade cannot serve:
+    the GUI so a bad row never reaches the estimate or the confirm
+    dialog, the CLI so a bad file is refused before the devices are
+    brought up."""
     check_ports_against_config(sequences, config)
     check_types_against_application(sequences, config)
 
@@ -350,8 +353,8 @@ def check_ports_against_config(sequences: list[dict], config) -> None:
     The pydantic models cannot do this -- the upper bound lives in the rig
     config, not the sequence file -- and until now nothing did: an
     out-of-range port survived loading and reached SelectorValveSystem at
-    run time, hours into an experiment. Both entry points call this before
-    anything moves, so a typo fails at time zero with the sequence named.
+    run time, hours into an experiment. Reached through validate_sequences,
+    so a typo fails at time zero with the sequence named.
     """
     limit = available_port_count(config)
     problems = []

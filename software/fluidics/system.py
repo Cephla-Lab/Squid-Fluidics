@@ -14,8 +14,8 @@ from .devices import build_devices, build_operations
 from .manual_operations import ManualOperations
 from .reports import RunReports
 from .run_session import RunSession
-from .subscribers import Subscribers
 from .sequences import validate_sequences
+from .subscribers import Subscribers
 from .time_estimate import plan_run
 from .usage import ReagentUsage
 
@@ -65,29 +65,20 @@ class FluidicsSystem:
     def run(self, sequences, plan=None):
         """Start a run of `sequences`; see RunSession.start. The run reports
         through session.events; `plan` from plan() rides along so the run
-        is not priced twice.
-
-        The time-zero gate runs here, at the one place every run passes
-        through: ports the rig has, types its application offers. The GUI
-        and the CLI check before calling, so they can say it their own
-        way, but a caller holding this object -- a script, an embedded
-        application -- had no gate at all, and a port the rig lacks then
-        surfaced from SelectorValveSystem mid-experiment, hours in, which
-        is the failure the check exists to prevent.
+        is not priced twice, and is what gets checked when it is there --
+        it is what the session executes. Gated by validate_sequences,
+        which says who else checks and why.
         """
-        validate_sequences(self._to_run(sequences, plan), self.devices.config)
+        if plan is None:
+            if not sequences:
+                raise ValueError("there is nothing to run")
+            validate_sequences(sequences, self.devices.config)
+            plan = self.plan(sequences)
+        else:
+            # A list, not a generator: validate_sequences walks it twice.
+            validate_sequences([entry.sequence for entry in plan],
+                               self.devices.config)
         self.session.start(sequences, self.operations, plan=plan)
-
-    @staticmethod
-    def _to_run(sequences, plan):
-        """What the run will actually execute -- the plan's rows whenever
-        a plan was handed in, since RunSession.start runs the plan it is
-        given and reads `sequences` only to build one it was not. A
-        caller passing both (the GUI does, having priced the plan from
-        those very sequences) is checked on what moves the rig."""
-        if plan is not None:
-            return [entry.sequence for entry in plan]
-        return sequences or []
 
     def run_manual(self, verb, callbacks=None):
         """Start one manual verb; see RunSession.run_manual."""

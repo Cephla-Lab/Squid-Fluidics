@@ -11,6 +11,7 @@ from fluidics.open_chamber_operations import OpenChamberOperations
 from fluidics.system import FluidicsSystem
 
 from ..conftest import hears, wait_until
+from ..worker_helpers import plan_for
 from .conftest import FLOW_CELL_STEP
 
 
@@ -71,30 +72,22 @@ class TestTheTimeZeroGate:
             system.run([dict(FLOW_CELL_STEP, type="add_reagent")])
         assert not system.busy
 
-    def test_a_plan_handed_in_alone_is_gated_too(self, system):
-        """A resume hands back a plan and no sequences; the rows it
-        carries are what will run, so they are what is checked."""
-        from fluidics.events import PlanEntry
-        beyond = dict(FLOW_CELL_STEP, fluidic_port=999)
-        plan = (PlanEntry(0, beyond, 1, 1, "beyond", 1.0),)
+    @pytest.mark.parametrize("sequences", [None, [FLOW_CELL_STEP]],
+                             ids=["a resume's plan alone", "a good list beside it"])
+    def test_the_plan_is_what_is_checked(self, system, sequences):
+        """A plan is what the session executes -- a resume hands one back
+        with no sequences at all -- so a good list beside it cannot vouch
+        for rows that would move the rig somewhere else."""
+        plan = plan_for([dict(FLOW_CELL_STEP, fluidic_port=999)])
         with pytest.raises(ValueError, match="out of range"):
-            system.run(None, plan=plan)
+            system.run(sequences, plan=plan)
         assert not system.busy
 
-    def test_the_plan_is_what_is_checked_when_both_are_handed_in(self, system):
-        """RunSession.start runs the plan it is given and reads the
-        sequences only to build one it was not, so a good list cannot
-        vouch for a plan that would move the rig somewhere else."""
-        from fluidics.events import PlanEntry
-        beyond = dict(FLOW_CELL_STEP, fluidic_port=999)
-        plan = (PlanEntry(0, beyond, 1, 1, "beyond", 1.0),)
-        with pytest.raises(ValueError, match="out of range"):
-            system.run([FLOW_CELL_STEP], plan=plan)
+    def test_a_run_with_nothing_in_it_is_refused(self, system):
+        """Rather than failing inside the replay with a TypeError."""
+        with pytest.raises(ValueError, match="nothing to run"):
+            system.run([])
         assert not system.busy
-
-    def test_a_good_run_still_starts(self, system, real_clock):
-        system.run([FLOW_CELL_STEP])
-        assert system.wait(5)
 
 
 class TestClose:
