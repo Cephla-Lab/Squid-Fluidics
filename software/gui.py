@@ -11,8 +11,7 @@ from qtpy.QtCore import QCoreApplication, QSettings
 from serial import SerialException
 
 from fluidics.control.config import (
-    DEFAULT_CONFIG_PATHS, available_port_count, default_config_path,
-    load_config, port_key, save_config,
+    DEFAULT_CONFIG_PATHS, default_config_path, load_config, save_config,
 )
 from fluidics.errors import DeviceError
 from fluidics.devices import (

@@ -127,20 +127,23 @@ class MERFISHOperations():
             self.sp.reset_chain()
             self.sp.dispense_to_waste()
             self.sp.execute()
-            for i in range(1, self.sv.available_port_number + 1):
+            # The ports the rig offers, not every position the cascade
+            # can address: one with no tubing volume has no line on it.
+            # This loop's own `if volume_to_port` used to be that rule's
+            # third spelling.
+            for i in self.sv.get_ports():
                 if use_ports is not None and i not in use_ports:
                     continue
                 volume_to_port = self.sv.get_tubing_fluid_amount_to_port(i)
-                if volume_to_port:
-                    self.sv.open_port(i)
-                    self.sp.extract(self.extract_port, volume_to_port, speed_code)
-                    self.sp.dispense_to_waste()
-                    self.sp.execute()
-                    # There could be a lot of air in a flow cell system, which may delay the stabilization of the liquid flow.
-                    # So we wait a second here for the flow to stabilize -- on
-                    # the run's signal, so a cancel raises out of it rather
-                    # than being noticed a second later.
-                    self.run_control.delay(1)
+                self.sv.open_port(i)
+                self.sp.extract(self.extract_port, volume_to_port, speed_code)
+                self.sp.dispense_to_waste()
+                self.sp.execute()
+                # There could be a lot of air in a flow cell system, which may delay the stabilization of the liquid flow.
+                # So we wait a second here for the flow to stabilize -- on
+                # the run's signal, so a cancel raises out of it rather
+                # than being noticed a second later.
+                self.run_control.delay(1)
 
             self.sv.open_port(port)
             self.sp.extract(self.extract_port, volume, speed_code)

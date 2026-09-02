@@ -330,13 +330,10 @@ def port_range_note(ports) -> str:
     named -- the time-zero gate, the editor's live verdict, and the valve
     system's own refusal at run time.
 
-    `ports` is a count (the cascade's reach) or the ports themselves,
-    which need not be contiguous: a position nobody plumbed leaves a gap,
-    and the operator is told where the gaps are rather than a range that
-    would admit them.
+    The ports need not be contiguous: a position nobody plumbed leaves a
+    gap, and the operator is told where the gaps are rather than a range
+    that would admit them.
     """
-    if isinstance(ports, int):
-        return f"this configuration has ports 1..{ports}"
     ports = sorted(ports)
     if not ports:
         return "this configuration has no plumbed ports"
@@ -381,10 +378,15 @@ def available_ports(config: FluidicsConfig) -> tuple:
     looks up `port_1` and gets None for anything else. Parsing the keys
     instead would offer a port whose volume then reads as missing, and let
     `port_01` and `port_1` name the same one twice.
+
+    A volume of zero is no line either, and is skipped: Priming and Clean
+    Up have always read it that way, and one rule for "is plumbed" beats a
+    port that the GUI offers, validation passes, and priming then silently
+    steps over.
     """
     entries = config.reagent_selection.selector_valves.tubing_fluid_amount_ul
     return tuple(port for port in range(1, available_port_count(config) + 1)
-                 if port_key(port) in entries)
+                 if entries.get(port_key(port)))
 
 
 # --- Config Loading ---

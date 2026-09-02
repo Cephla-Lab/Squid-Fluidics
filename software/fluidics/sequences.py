@@ -229,6 +229,15 @@ def save_sequences_yaml(sequences: list[dict], path: str) -> None:
         yaml.safe_dump({"sequences": reordered}, f, default_flow_style=False, sort_keys=False)
 
 
+# The port-valued fields of a sequence, and whether a falsy value means
+# "no port here" rather than port 0. There is no model metadata to derive
+# this from: a new sequence type carrying a port under another name must be
+# added here, or it only fails at run time through open_port's backstop.
+# Read by the entry points' pre-run check, the GUI's live per-row
+# validation, and the Add dialog, which offers a port combo for each.
+PORT_FIELDS = {"fluidic_port": False, "fill_tubing_with": True}
+
+
 def sequence_port_problems(seq: dict, ports) -> list[str]:
     """The port fields of one sequence this rig does not offer, as
     "field=value" messages; empty when every port is one of `ports`.
@@ -236,20 +245,15 @@ def sequence_port_problems(seq: dict, ports) -> list[str]:
     A falsy fill_tubing_with (None, or the GUI dialog's 0) means "no fill"
     and is skipped, matching how the operations interpret it.
 
-    The port-valued fields are listed here by hand -- there is no model
-    metadata to derive them from. A new sequence type that carries a port
-    under another name must be added below, or it only fails at run time
-    through open_port's backstop. This is the one copy of that list: the
-    entry points' pre-run check and the GUI's live per-row validation both
-    read it.
+    The fields come from PORT_FIELDS, which is the one copy of that list.
     """
     problems = []
-    port = seq.get("fluidic_port")
-    if port is not None and port not in ports:
-        problems.append(f"fluidic_port={port}")
-    fill = seq.get("fill_tubing_with")
-    if fill and fill not in ports:
-        problems.append(f"fill_tubing_with={fill}")
+    for field, falsy_means_unset in PORT_FIELDS.items():
+        port = seq.get(field)
+        if port is None or (falsy_means_unset and not port):
+            continue
+        if port not in ports:
+            problems.append(f"{field}={port}")
     return problems
 
 

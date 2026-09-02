@@ -40,7 +40,7 @@ class PortNamesDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Port Names")
         self.result_mapping = None
-        self._edits = []
+        self._edits = {}
 
         names = name_mapping or {}
         form_host = QWidget()
@@ -50,7 +50,7 @@ class PortNamesDialog(QDialog):
         for port in ports:
             edit = QLineEdit()
             edit.setText(names.get(port_key(port), ""))
-            self._edits.append((port, edit))
+            self._edits[port] = edit
             form.addRow(f"Port {port}", edit)
 
         # A cascade offers a couple dozen ports; the dialog scrolls rather
@@ -71,7 +71,7 @@ class PortNamesDialog(QDialog):
     def accept(self):
         self.result_mapping = {
             port_key(port): name
-            for port, edit in self._edits
+            for port, edit in self._edits.items()
             if (name := edit.text().strip())}
         super().accept()
 
@@ -256,7 +256,7 @@ class ManualControlWidget(PostsToQtThread, QWidget):
         with QSignalBlocker(self.valveCombo):
             current = self.valveCombo.currentData()
             self._fillPorts()
-            self.valveCombo.setCurrentIndex(self.valveCombo.findData(current))
+            self._selectPort(current)
 
     def _syringeArgs(self):
         return (int(self.syringePortCombo.currentText()), self.volumeSpinBox.value(),
@@ -370,9 +370,15 @@ class ManualControlWidget(PostsToQtThread, QWidget):
         where the fluid path goes, so naming a port the valve is not on is
         worse than naming none.
         """
+        self._selectPort(self.manual.current_port())
+
+    def _selectPort(self, port):
+        """Show `port` without moving a valve: the combo's change signal
+        opens a port, so every programmatic selection blocks it. A port the
+        list does not hold clears the selection rather than standing in for
+        the first one -- findData's -1 is the honest answer."""
         with QSignalBlocker(self.valveCombo):
-            self.valveCombo.setCurrentIndex(
-                self.valveCombo.findData(self.manual.current_port()))
+            self.valveCombo.setCurrentIndex(self.valveCombo.findData(port))
 
     def closeEvent(self, event):
         self.progress_timer.stop()

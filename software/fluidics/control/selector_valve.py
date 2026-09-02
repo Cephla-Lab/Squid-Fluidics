@@ -74,13 +74,20 @@ class SelectorValveSystem():
         # The operator-meaningful boundary: a paused run holds before the
         # cascade starts, so it never rests with the path half-routed.
         self.run_control.checkpoint()
-        if not 1 <= port_index <= self.available_port_number:
+        ports = self.get_ports()
+        if port_index not in ports:
             # This used to be a silent return, which left whatever port was
             # last open selected -- the draw then pulled the wrong reagent
             # with nothing saying so.
+            #
+            # Asked against the ports the rig offers, not the range the
+            # cascade can address: a position with no line on it would open
+            # onto nothing and draw air, and this is the last thing between
+            # a port number and a valve move. Gating on the count let a port
+            # in a gap through here after the pre-run check had rejected it.
             raise ValueError(
                 f"Fluidic port {port_index} is out of range: "
-                + port_range_note(self.available_port_number))
+                + port_range_note(ports))
 
         ports_processed = 0
         for valve in self.valves[:-1]:  # Process all valves except the last one
@@ -128,8 +135,7 @@ class SelectorValveSystem():
         """(port, label) for each port the rig offers, in order. The port
         rides along because the list has gaps wherever a position is
         unplumbed -- a caller must not take a list index for a port."""
-        name_mapping = self.config.reagent_selection.selector_valves.name_mapping or {}
-        return [(port, f"Port {port}: {name_mapping.get(port_key(port), '')}")
+        return [(port, f"Port {port}: {self.port_to_reagent(port) or ''}")
                 for port in self.get_ports()]
 
     def get_current_port(self):

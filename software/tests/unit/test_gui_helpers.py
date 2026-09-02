@@ -1006,10 +1006,10 @@ class TestPortNames:
 
     def test_the_dialog_prefills_and_returns_only_named_ports(self, qapp):
         dialog = gui.PortNamesDialog(None, [1, 2, 3, 4], {"port_2": "DAPI"})
-        assert [edit.text() for _port, edit in dialog._edits] == \
+        assert [edit.text() for edit in dialog._edits.values()] == \
             ["", "DAPI", "", ""]
-        dialog._edits[0][1].setText("  wash  ")
-        dialog._edits[1][1].setText("")         # cleared by the operator
+        dialog._edits[1].setText("  wash  ")
+        dialog._edits[2].setText("")            # cleared by the operator
         dialog.accept()
         assert dialog.result_mapping == {"port_1": "wash"}
 
@@ -1017,8 +1017,8 @@ class TestPortNames:
         """A rig with gaps -- an unplumbed position between two lines --
         gets a row per port it has, keyed by that port and not by row."""
         dialog = gui.PortNamesDialog(None, [1, 5, 9], None)
-        assert [port for port, _edit in dialog._edits] == [1, 5, 9]
-        dialog._edits[1][1].setText("bleach")
+        assert list(dialog._edits) == [1, 5, 9]
+        dialog._edits[5].setText("bleach")
         dialog.accept()
         assert dialog.result_mapping == {"port_5": "bleach"}
 
@@ -1076,6 +1076,7 @@ class TestPortNames:
             manual=SimpleNamespace(port_names=lambda: [
                 (1, "Port 1: DAPI"), (2, "Port 2: "), (3, "Port 3: ")]))
         stub._fillPorts = _bind("_fillPorts", stub, gui.ManualControlWidget)
+        stub._selectPort = _bind("_selectPort", stub, gui.ManualControlWidget)
         gui.ManualControlWidget._refreshPortNames(stub)
         assert combo.currentData() == 3, "the rename moved the selection"
         assert combo.itemText(0) == "Port 1: DAPI"
@@ -1091,6 +1092,7 @@ class TestPortNames:
             manual=SimpleNamespace(port_names=lambda: [
                 (1, "Port 1: "), (5, "Port 5: x"), (9, "Port 9: ")]))
         stub._fillPorts = _bind("_fillPorts", stub, gui.ManualControlWidget)
+        stub._selectPort = _bind("_selectPort", stub, gui.ManualControlWidget)
         gui.ManualControlWidget._refreshPortNames(stub)
         assert combo.currentData() == 9
 
@@ -1105,9 +1107,11 @@ class TestShowingWhereTheValvesAre:
         for port in ports:
             combo.addItem(f"Port {port}: ", port)
         combo.setCurrentIndex(-1)
-        return combo, SimpleNamespace(
+        stub = SimpleNamespace(
             valveCombo=combo,
             manual=SimpleNamespace(current_port=lambda: current))
+        stub._selectPort = _bind("_selectPort", stub, gui.ManualControlWidget)
+        return combo, stub
 
     def test_it_selects_the_port_the_valves_are_on(self, qapp):
         combo, stub = self._stub(qapp, [1, 5, 9], current=5)

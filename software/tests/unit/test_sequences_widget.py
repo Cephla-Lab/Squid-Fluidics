@@ -30,7 +30,7 @@ def widget(qapp, flow_cell_config):
     config = flow_cell_config
     system = SimpleNamespace(
         devices=SimpleNamespace(selector_valves=SimpleNamespace(
-            get_port_names=lambda: [f"Port {i}" for i in range(1, 9)])),
+            get_port_names=lambda: [(i, f"Port {i}") for i in range(1, 9)])),
         session=FakeSession(),
         warnings=Subscribers("test warnings"),
     )
@@ -199,7 +199,7 @@ class TestLogPane:
         from fluidics.subscribers import Subscribers
         system = SimpleNamespace(
             devices=SimpleNamespace(selector_valves=SimpleNamespace(
-                get_port_names=lambda: ["Port 1"])),
+                get_port_names=lambda: [(1, "Port 1")])),
             session=FakeSession(), warnings=Subscribers("test warnings"))
         logger = logging.getLogger("fluidics")
         before = len(logger.handlers)
@@ -443,3 +443,46 @@ class TestRunStartRelabelsThePlan:
         sequences, plan = handed[0]
         assert len(sequences) == 3, "the run took a different list than it priced"
         assert [entry.row for entry in plan] == [0, 1, 2]
+
+
+class TestAddSequenceDialog:
+    """The dialog behind the "+ Add" button. Nothing constructed it before,
+    so it raised TypeError on every sequence type -- pydantic spells a
+    required field's absent default PydanticUndefined, which is not None,
+    and it reached int()/float(). The button was dead for the whole suite's
+    life.
+    """
+
+    PORTS = [(1, "Port 1: a"), (5, "Port 5: b"), (9, "Port 9: c")]
+
+    @pytest.mark.parametrize("application", ["Flow Cell", "Open Chamber"])
+    def test_every_type_builds_its_fields(self, qapp, application):
+        from fluidics.sequences import types_for_application
+        dialog = gui.AddSequenceDialog(None, application, self.PORTS)
+        for index in range(dialog.typeCombo.count()):
+            dialog.typeCombo.setCurrentIndex(index)      # rebuilds the form
+            assert dialog._field_widgets, dialog.typeCombo.currentData()
+        assert dialog.typeCombo.count() == len(types_for_application(application))
+
+    def test_both_port_fields_offer_the_rig_s_ports(self, qapp):
+        """fluidic_port and fill_tubing_with are both ports -- a free-typed
+        spin box for either is the bug this change exists to fix."""
+        from qtpy.QtWidgets import QComboBox
+        dialog = gui.AddSequenceDialog(None, "Flow Cell", self.PORTS)
+        dialog.typeCombo.setCurrentIndex(
+            dialog.typeCombo.findData("flow_reagent"))
+        for field in ("fluidic_port", "fill_tubing_with"):
+            widget = dialog._field_widgets[field]
+            assert isinstance(widget, QComboBox), f"{field} is not a port combo"
+            assert [widget.itemData(i) for i in range(widget.count())] == [1, 5, 9]
+
+    def test_a_chosen_port_survives_accept(self, qapp):
+        """The combo carries the port as data, so what accept() stores is
+        the port and not the row it sat on."""
+        dialog = gui.AddSequenceDialog(None, "Flow Cell", self.PORTS)
+        dialog.typeCombo.setCurrentIndex(
+            dialog.typeCombo.findData("flow_reagent"))
+        combo = dialog._field_widgets["fluidic_port"]
+        combo.setCurrentIndex(combo.findData(5))
+        dialog.accept()
+        assert dialog.result_dict["fluidic_port"] == 5

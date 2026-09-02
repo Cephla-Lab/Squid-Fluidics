@@ -162,6 +162,27 @@ class TestOpenPort:
             open_chamber_system.open_port(port)
         assert open_chamber_system.get_current_port() == 5
 
+    def test_a_port_in_a_gap_is_refused_at_the_valve(self, open_chamber_system):
+        """The backstop asks the same question the pre-run check asks. It
+        gated on the cascade's reach, so a position nobody plumbed was
+        rejected at time zero and accepted here -- and this is the last
+        thing between a port number and a valve move."""
+        sv = open_chamber_system.config.reagent_selection.selector_valves
+        del sv.tubing_fluid_amount_ul["port_4"]
+        open_chamber_system.open_port(5)
+        with pytest.raises(ValueError, match=r"1\.\.3, 5\.\.10"):
+            open_chamber_system.open_port(4)
+        assert open_chamber_system.get_current_port() == 5
+
+    def test_a_zero_tubing_volume_is_no_line_either(self, open_chamber_system):
+        """Priming has always stepped over a zero volume. One rule, or the
+        GUI offers a port that priming silently skips."""
+        sv = open_chamber_system.config.reagent_selection.selector_valves
+        sv.tubing_fluid_amount_ul["port_4"] = 0
+        assert 4 not in [p for p, _ in open_chamber_system.get_port_names()]
+        with pytest.raises(ValueError):
+            open_chamber_system.open_port(4)
+
 
 class TestACancelledRunMovesNoValve:
     """Port addressing walks the cascade valve by valve, so a cancel can land
