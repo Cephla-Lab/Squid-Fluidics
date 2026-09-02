@@ -65,6 +65,7 @@ _CLOCK_BINDINGS = {
     "time.monotonic": _pristine_monotonic,
     "fluidics.control.controller.sleep": _pristine_sleep,
     "fluidics.control.controller.time": _pristine_time,
+    "fluidics.control.controller.monotonic": _pristine_monotonic,
 }
 
 

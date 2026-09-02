@@ -55,24 +55,37 @@ def open_serial_port(port, device_name, **kwargs):
     asks for it -- every open this package makes. It cannot stop an
     unrelated program, and does not try to.
     """
-    holders = port_holders(port)
-    if holders:
-        who = ", ".join(f"{name} (pid {pid})" for pid, name in holders)
-        raise DeviceInUseError(
-            f"{device_name} on {port} is already open in {who}. Close it and "
-            f"try again -- two programs reading one port split the frames "
-            f"between them, and both get corrupt data."
-        )
+    claim_port(port, device_name)
     try:
         return serial.Serial(port, exclusive=True, **kwargs)
     except serial.SerialException as e:
         if "exclusively lock" not in str(e):
             raise
-        raise DeviceInUseError(
-            f"{device_name} on {port} is already open in another program. "
-            f"Close the other instance of the fluidics software (or whatever "
-            f"else holds the port) and try again."
-        ) from e
+        # The lock says someone is there; /proc usually says who.
+        raise in_use(port, device_name) from e
+
+
+def claim_port(port, device_name):
+    """Refuse `port` if another process already holds it.
+
+    For a device whose port this package does not open itself -- the
+    syringe pump goes through vendored tecancavro -- this is the whole
+    claim: the check without the lock.
+    """
+    if port_holders(port):
+        raise in_use(port, device_name)
+
+
+def in_use(port, device_name):
+    """The refusal, naming the holder when /proc could see it."""
+    holders = port_holders(port)
+    who = ", ".join(f"{name} (pid {pid})" for pid, name in holders) \
+        if holders else "another program"
+    return DeviceInUseError(
+        f"{device_name} on {port} is already open in {who}. Close it and try "
+        f"again -- two programs reading one port split the frames between "
+        f"them, and both get corrupt data."
+    )
 
 
 def port_holders(device):

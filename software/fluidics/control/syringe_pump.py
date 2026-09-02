@@ -6,7 +6,7 @@ import fluidics.control.tecancavro as tecancavro
 
 from ..errors import Cancelled, RunControl, SafetyFault
 from ..subscribers import Subscribers
-from .discovery import find_serial_port
+from .discovery import claim_port, find_serial_port
 
 _logger = logging.getLogger(__name__)
 
@@ -294,6 +294,12 @@ class SyringePump(SpeedCodes, Interruptible):
         # the most common field failure (unplugged pump, stale config)
         # reported as a driver bug.
         self.port = find_serial_port(sn, "Syringe pump")
+        # The port is opened inside vendored tecancavro, so the lock the
+        # other drivers hold cannot be held here -- but the check can still
+        # run, and it matters more on this device than on any other: a
+        # stolen MCU frame is 60 ms of telemetry, a stolen pump reply is a
+        # timeout partway through a plunger move.
+        claim_port(self.port, "Syringe pump")
         self.com_link = tecancavro.TecanAPISerial(tecan_addr=0, ser_port=self.port, ser_baud=9600)
         _logger.info("Syringe pump found on %s.", self.port)
         self.syringe = tecancavro.models.XCaliburD(com_link=self.com_link,

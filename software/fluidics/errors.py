@@ -5,7 +5,8 @@ import it without the control layer depending on the experiment layer.
 
     FluidicsError
     ├── DeviceError
-    │   └── DeviceNotFoundError
+    │   ├── DeviceNotFoundError
+    │   └── DeviceInUseError
     ├── OperationError      a step failed; something is wrong with the step
     └── Cancelled           the run stopped early, on purpose
         ├── AbortRequested  the operator pressed Abort. Expected, not an error.

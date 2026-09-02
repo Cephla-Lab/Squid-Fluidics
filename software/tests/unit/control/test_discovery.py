@@ -151,6 +151,17 @@ class TestExclusiveOpen:
         with pytest.raises(DeviceInUseError, match="Temperature controller"):
             TCMController(sn="BBB")
 
+    def test_the_syringe_pump_is_claimed_too(self, monkeypatch):
+        """The port this package does not open itself, and the one where a
+        stolen reply costs most: a timeout partway through a plunger move,
+        not 60 ms of telemetry."""
+        fake_ports(monkeypatch, [("/dev/ttyUSB9", "PUMP")])
+        monkeypatch.setattr("fluidics.control.discovery.port_holders",
+                            lambda device: [(4242, "python3")])
+        with pytest.raises(DeviceInUseError, match="Syringe pump"):
+            SyringePump(sn="PUMP", syringe_ul=5000, speed_code_limit=10,
+                        waste_port=3)
+
     def test_a_busy_port_is_a_device_error(self):
         """Same bring-up dialog as a missing device: the entry points catch
         DeviceError and get this with it."""

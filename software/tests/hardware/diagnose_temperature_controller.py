@@ -15,7 +15,8 @@ import time
 
 import serial
 
-from fluidics.control.discovery import DeviceNotFoundError, find_serial_port
+from fluidics.control.discovery import (DeviceNotFoundError, find_serial_port,
+                                        open_serial_port)
 
 
 # Parameters worth polling for "enabled but no drive" diagnosis.
@@ -99,7 +100,12 @@ def main():
             sys.exit(1)
 
     print(f"Opening {port} @ {args.baud} baud, channel TC{args.channel}\n")
-    ser = serial.Serial(port, baudrate=args.baud, timeout=args.timeout)
+    # Through the same door as the GUI: this is the script an operator runs
+    # while the GUI is up, and port_holders' docstring names it as the
+    # second holder. Stealing TCM replies would surface as CRC failures in
+    # the GUI, with nothing pointing here.
+    ser = open_serial_port(port, "Temperature controller",
+                           baudrate=args.baud, timeout=args.timeout)
     try:
         if args.set_target is not None:
             print("--- setting target ---")
