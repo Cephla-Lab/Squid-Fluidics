@@ -100,14 +100,25 @@ class TestGetPortNames:
         assert len(names) == 28
 
     def test_names_format(self, flow_cell_system):
+        """Each entry carries its own port number: the list holds only the
+        ports the rig offers, so an index is not a port."""
         names = flow_cell_system.get_port_names()
-        assert names[0] == "Port 1: reagent x"
-        assert names[24] == "Port 25: buffer 1"
+        assert names[0] == (1, "Port 1: reagent x")
+        assert names[24] == (25, "Port 25: buffer 1")
 
     def test_open_chamber_unmapped_port(self, open_chamber_system):
         names = open_chamber_system.get_port_names()
-        # port_2 has no mapping -> just "Port 2: "
-        assert names[1] == "Port 2: "
+        # port_2 has no name mapping -> just "Port 2: "
+        assert names[1] == (2, "Port 2: ")
+
+    def test_a_port_with_no_tubing_volume_is_not_offered(self, flow_cell_system):
+        """The cascade can address more positions than the rig has lines
+        on; a position with no tubing volume would open onto nothing."""
+        sv = flow_cell_system.config.reagent_selection.selector_valves
+        del sv.tubing_fluid_amount_ul["port_25"]
+        offered = [port for port, _label in flow_cell_system.get_port_names()]
+        assert 25 not in offered
+        assert offered[-1] == 28, "the ports after the gap kept their numbers"
 
 
 class TestOpenPort:

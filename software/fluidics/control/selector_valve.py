@@ -2,7 +2,8 @@ import logging
 
 from ..errors import DeviceError, RunControl
 from ._def import CMD_SET
-from .config import available_port_count, port_key, port_range_note
+from .config import (available_port_count, available_ports, port_key,
+                     port_range_note)
 
 _logger = logging.getLogger(__name__)
 
@@ -117,15 +118,19 @@ class SelectorValveSystem():
         return self.config.reagent_selection.selector_valves.tubing_fluid_amount_ul.get(
             port_key(port_index))
 
+    def get_ports(self):
+        """The ports this rig offers -- see config.available_ports. Not
+        every position the cascade can address: one with no tubing volume
+        has no line on it."""
+        return available_ports(self.config)
+
     def get_port_names(self):
-        names = []
-        name_mapping = self.config.reagent_selection.selector_valves.name_mapping
-        for i in range(1, self.available_port_number + 1):
-            name = ''
-            if name_mapping is not None:
-                name = name_mapping.get(port_key(i), '')
-            names.append('Port ' + str(i) + ': ' + name)
-        return names
+        """(port, label) for each port the rig offers, in order. The port
+        rides along because the list has gaps wherever a position is
+        unplumbed -- a caller must not take a list index for a port."""
+        name_mapping = self.config.reagent_selection.selector_valves.name_mapping or {}
+        return [(port, f"Port {port}: {name_mapping.get(port_key(port), '')}")
+                for port in self.get_ports()]
 
     def get_current_port(self):
         return self.current_port

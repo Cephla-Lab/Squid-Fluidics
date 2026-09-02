@@ -325,23 +325,67 @@ def _yaml_faithful(value):
     return value
 
 
-def port_range_note(limit: int) -> str:
-    """How the rig's port range is put to the operator, wherever it is
-    said -- the time-zero gate, the editor's live verdict, and the valve
-    system's own refusal at run time."""
-    return f"this configuration has ports 1..{limit}"
+def port_range_note(ports) -> str:
+    """How the rig's ports are put to the operator, wherever they are
+    named -- the time-zero gate, the editor's live verdict, and the valve
+    system's own refusal at run time.
+
+    `ports` is a count (the cascade's reach) or the ports themselves,
+    which need not be contiguous: a position nobody plumbed leaves a gap,
+    and the operator is told where the gaps are rather than a range that
+    would admit them.
+    """
+    if isinstance(ports, int):
+        return f"this configuration has ports 1..{ports}"
+    ports = sorted(ports)
+    if not ports:
+        return "this configuration has no plumbed ports"
+    spans, start = [], ports[0]
+    for previous, port in zip(ports, ports[1:] + [None]):
+        if port != previous + 1:
+            spans.append(f"{start}..{previous}" if start != previous else f"{start}")
+            start = port
+    return "this configuration has ports " + ", ".join(spans)
 
 
 def available_port_count(config: FluidicsConfig) -> int:
-    """How many fluidic ports the configured cascade offers.
+    """How many positions the configured cascade can address.
 
     The last port of every valve except the final one routes to the next
     valve, so it is plumbing, not a reagent port. Written once here -- pure
     config arithmetic -- so SelectorValveSystem (with hardware attached) and
     the pre-run sequence check (without) cannot disagree about the range.
+
+    This is the hardware's reach, not the rig's reagent ports: the valves
+    are initialized with these counts. What is actually plumbed is
+    available_ports().
     """
     sv = config.reagent_selection.selector_valves
     return sum(sv.number_of_ports[v] - 1 for v in sv.valve_ids) + 1
+
+
+def available_ports(config: FluidicsConfig) -> tuple:
+    """The ports this rig offers, in order -- the ones with a tubing
+    volume measured for them.
+
+    A port is plumbed or it is not, and the tubing volume is how the
+    config says which: every draw through a port needs it, and Priming
+    already skipped ports without one. A position the cascade can address
+    but nobody has connected a line to is not a port the operator should
+    be offered, nor one a sequence file may name -- it would open a valve
+    onto nothing and draw air.
+    """
+    sv = config.reagent_selection.selector_valves
+    reach = available_port_count(config)
+    ports = []
+    for key in sv.tubing_fluid_amount_ul:
+        try:
+            port = int(key.removeprefix("port_"))
+        except ValueError:
+            continue                    # not a port_N key; the model allows it
+        if 1 <= port <= reach:
+            ports.append(port)
+    return tuple(sorted(ports))
 
 
 # --- Config Loading ---

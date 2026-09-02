@@ -14,7 +14,7 @@ from ..conftest import FLOW, TEMP, in_a_fresh_interpreter
 
 
 def flow_cell(*sequences):
-    return SequenceList("Flow Cell", port_limit=24, sequences=sequences)
+    return SequenceList("Flow Cell", ports=range(1, 25), sequences=sequences)
 
 
 class TestWhatARunWouldTake:
@@ -78,7 +78,7 @@ class TestWhatSetFieldTakes:
         """Only the editor's empty cell means "unset". 0 is a real
         temperature and a real incubation time, and a caller driving the
         model headlessly has no empty string to offer."""
-        model = SequenceList("Flow Cell", port_limit=24,
+        model = SequenceList("Flow Cell", ports=range(1, 25),
                              sequences=[dict(TEMP, incubation_time=5)])
         model.set_field(0, "temperature", 0)
         model.set_field(0, "incubation_time", 0.0)
@@ -184,7 +184,7 @@ def test_the_model_needs_no_qt():
     list must not drag Qt into the process."""
     loaded = in_a_fresh_interpreter(
         "import sys; import fluidics.sequence_list as m; "
-        "m.SequenceList('Flow Cell', 24, [{'type': 'priming', "
+        "m.SequenceList('Flow Cell', range(1, 25), [{'type': 'priming', "
         "'fluidic_port': 1, 'flow_rate': 1, 'volume': 1}]).validated(); "
         "print([n for n in sys.modules if 'qt' in n.lower()])")
     assert loaded == "[]", f"Qt was imported: {loaded}"

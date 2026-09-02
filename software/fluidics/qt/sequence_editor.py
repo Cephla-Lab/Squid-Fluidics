@@ -33,7 +33,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from fluidics.control.config import available_port_count
+from fluidics.control.config import available_ports
 from fluidics.events import RunEnded, RunStarted, SequenceCompleted, SequenceStarted, plan_seconds, repeat_suffix
 from fluidics.files import atomic_write
 from fluidics.qt.support import GuiLogHandler, PostsToQtThread, _ask_yes_no, _hms, subscribe_until_detached
@@ -113,10 +113,10 @@ class AddSequenceDialog(QDialog):
                     widget.setText(str(default))
             elif field_name == 'fluidic_port':
                 widget = QComboBox()
-                for i, pname in enumerate(self.port_names):
-                    widget.addItem(pname, i + 1)
+                for port, label in self.port_names:
+                    widget.addItem(label, port)
                 if default is not None:
-                    widget.setCurrentIndex(max(0, int(default) - 1))
+                    widget.setCurrentIndex(max(0, widget.findData(int(default))))
             elif field_name in ('temperature', 'incubation_time'):
                 widget = QDoubleSpinBox()
                 widget.setDecimals(2)
@@ -175,7 +175,7 @@ class SequencesWidget(PostsToQtThread, QWidget):
         # dicts, validates them and performs the structural verbs; this
         # widget renders it and turns clicks into its calls.
         self._model = SequenceList(config.application,
-                                   available_port_count(config))
+                                   available_ports(config))
         self._plan = ()          # the running run's plan, rows = model rows
         # Which sequences the operator has open, by identity: a move swaps
         # the dicts themselves, so an open row follows its sequence rather

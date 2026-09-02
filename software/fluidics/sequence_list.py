@@ -40,14 +40,15 @@ class SequenceList:
     """The rows, the verdicts, and the verbs that reorder them.
 
     application: the rig's application ("Flow Cell" / "Open Chamber"),
-    which decides the sequence types on offer. port_limit: how many
-    fluidic ports the rig has. Both are the config's, fixed for the life
-    of the list -- every verdict is reached under them.
+    which decides the sequence types on offer. ports: the ports the rig
+    actually offers (config.available_ports -- the ones with a tubing
+    volume, which need not be contiguous). Both are the config's, fixed
+    for the life of the list -- every verdict is reached under them.
     """
 
-    def __init__(self, application, port_limit, sequences=()):
+    def __init__(self, application, ports, sequences=()):
         self._application = application
-        self._port_limit = port_limit
+        self._ports = ports
         self._rows = []
         self._problems = {}
         self.replace(sequences)
@@ -180,7 +181,7 @@ class SequenceList:
 
     def _validate_row(self, row):
         problem = sequence_problem(self._rows[row], self._application,
-                                   self._port_limit)
+                                   self._ports)
         if problem is None:
             self._problems.pop(row, None)
         else:
