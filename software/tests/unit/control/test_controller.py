@@ -296,17 +296,25 @@ class TestNegativeRawDecoding:
 
 
 class _FakeSerial:
-    """Serial stub that hands out a fixed byte script one byte at a time."""
+    """Serial stub that hands out a fixed byte script.
 
-    def __init__(self, script):
+    read(n) answers like a port under load: never more than asked, and
+    sometimes less, so a caller that assumes it got a whole frame in one
+    read is caught here.
+    """
+
+    def __init__(self, script, chunk=None):
         self._buf = bytearray(script)
+        self._chunk = chunk
 
     @property
     def in_waiting(self):
         return len(self._buf)
 
-    def read(self):
-        return bytes([self._buf.pop(0)])
+    def read(self, size=1):
+        size = min(size, self._chunk or size, len(self._buf))
+        out, self._buf = bytes(self._buf[:size]), self._buf[size:]
+        return out
 
     def close(self):
         """Called by FluidController.__del__ during GC."""
@@ -323,12 +331,12 @@ class TestReadPacketResync:
     """
 
     @staticmethod
-    def _controller(script):
+    def _controller(script, chunk=None):
         fc = FluidController.__new__(FluidController)
         fc.use_cobs = True
         fc.rx_buffer_length = MCU_MSG_LENGTH
-        fc.read_buffer = []
-        fc.serial = _FakeSerial(script)
+        fc.read_buffer = bytearray()
+        fc.serial = _FakeSerial(script, chunk=chunk)
         return fc
 
     def test_corrupt_frame_raises_but_leaves_no_residue(self):
@@ -336,7 +344,7 @@ class TestReadPacketResync:
         fc = self._controller([0x05, 0x01, 0x00])
         with pytest.raises(Exception):
             fc.read_received_packet_nowait()
-        assert fc.read_buffer == []
+        assert fc.read_buffer == bytearray()
 
     def test_next_frame_decodes_after_a_corrupt_one(self):
         good = cobs.encode(bytes([0xAA, 0xBB, 0xCC]))
@@ -346,6 +354,43 @@ class TestReadPacketResync:
             fc.read_received_packet_nowait()
 
         assert list(fc.read_received_packet_nowait()) == [0xAA, 0xBB, 0xCC]
+
+    def test_a_frame_split_across_reads_is_still_one_frame(self):
+        """The port hands over what it has, which need not be a whole
+        frame: the rest is waited for rather than decoded early."""
+        good = cobs.encode(bytes([0xAA, 0xBB, 0xCC]))
+        fc = self._controller(list(good) + [0x00], chunk=2)
+        while (msg := fc.read_received_packet_nowait()) is None:
+            pass
+        assert list(msg) == [0xAA, 0xBB, 0xCC]
+
+    def test_two_frames_in_one_read_are_both_delivered(self):
+        """A reader that took only the first would fall a frame behind
+        every time the port handed over two."""
+        one = cobs.encode(bytes([0x11])) + b"\x00"
+        two = cobs.encode(bytes([0x22])) + b"\x00"
+        fc = self._controller(list(one + two))
+        assert list(fc.read_received_packet_nowait()) == [0x11]
+        assert list(fc.read_received_packet_nowait()) == [0x22]
+
+    def test_a_port_that_raises_mid_frame_leaves_no_residue(self):
+        """pyserial raises "readiness to read but returned no data" on this
+        USB port. Whatever was held is of unknown alignment, so it goes --
+        keeping it cost the next frame as well as this one."""
+        # chunk=2 so the first call gets half a frame and leaves the rest
+        # waiting -- the port must still have bytes to offer, or the read
+        # that raises never happens.
+        fc = self._controller([0x02, 0x11, 0x03, 0x04], chunk=2)
+
+        def raises(size=1):
+            raise OSError("device reports readiness to read but returned no data")
+
+        fc.read_received_packet_nowait()        # buffers a partial frame
+        assert fc.read_buffer
+        fc.serial.read = raises
+        with pytest.raises(OSError):
+            fc.read_received_packet_nowait()
+        assert fc.read_buffer == bytearray(), "the partial frame was kept"
 
 
 class TestReaderLoop:

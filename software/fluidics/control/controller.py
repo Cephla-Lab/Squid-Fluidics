@@ -107,7 +107,7 @@ class Microcontroller():
         self.tx_buffer_length = cmd_len
         self.rx_buffer_length = buffer_len
 
-        self.read_buffer = []
+        self.read_buffer = bytearray()
         return
     
     def __del__(self):
@@ -121,7 +121,7 @@ class Microcontroller():
         '''
         Find a Serial device that matches the serial number and connect to it.
         '''
-        self.read_buffer = []
+        self.read_buffer = bytearray()
         port = find_serial_port(self.serial_number, "Fluid controller (Teensy)")
         self.serial = serial.Serial(port, 2000000)
         _logger.info('Teensy connected')
@@ -156,12 +156,15 @@ class Microcontroller():
         Returns:
             uint8_t data[] or None: either the decoded data (variable length) or None
         '''
-        if self.serial.in_waiting == 0:
+        # No early return on an empty port: under COBS a whole frame can
+        # already be in hand from an earlier read, and returning None here
+        # would hold it until the next byte happened to arrive.
+        if not self.use_cobs and self.serial.in_waiting == 0:
             return None
         # If we want to get only the latest data, read and discard data until the buffer is the right length
         byte_in = None
         if discard_buffer:
-            self.read_buffer = []
+            self.read_buffer = bytearray()
             while self.serial.in_waiting > (2 * self.rx_buffer_length):
                 byte_in = ord(self.serial.read())
             if self.serial.in_waiting > self.rx_buffer_length:
@@ -170,28 +173,30 @@ class Microcontroller():
                         byte_in = ord(self.serial.read())
 
         if self.use_cobs:
-            # Read data into read_buffer until we hit an end-of-packet (0x00)
-            while self.serial.in_waiting:
-                byte_in = ord(self.serial.read())
-                if byte_in != 0:
-                    self.read_buffer.append(byte_in)
-                else:
-                    break
+            # Everything waiting, in one read. A frame is ~31 bytes, so
+            # reading them one at a time made ~31 syscalls where one does --
+            # and each is a chance for pyserial to raise "readiness to read
+            # but returned no data" on this USB port. Raising *mid-frame*
+            # used to leave the partial frame in the buffer, so the glitch
+            # cost the next frame as well as its own; a burst of decode
+            # failures is what that looked like from the log.
+            try:
+                waiting = self.serial.in_waiting
+                if waiting:
+                    self.read_buffer.extend(self.serial.read(waiting))
+            except Exception:
+                # Whatever we hold is now of unknown alignment.
+                self.read_buffer = bytearray()
+                raise
 
-            # If the last byte isn't 0, we didn't read a full packet yet
-            if byte_in != 0:
+            # A frame ends at the first delimiter; the rest waits for the
+            # next call, so two frames arriving together both get read.
+            end = self.read_buffer.find(0)
+            if end < 0:
                 return None
-            # If it is 0, we have a full packet to decode. Clear the read buffer
-            else:
-                try:
-                    output = cobs.decode(bytearray(self.read_buffer))
-                finally:
-                    # Clear on failure as well as success. The byte loop above
-                    # always consumes through a delimiter, so a corrupt frame is
-                    # fully drained by the time we get here — keeping its bytes
-                    # would prepend them to the next frame and make every later
-                    # decode fail too, until a spurious 0x00 happened to resync.
-                    self.read_buffer = []
+            frame = bytes(self.read_buffer[:end])
+            del self.read_buffer[:end + 1]
+            output = cobs.decode(frame)
 
         # If we aren't using COBS, use fixed-length command rx
         else:
@@ -409,6 +414,8 @@ class FluidController(Microcontroller, PacketSubscribers):
     def _init_status_state(self):
         '''Set up shared packet state. Called from __init__ and by tests.'''
         self._status_lock = threading.Lock()
+        self._reader_error_text = None      # the run of faults being counted
+        self._reader_error_count = 0
         self._latest_status = None
         self._status_seq = 0
         self._seq_at_send = 0
@@ -426,6 +433,29 @@ class FluidController(Microcontroller, PacketSubscribers):
         self._log_packet(parsed)
         self._notify_packet_subscribers(parsed)
 
+    def _log_reader_error(self, error):
+        """One line per run of the same fault, with how many frames it
+        cost. A dropped frame is telemetry lost for 60 ms, not a command
+        gone wrong -- at 17 frames a second, a line each buried the run
+        log under a burst and said no more than a count would."""
+        text = str(error)
+        if text == self._reader_error_text:
+            self._reader_error_count += 1
+            return
+        self._flush_reader_error()
+        self._reader_error_text = text
+        self._reader_error_count = 1
+        _logger.error("Reader thread error: %s", text)
+
+    def _flush_reader_error(self):
+        """Say what the last run cost, once it has stopped."""
+        if self._reader_error_count > 1:
+            _logger.error("Reader thread error: %s (and %d more frames "
+                          "dropped)", self._reader_error_text,
+                          self._reader_error_count - 1)
+        self._reader_error_text = None
+        self._reader_error_count = 0
+
     def _reader_loop(self):
         while not self._terminate_reader:
             try:
@@ -435,6 +465,7 @@ class FluidController(Microcontroller, PacketSubscribers):
                     continue
                 if len(msg) != MCU_MSG_LENGTH:
                     continue
+                self._flush_reader_error()      # the run, if any, is over
                 self._publish_status(self._parse_packet(msg))
             except Exception as e:
                 # A corrupt COBS frame raises from cobs.decode, and the port
@@ -443,7 +474,7 @@ class FluidController(Microcontroller, PacketSubscribers):
                 # read_received_packet_nowait clears its own buffer on a failed
                 # decode, so the next frame resyncs deterministically.
                 if not self._terminate_reader:
-                    _logger.error("Reader thread error: %s", e)
+                    self._log_reader_error(e)
                 sleep(READER_IDLE_SLEEP_S)
 
     def start_reading(self):
