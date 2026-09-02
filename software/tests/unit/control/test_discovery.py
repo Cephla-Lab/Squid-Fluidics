@@ -193,8 +193,12 @@ class TestNamingWhoHoldsThePort:
             stdout=subprocess.PIPE, text=True)
         try:
             proc.stdout.readline()          # it has the file open
-            assert (proc.pid, "python3") in [
-                (pid, name) for pid, name in port_holders(str(held))]
+            holders = dict(port_holders(str(held)))
+            assert proc.pid in holders, holders
+            # The name is whatever the interpreter is called here -- "python3"
+            # on the rig, "python" on CI -- so pin that we report one, not
+            # which one.
+            assert holders[proc.pid]
         finally:
             proc.kill()
             proc.wait()
