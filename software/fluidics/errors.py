@@ -47,6 +47,15 @@ class DeviceNotFoundError(DeviceError):
     """
 
 
+class DeviceInUseError(DeviceError):
+    """The port is open in another program.
+
+    Its own class because the remedy is the operator's, not the config's:
+    nothing is misconfigured and nothing is unplugged -- something else
+    holds the port.
+    """
+
+
 class OperationError(FluidicsError):
     """A step failed; something is wrong with the step."""
 
