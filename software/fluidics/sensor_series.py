@@ -22,8 +22,7 @@ class SensorSeries:
 
     Timestamps are expected in order -- `window` walks back from the
     newest and stops at the cutoff, so a caller handing them back out of
-    order gets a short slice rather than an error (which is also why the
-    recorder's flush deadline reads the monotonic clock, not these).
+    order gets a short slice rather than an error.
     `maxlen` is the caller's to size: hold what you can actually ask for.
     The default is 10 hours at 1 Hz, about 35 minutes at a flow sensor's
     full rate.
