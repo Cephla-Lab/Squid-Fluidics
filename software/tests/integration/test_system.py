@@ -53,6 +53,39 @@ class TestTheJob:
         assert system.devices.syringe_pump.executed == [[("extract", 2, 300, 40)]]
 
 
+class TestTheTimeZeroGate:
+    """Every run passes the gate, whoever starts one. The GUI and the CLI
+    check before they call; a script or an embedded application holding
+    this object had nothing between it and the rig."""
+
+    def test_a_port_the_rig_lacks_never_starts(self, system):
+        beyond = dict(FLOW_CELL_STEP, fluidic_port=999)
+        with pytest.raises(ValueError, match="out of range"):
+            system.run([beyond])
+        assert not system.busy, "the rig started on a sequence it cannot run"
+
+    def test_a_wrong_application_type_never_starts(self, system):
+        """The rig is a Flow Cell; an open-chamber row would degrade the
+        estimate and fail inside the run instead."""
+        with pytest.raises(ValueError, match="Flow Cell"):
+            system.run([dict(FLOW_CELL_STEP, type="add_reagent")])
+        assert not system.busy
+
+    def test_a_plan_handed_in_alone_is_gated_too(self, system):
+        """A resume hands back a plan and no sequences; the rows it
+        carries are what will run, so they are what is checked."""
+        from fluidics.events import PlanEntry
+        beyond = dict(FLOW_CELL_STEP, fluidic_port=999)
+        plan = (PlanEntry(0, beyond, 1, 1, "beyond", 1.0),)
+        with pytest.raises(ValueError, match="out of range"):
+            system.run(None, plan=plan)
+        assert not system.busy
+
+    def test_a_good_run_still_starts(self, system, real_clock):
+        system.run([FLOW_CELL_STEP])
+        assert system.wait(5)
+
+
 class TestClose:
     def test_close_stops_a_live_job_before_the_devices_go(self, system, real_clock):
         system.devices.syringe_pump.ESTIMATE_SECONDS = 60

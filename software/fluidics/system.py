@@ -15,6 +15,7 @@ from .manual_operations import ManualOperations
 from .reports import RunReports
 from .run_session import RunSession
 from .subscribers import Subscribers
+from .sequences import validate_sequences
 from .time_estimate import plan_run
 from .usage import ReagentUsage
 
@@ -64,8 +65,27 @@ class FluidicsSystem:
     def run(self, sequences, plan=None):
         """Start a run of `sequences`; see RunSession.start. The run reports
         through session.events; `plan` from plan() rides along so the run
-        is not priced twice."""
+        is not priced twice.
+
+        The time-zero gate runs here, at the one place every run passes
+        through: ports the rig has, types its application offers. The GUI
+        and the CLI check before calling, so they can say it their own
+        way, but a caller holding this object -- a script, an embedded
+        application -- had no gate at all, and a port the rig lacks then
+        surfaced from SelectorValveSystem mid-experiment, hours in, which
+        is the failure the check exists to prevent.
+        """
+        validate_sequences(self._to_run(sequences, plan), self.devices.config)
         self.session.start(sequences, self.operations, plan=plan)
+
+    @staticmethod
+    def _to_run(sequences, plan):
+        """What the run will actually execute: the sequences handed in, or
+        the ones the plan carries when a caller hands a plan alone (a
+        resume tail does)."""
+        if sequences is not None:
+            return sequences
+        return [entry.sequence for entry in plan or ()]
 
     def run_manual(self, verb, callbacks=None):
         """Start one manual verb; see RunSession.run_manual."""

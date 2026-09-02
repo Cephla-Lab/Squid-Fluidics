@@ -309,9 +309,13 @@ def check_types_against_application(sequences: list[dict], config) -> None:
 
 def validate_sequences(sequences: list[dict], config) -> None:
     """Everything a run must pass at time zero, in one call: ports within
-    the rig's range, types the rig's application offers. The one gate for
-    both entry points -- and any future one -- so a check added here cannot
-    be missing from one of them (types were, until #36)."""
+    the rig's range, types the rig's application offers.
+
+    FluidicsSystem.run calls this, so every run passes it whoever starts
+    one. The GUI and the CLI also call it before they get there, to say
+    it their own way at the button and at the command line -- a check
+    added here cannot be missing from any of them (types were, until
+    #36; the system facade itself was, until this gate moved into it)."""
     check_ports_against_config(sequences, config)
     check_types_against_application(sequences, config)
 
