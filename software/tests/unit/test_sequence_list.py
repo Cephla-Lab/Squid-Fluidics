@@ -53,6 +53,17 @@ class TestTheVerdicts:
         assert "volume" in model.problem(0)
         assert model.blocking_error().startswith("Sequence 1:")
 
+    def test_a_port_in_a_gap_is_flagged(self):
+        """The ports a rig offers need not be contiguous -- an unplumbed
+        position between two lines is not a port, and a range check would
+        wave it through."""
+        model = SequenceList("Flow Cell", ports=(1, 2, 5),
+                             sequences=[dict(FLOW, fluidic_port=3),
+                                        dict(FLOW, fluidic_port=5)])
+        assert "fluidic_port=3" in model.problem(0)
+        assert "1..2, 5" in model.problem(0), model.problem(0)
+        assert model.problem(1) is None, "port 5 is offered"
+
     def test_a_port_the_rig_lacks_is_flagged(self):
         model = flow_cell(dict(FLOW, fluidic_port=99))
         assert "1..24" in model.problem(0)
