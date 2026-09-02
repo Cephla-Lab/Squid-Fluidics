@@ -41,11 +41,8 @@ class SequenceList:
 
     application: the rig's application ("Flow Cell" / "Open Chamber"),
     which decides the sequence types on offer. port_limit: how many
-    fluidic ports the rig has, or None when the count is not known yet
-    (see sequence_problem: ports go unjudged, everything else is judged
-    as usual). Both are the config's, fixed for the life of the list --
-    every verdict is reached under them, and a list built without the
-    port count keeps judging without it.
+    fluidic ports the rig has. Both are the config's, fixed for the life
+    of the list -- every verdict is reached under them.
     """
 
     def __init__(self, application, port_limit, sequences=()):

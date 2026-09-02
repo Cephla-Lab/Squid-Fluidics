@@ -53,14 +53,6 @@ class TestTheVerdicts:
         assert "volume" in model.problem(0)
         assert model.blocking_error().startswith("Sequence 1:")
 
-    def test_a_list_built_without_a_port_count_carries_that_through(self):
-        """What the limit does is sequence_problem's contract; what this
-        pins is that the list hands its own down -- None included."""
-        unknown = SequenceList("Flow Cell", port_limit=None,
-                               sequences=[dict(FLOW, fluidic_port=999)])
-        assert unknown.problem(0) is None, "a port was judged with no range"
-        assert flow_cell(dict(FLOW, fluidic_port=999)).problem(0) is not None
-
     def test_a_port_the_rig_lacks_is_flagged(self):
         model = flow_cell(dict(FLOW, fluidic_port=99))
         assert "1..24" in model.problem(0)

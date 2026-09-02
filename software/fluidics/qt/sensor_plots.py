@@ -20,10 +20,16 @@ from matplotlib.figure import Figure
 from matplotlib.ticker import FuncFormatter
 
 from fluidics.qt.support import PostsToQtThread, subscribe_until_detached
-from fluidics.sensor_recorder import FLUSH_INTERVAL_SECONDS, SensorSeries
+from fluidics.sensor_series import SensorSeries
 
 _logger = logging.getLogger("fluidics.gui")
 
+
+# A recording is flushed at most this often rather than per row: at a flow
+# sensor's ~17 Hz that would be a syscall per sample, taken on the reader
+# thread. What a crash can cost is bounded by this instead -- measured on
+# the monotonic clock, never on a sample's own timestamp.
+FLUSH_INTERVAL_SECONDS = 1.0
 
 # The longest window the operator can ask for, and so exactly how much
 # history a plot's series needs to hold: appends are throttled to at most
