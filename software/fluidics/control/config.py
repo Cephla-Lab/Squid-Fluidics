@@ -78,6 +78,31 @@ class SelectorValvesConfig(_StrictModel):
                 )
         return self
 
+    @model_validator(mode='after')
+    def _check_port_keys(self):
+        """The port dicts are keyed by one spelling: `port_<n>`, within the
+        cascade's reach.
+
+        These keys decide which ports the rig offers -- a tubing volume is
+        how the config says a port is plumbed -- and only this spelling is
+        ever read back. So a typo used to *remove* a port: `port_2s` left
+        port 2 with no volume, and the GUI, the editor and the pre-run
+        check all stopped offering it, with nothing pointing at the config
+        line. Say so at load instead.
+        """
+        reach = sum(self.number_of_ports[v] - 1 for v in self.valve_ids) + 1
+        allowed = {f"port_{port}" for port in range(1, reach + 1)}
+        for field_name in ('tubing_fluid_amount_ul', 'name_mapping'):
+            keys = getattr(self, field_name) or {}
+            unknown = sorted(set(keys) - allowed)
+            if unknown:
+                raise ValueError(
+                    f"{field_name} has keys that name no port on this "
+                    f"cascade: {', '.join(unknown)}. Ports are spelled "
+                    f"port_1..port_{reach}."
+                )
+        return self
+
 
 class ReagentSelectionConfig(_StrictModel):
     selector_valves: SelectorValvesConfig
