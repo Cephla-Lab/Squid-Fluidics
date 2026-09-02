@@ -381,8 +381,14 @@ class TestReadPacketResync:
         frame that had nothing to do with the fault."""
         one = cobs.encode(bytes([0x11])) + b"\x00"
         two = cobs.encode(bytes([0x22])) + b"\x00"
-        fc = self._controller(list(one + two))
+        # chunk stops the first read at the frame pair, so the port still
+        # has bytes to offer -- without them the read that must not happen
+        # would not have raised anyway, and the test would pass on a
+        # reader that reads first.
+        fc = self._controller(list(one + two + b"\x03\x04"),
+                              chunk=len(one + two))
         assert list(fc.read_received_packet_nowait()) == [0x11]
+        assert fc.serial.in_waiting, "the port must still hold something"
 
         def raises(size=1):
             raise OSError("device reports readiness to read but returned no data")
@@ -613,13 +619,15 @@ class TestReaderErrorLog:
         fc = self._controller(["boom"] * 5 + [None] * 4, monkeypatch,
                               clock=lambda: now[0])
         original = fc.read_received_packet_nowait
-        idle = [0]
+        seen = []
 
         def read(discard_buffer=False):
             result = original(discard_buffer)
             if result is None:
-                idle[0] += 1
                 now[0] += 10.0                  # the window elapses while idle
+                # What the log holds *during* the loop. The tally landing
+                # only at shutdown would look identical afterwards.
+                seen.append(len(caplog.records))
             return result
 
         fc.read_received_packet_nowait = read
@@ -628,6 +636,8 @@ class TestReaderErrorLog:
         lines = self._lines(caplog)
         assert len(lines) == 2, lines
         assert "4 more frames dropped" in lines[1]
+        assert seen[-1] == 2, \
+            f"the tally waited for shutdown instead of the window: {seen}"
 
     def test_a_different_fault_gets_its_own_line(self, monkeypatch, caplog):
         fc = self._controller(["boom", "boom", "other"], monkeypatch)
