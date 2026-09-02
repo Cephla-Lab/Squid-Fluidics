@@ -20,10 +20,16 @@ from matplotlib.figure import Figure
 from matplotlib.ticker import FuncFormatter
 
 from fluidics.qt.support import PostsToQtThread, subscribe_until_detached
-from fluidics.sensor_recorder import FLUSH_INTERVAL_SECONDS, SensorSeries
+from fluidics.sensor_series import SensorSeries
 
 _logger = logging.getLogger("fluidics.gui")
 
+
+# A recording is flushed at most this often rather than per row: at a flow
+# sensor's ~17 Hz that would be a syscall per sample, taken on the reader
+# thread. What a crash can cost is bounded by this instead -- measured on
+# the monotonic clock, never on a sample's own timestamp.
+FLUSH_INTERVAL_SECONDS = 1.0
 
 # The longest window the operator can ask for, and so exactly how much
 # history a plot's series needs to hold: appends are throttled to at most
@@ -273,6 +279,10 @@ class TemperatureChannelWidget(TimeSeriesPlotWidget):
         self.save_btn = QPushButton("Save")
         self.output_btn = QPushButton("Output OFF")
         self.output_btn.setCheckable(True)
+        # What an embedder's run freezes -- named here, beside the widgets
+        # themselves, so a control added to this row is not left thawed.
+        self._controls = (self.temp_input, self.set_btn, self.save_btn,
+                          self.output_btn)
         row.addWidget(QLabel("Current:"))
         row.addWidget(self.temp_label)
         row.addWidget(QLabel("Target:"))
@@ -325,6 +335,12 @@ class TemperatureChannelWidget(TimeSeriesPlotWidget):
         self._finalize_plot("Temperature (°C)",
                             f"Channel {self.channel} Temperature", times[-1])
 
+    def setControlsEnabled(self, enabled):
+        """An embedder's run can own the TEC: the setpoint controls follow,
+        while the plot and its recording stay live."""
+        for control in self._controls:
+            control.setEnabled(enabled)
+
     def _set_clicked(self):
         try:
             t = float(self.temp_input.text())
@@ -369,6 +385,10 @@ class TemperatureControlWidget(PostsToQtThread, SensorTabWidget):
         detach = subscribe_until_detached((self.controller, self._on_callback))
         self.destroyed.connect(detach)
         self.controller.start()
+
+    def setControlsEnabled(self, enabled):
+        for widget in self.plot_widgets:
+            widget.setControlsEnabled(enabled)
 
     def _on_callback(self, temps):
         # Runs in the controller's polling thread; marshal to the GUI thread.

@@ -15,27 +15,42 @@ from .test_gui_helpers import RecordingWriter, deliver_posted_events
 
 
 @pytest.fixture
-def channel_widget(qapp):
-    """A one-channel widget over the simulation, with the driver's poll loop
-    stopped so the only publisher left is the synchronous one the test
-    drives; the driver is closed after the widget.
+def temperature_widget(qapp):
+    """Build a widget over the simulation with `channels` channels, the
+    driver's poll loop stopped so the only publisher left is the
+    synchronous one the test drives; the driver is closed after the
+    widget.
 
     The poll thread is joined and its queued readings delivered before the
     test starts, so nothing it published on the way out can be mistaken for
     what the test publishes.
     """
-    controller = TCMControllerSimulation(channels=1)
-    widget = TemperatureControlWidget(controller)
-    assert controller._polling_started   # the constructor starts the publisher
-    controller._terminate_polling = True
-    controller._polling_thread.join(5)
-    assert not controller._polling_thread.is_alive(), "the poll loop is still publishing"
-    deliver_posted_events()
-    try:
-        yield controller, widget.plot_widgets[0]
-    finally:
+    built = []
+
+    def build(channels=1):
+        controller = TCMControllerSimulation(channels=channels)
+        widget = TemperatureControlWidget(controller)
+        assert controller._polling_started   # the constructor starts it
+        controller._terminate_polling = True
+        controller._polling_thread.join(5)
+        assert not controller._polling_thread.is_alive(), \
+            "the poll loop is still publishing"
+        deliver_posted_events()
+        built.append((controller, widget))
+        return controller, widget
+
+    yield build
+    for controller, widget in built:
         widget.deleteLater()
+        QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
         controller.close()
+
+
+@pytest.fixture
+def channel_widget(temperature_widget):
+    """The one-channel case, as (controller, its single channel widget)."""
+    controller, widget = temperature_widget()
+    return controller, widget.plot_widgets[0]
 
 
 def test_a_publish_on_the_controller_lands_in_the_recording(channel_widget):
@@ -65,3 +80,34 @@ def test_the_output_button_follows_the_driver_on_each_reading(channel_widget):
     controller._publish()
     deliver_posted_events()
     assert not channel.output_btn.isChecked()
+
+
+class TestSetControlsEnabled:
+    """An embedder's run owns the TEC: the setpoint controls freeze while
+    the plot and its recording carry on."""
+
+    def _controls(self, channel):
+        return [channel.temp_input, channel.set_btn, channel.save_btn,
+                channel.output_btn]
+
+    def test_the_setpoint_controls_freeze_and_come_back(self, channel_widget):
+        _controller, channel = channel_widget
+        channel.setControlsEnabled(False)
+        assert not any(c.isEnabled() for c in self._controls(channel))
+        channel.setControlsEnabled(True)
+        assert all(c.isEnabled() for c in self._controls(channel))
+
+    def test_the_plot_and_its_recording_are_left_alone(self, channel_widget):
+        _controller, channel = channel_widget
+        channel.setControlsEnabled(False)
+        assert channel.record_btn.isEnabled(), "the recording froze with them"
+        assert channel.interval_input.isEnabled()
+        assert channel.window_input.isEnabled()
+
+    def test_the_container_reaches_every_channel(self, temperature_widget):
+        """Two channels, so freezing one twice cannot pass for freezing
+        both."""
+        _controller, widget = temperature_widget(channels=2)
+        widget.setControlsEnabled(False)
+        assert [c.temp_input.isEnabled() for c in widget.plot_widgets] == \
+            [False, False]
