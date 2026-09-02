@@ -79,7 +79,7 @@ These must stay in sync. Same applies to `VALVE_POSITIONS`/`ValvesStates_t` and 
 - **`fluidics/sequence_list.py`** — `SequenceList`: the editor's model with no Qt in it — the rows as typed, each row's verdict, what a run would take (`included`, `validated`), and the verbs that change them. A script or an embedder can hold one without a QApplication
 - **`fluidics/sensor_recorder.py`** — `SensorSeries`, the one sample buffer (producers append, a GUI reads a window on its own clock; the plots hold their series in these), plus `SensorRecorder`, a Qt-free long-format CSV for an embedding application. The standalone tabs record their own wide per-plot CSV instead — see the module docstring for why both exist
 - **`fluidics/qt/`** — the importable Qt widgets (`support`, `sequence_editor`, `manual_control`, `sensor_plots`); `gui.py` is the standalone application that arranges them
-- **`fluidics/system.py`** — `FluidicsSystem`: the rig as one object — `build(config, simulation)` brings the devices up and assembles `devices`, `operations`, `manual`, `session` and a `warnings` channel; `run()`, `run_manual()`, and `close(timeout)`, which stops whatever job is running before the devices go. What the GUI, the CLI and scripts hold
+- **`fluidics/system.py`** — `FluidicsSystem`: the rig as one object — `build(config, simulation)` brings the devices up and assembles `devices`, `operations`, `manual`, `session` and a `warnings` channel; `run()`, `run_manual()`, and `close(timeout)`, which stops whatever job is running before the devices go. What the GUI, the CLI and scripts hold. `run()` is where the time-zero gate lives (`validate_sequences`), so nothing starts unchecked whoever starts it
 
 ### Firmware Module Structure
 

@@ -14,6 +14,7 @@ from .devices import build_devices, build_operations
 from .manual_operations import ManualOperations
 from .reports import RunReports
 from .run_session import RunSession
+from .sequences import validate_sequences
 from .subscribers import Subscribers
 from .time_estimate import plan_run
 from .usage import ReagentUsage
@@ -64,7 +65,19 @@ class FluidicsSystem:
     def run(self, sequences, plan=None):
         """Start a run of `sequences`; see RunSession.start. The run reports
         through session.events; `plan` from plan() rides along so the run
-        is not priced twice."""
+        is not priced twice, and is what gets checked when it is there --
+        it is what the session executes. Gated by validate_sequences,
+        which says who else checks and why.
+        """
+        if plan is None:
+            if not sequences:
+                raise ValueError("there is nothing to run")
+            validate_sequences(sequences, self.devices.config)
+            plan = self.plan(sequences)
+        else:
+            # A list, not a generator: validate_sequences walks it twice.
+            validate_sequences([entry.sequence for entry in plan],
+                               self.devices.config)
         self.session.start(sequences, self.operations, plan=plan)
 
     def run_manual(self, verb, callbacks=None):
