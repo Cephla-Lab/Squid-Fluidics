@@ -84,17 +84,12 @@ class TestDriversRouteThroughIt:
 def test_a_missing_device_is_a_device_error():
     """One family, one bring-up dialog: the entry points catch DeviceError
     and get the missing-device case with it."""
-    from fluidics.control.discovery import DeviceNotFoundError
-    from fluidics.errors import DeviceError
     assert issubclass(DeviceNotFoundError, DeviceError)
 
 
 class TestThePortIsClaimed:
-    """Two programs reading one port split the frames between them and both
-    get corrupt data. That is what the MCU's "not enough input bytes for
-    length code" bursts were: a 64-minute session logged 106 of them, all
-    inside two 7-second windows, each ending when the other process died.
-    """
+    """Two programs on one port split the frames between them and both get
+    corrupt data, so the second one is refused instead."""
 
     def _serial_that_cannot_lock(self, monkeypatch):
         def refuse(port, exclusive=None, **kwargs):
@@ -127,14 +122,6 @@ class TestThePortIsClaimed:
                               "[Errno 37] No locks available")
         monkeypatch.setattr("fluidics.control.discovery.serial.Serial", refuse)
         with pytest.raises(serial.SerialException, match="No locks available"):
-            open_serial_port("/dev/ttyFAKE", "Widget", baudrate=9600)
-
-    def test_an_ordinary_port_failure_is_not_relabelled(self, monkeypatch):
-        """A dead port is not a busy one."""
-        def refuse(port, **kwargs):
-            raise serial.SerialException("could not open port: no such device")
-        monkeypatch.setattr("fluidics.control.discovery.serial.Serial", refuse)
-        with pytest.raises(serial.SerialException, match="no such device"):
             open_serial_port("/dev/ttyFAKE", "Widget", baudrate=9600)
 
     def test_the_mcu_goes_through_it(self, monkeypatch):

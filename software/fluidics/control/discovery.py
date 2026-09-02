@@ -41,24 +41,20 @@ def find_serial_port(serial_number, device_name):
 
 
 def open_serial_port(port, device_name, **kwargs):
-    """Open `port` for this process alone.
+    """Open `port` for this process alone, refusing it if someone else has it.
 
-    Two programs reading one serial port split the frames between them, so
-    each sees fragments and most decodes fail -- a burst of "not enough
-    input bytes for length code" in the run log, with pyserial's own guess
-    at the cause ("multiple access on port?") mixed in. Refuse instead.
-
-    The lock is advisory: it stops another opener that also asks for it,
-    which is every open this package makes. It cannot stop an unrelated
-    program, and does not try to.
+    Two programs on one port split the frames between them and both get
+    corrupt data. The lock is advisory, so it stops an opener that also
+    asks for it -- every open this package makes -- and not an unrelated
+    program. What it gives the operator is the sentence, in place of
+    pyserial's errno 11.
     """
     try:
         return serial.Serial(port, exclusive=True, **kwargs)
     except serial.SerialException as e:
-        # pyserial prefixes every flock failure this way, contention or not:
-        # ENOLCK from a filesystem that cannot lock, EINTR from a signal.
-        # Only EWOULDBLOCK means someone else holds it, and only that gets
-        # the "another program" reading -- the rest keep their own.
+        # Only contention reads as "someone else has it": pyserial prefixes
+        # every flock failure alike (ENOLCK, EINTR), and errno 11 can also
+        # reach us from a plain open. Both halves have to agree.
         if e.errno != errno.EWOULDBLOCK or "exclusively lock" not in str(e):
             raise
         raise DeviceError(

@@ -2,7 +2,6 @@ import logging
 import threading
 import time
 
-import serial
 
 from ..subscribers import Subscribers
 from .discovery import find_serial_port, open_serial_port

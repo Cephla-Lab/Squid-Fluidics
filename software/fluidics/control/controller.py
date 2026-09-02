@@ -1,7 +1,6 @@
 import logging
 
 from cobs import cobs
-import serial
 from ._def import *
 from .discovery import find_serial_port, open_serial_port
 from datetime import datetime
