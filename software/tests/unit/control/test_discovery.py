@@ -12,9 +12,12 @@ routes through it -- an unplugged device must read as an operator problem
 from types import SimpleNamespace
 
 import pytest
+import serial
 
 from fluidics.control.controller import FluidController
-from fluidics.control.discovery import DeviceNotFoundError, find_serial_port
+from fluidics.errors import DeviceError
+from fluidics.control.discovery import (DeviceNotFoundError, find_serial_port,
+                                        open_serial_port)
 from fluidics.control.syringe_pump import SyringePump
 from fluidics.control.temperature_controller import TCMController
 
@@ -82,3 +85,54 @@ def test_a_missing_device_is_a_device_error():
     from fluidics.control.discovery import DeviceNotFoundError
     from fluidics.errors import DeviceError
     assert issubclass(DeviceNotFoundError, DeviceError)
+
+
+class TestThePortIsClaimed:
+    """Two programs reading one port split the frames between them and both
+    get corrupt data. That is what the MCU's "not enough input bytes for
+    length code" bursts were: a 64-minute session logged 106 of them, all
+    inside two 7-second windows, each ending when the other process died.
+    """
+
+    def _serial_that_cannot_lock(self, monkeypatch):
+        def refuse(port, exclusive=None, **kwargs):
+            raise serial.SerialException(
+                11, f"Could not exclusively lock port {port}: [Errno 11] "
+                    "Resource temporarily unavailable")
+        monkeypatch.setattr("fluidics.control.discovery.serial.Serial", refuse)
+
+    def test_the_port_is_opened_for_this_process_alone(self, monkeypatch):
+        seen = {}
+        monkeypatch.setattr("fluidics.control.discovery.serial.Serial",
+                            lambda port, **kwargs: seen.update(kwargs) or object())
+        open_serial_port("/dev/ttyFAKE", "Widget", baudrate=9600)
+        assert seen["exclusive"] is True
+
+    def test_a_port_someone_else_holds_names_the_remedy(self, monkeypatch):
+        self._serial_that_cannot_lock(monkeypatch)
+        with pytest.raises(DeviceError, match="already open in another program"):
+            open_serial_port("/dev/ttyFAKE", "Widget", baudrate=9600)
+
+    def test_an_ordinary_port_failure_is_not_relabelled(self, monkeypatch):
+        """A dead port is not a busy one."""
+        def refuse(port, **kwargs):
+            raise serial.SerialException("could not open port: no such device")
+        monkeypatch.setattr("fluidics.control.discovery.serial.Serial", refuse)
+        with pytest.raises(serial.SerialException, match="no such device"):
+            open_serial_port("/dev/ttyFAKE", "Widget", baudrate=9600)
+
+    def test_the_mcu_goes_through_it(self, monkeypatch):
+        fake_ports(monkeypatch, [("/dev/ttyACM9", "AAA")])
+        self._serial_that_cannot_lock(monkeypatch)
+        controller = FluidController("AAA")
+        try:
+            with pytest.raises(DeviceError, match="Fluid controller"):
+                controller.begin()
+        finally:
+            controller.close()
+
+    def test_the_temperature_controller_goes_through_it(self, monkeypatch):
+        fake_ports(monkeypatch, [("/dev/ttyUSB9", "BBB")])
+        self._serial_that_cannot_lock(monkeypatch)
+        with pytest.raises(DeviceError, match="Temperature controller"):
+            TCMController(sn="BBB")

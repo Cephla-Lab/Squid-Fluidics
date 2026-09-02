@@ -5,7 +5,7 @@ import time
 import serial
 
 from ..subscribers import Subscribers
-from .discovery import find_serial_port
+from .discovery import find_serial_port, open_serial_port
 
 _logger = logging.getLogger(__name__)
 
@@ -24,7 +24,8 @@ class TCMController:
             raise ValueError(f"channels must be 1 or 2, got {channels}")
 
         port = find_serial_port(sn, "Temperature controller")
-        self.serial = serial.Serial(port, baudrate=baud_rate, timeout=timeout)
+        self.serial = open_serial_port(port, "Temperature controller",
+                                       baudrate=baud_rate, timeout=timeout)
         self._serial_lock = threading.Lock()
 
         self.channels = channels

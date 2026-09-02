@@ -9,11 +9,12 @@ failure -- a cable, a renumbered rig, a stale config -- deserved better
 than a traceback, so the search and its error live here, once.
 """
 
+import serial
 from serial.tools import list_ports
 
 # Re-exported: it was born here, and the drivers and entry points import it
 # from here; its family (DeviceError) lives in fluidics.errors now.
-from ..errors import DeviceNotFoundError  # noqa: F401
+from ..errors import DeviceError, DeviceNotFoundError  # noqa: F401
 
 
 def find_serial_port(serial_number, device_name):
@@ -35,3 +36,27 @@ def find_serial_port(serial_number, device_name):
         f"Serial devices present: {present}. Check the serial number in "
         f"the config file and the USB connection."
     )
+
+
+def open_serial_port(port, device_name, **kwargs):
+    """Open `port` for this process alone.
+
+    Two programs reading one serial port split the frames between them, so
+    each sees fragments and most decodes fail -- a burst of "not enough
+    input bytes for length code" in the run log, with pyserial's own guess
+    at the cause ("multiple access on port?") mixed in. Refuse instead.
+
+    The lock is advisory: it stops another opener that also asks for it,
+    which is every open this package makes. It cannot stop an unrelated
+    program, and does not try to.
+    """
+    try:
+        return serial.Serial(port, exclusive=True, **kwargs)
+    except serial.SerialException as e:
+        if "exclusively lock" not in str(e):
+            raise
+        raise DeviceError(
+            f"{device_name} on {port} is already open in another program. "
+            f"Close it and try again -- two programs on one port both get "
+            f"corrupt data."
+        ) from e
