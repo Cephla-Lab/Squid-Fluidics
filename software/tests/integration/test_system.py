@@ -81,6 +81,17 @@ class TestTheTimeZeroGate:
             system.run(None, plan=plan)
         assert not system.busy
 
+    def test_the_plan_is_what_is_checked_when_both_are_handed_in(self, system):
+        """RunSession.start runs the plan it is given and reads the
+        sequences only to build one it was not, so a good list cannot
+        vouch for a plan that would move the rig somewhere else."""
+        from fluidics.events import PlanEntry
+        beyond = dict(FLOW_CELL_STEP, fluidic_port=999)
+        plan = (PlanEntry(0, beyond, 1, 1, "beyond", 1.0),)
+        with pytest.raises(ValueError, match="out of range"):
+            system.run([FLOW_CELL_STEP], plan=plan)
+        assert not system.busy
+
     def test_a_good_run_still_starts(self, system, real_clock):
         system.run([FLOW_CELL_STEP])
         assert system.wait(5)

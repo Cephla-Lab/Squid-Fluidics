@@ -80,12 +80,14 @@ class FluidicsSystem:
 
     @staticmethod
     def _to_run(sequences, plan):
-        """What the run will actually execute: the sequences handed in, or
-        the ones the plan carries when a caller hands a plan alone (a
-        resume tail does)."""
-        if sequences is not None:
-            return sequences
-        return [entry.sequence for entry in plan or ()]
+        """What the run will actually execute -- the plan's rows whenever
+        a plan was handed in, since RunSession.start runs the plan it is
+        given and reads `sequences` only to build one it was not. A
+        caller passing both (the GUI does, having priced the plan from
+        those very sequences) is checked on what moves the rig."""
+        if plan is not None:
+            return [entry.sequence for entry in plan]
+        return sequences or []
 
     def run_manual(self, verb, callbacks=None):
         """Start one manual verb; see RunSession.run_manual."""
