@@ -9,6 +9,9 @@ failure -- a cable, a renumbered rig, a stale config -- deserved better
 than a traceback, so the search and its error live here, once.
 """
 
+import glob
+import os
+
 import serial
 from serial.tools import list_ports
 
@@ -52,6 +55,14 @@ def open_serial_port(port, device_name, **kwargs):
     asks for it -- every open this package makes. It cannot stop an
     unrelated program, and does not try to.
     """
+    holders = port_holders(port)
+    if holders:
+        who = ", ".join(f"{name} (pid {pid})" for pid, name in holders)
+        raise DeviceInUseError(
+            f"{device_name} on {port} is already open in {who}. Close it and "
+            f"try again -- two programs reading one port split the frames "
+            f"between them, and both get corrupt data."
+        )
     try:
         return serial.Serial(port, exclusive=True, **kwargs)
     except serial.SerialException as e:
@@ -62,3 +73,35 @@ def open_serial_port(port, device_name, **kwargs):
             f"Close the other instance of the fluidics software (or whatever "
             f"else holds the port) and try again."
         ) from e
+
+
+def port_holders(device):
+    """Other processes with `device` open, as sorted (pid, name) pairs.
+
+    The advisory lock only stops an opener that asks for it, and the port's
+    other user is often a program that does not -- the microscope software's
+    own copy of this driver, or a bench script someone left running. /proc
+    knows who it is, which turns "the frames are corrupt" into a name and a
+    pid the operator can act on.
+
+    Linux only, by construction: elsewhere the glob finds nothing and the
+    open proceeds, which is the behaviour we had before.
+    """
+    me = os.getpid()
+    found = set()
+    for entry in glob.glob("/proc/[0-9]*/fd/*"):
+        try:
+            if os.readlink(entry) != device:
+                continue
+            pid = int(entry.split("/", 3)[2])
+        except (OSError, ValueError):
+            continue        # the process exited, or is not ours to read
+        if pid == me:
+            continue
+        try:
+            with open(f"/proc/{pid}/comm") as f:
+                name = f.read().strip()
+        except OSError:
+            name = "unknown"
+        found.add((pid, name))
+    return sorted(found)

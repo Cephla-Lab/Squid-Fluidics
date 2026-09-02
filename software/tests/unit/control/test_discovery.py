@@ -9,13 +9,17 @@ routes through it -- an unplugged device must read as an operator problem
 (which device, which serial, what is present), never a driver bug.
 """
 
+import os
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
 
 from fluidics.control.controller import FluidController
 from fluidics.control.discovery import (DeviceInUseError, DeviceNotFoundError,
-                                        find_serial_port, open_serial_port)
+                                        find_serial_port, open_serial_port,
+                                        port_holders)
 from fluidics.control.syringe_pump import SyringePump
 from fluidics.control.temperature_controller import TCMController
 
@@ -152,3 +156,53 @@ class TestExclusiveOpen:
         DeviceError and get this with it."""
         from fluidics.errors import DeviceError
         assert issubclass(DeviceInUseError, DeviceError)
+
+
+class TestNamingWhoHoldsThePort:
+    """The advisory lock only stops an opener that asks for it, and the port's
+    other user is often a program that does not -- the microscope software's
+    own copy of this driver, or a bench script. Then the operator needs a name,
+    not a corrupt stream.
+    """
+
+    def test_a_held_port_is_refused_by_name(self, monkeypatch):
+        monkeypatch.setattr("fluidics.control.discovery.port_holders",
+                            lambda device: [(4242, "napari")])
+        monkeypatch.setattr("fluidics.control.discovery.serial.Serial",
+                            lambda *a, **k: pytest.fail("opened a held port"))
+        with pytest.raises(DeviceInUseError, match=r"napari \(pid 4242\)"):
+            open_serial_port("/dev/ttyFAKE", "Widget", baudrate=9600)
+
+    def test_an_unheld_port_opens(self, monkeypatch):
+        monkeypatch.setattr("fluidics.control.discovery.port_holders",
+                            lambda device: [])
+        opened = object()
+        monkeypatch.setattr("fluidics.control.discovery.serial.Serial",
+                            lambda *a, **k: opened)
+        assert open_serial_port("/dev/ttyFAKE", "Widget", baudrate=9600) is opened
+
+    @pytest.mark.skipif(not os.path.isdir("/proc"), reason="needs /proc")
+    def test_it_finds_a_real_holder(self, tmp_path):
+        """Against a live process holding a real file -- the /proc walk is the
+        part a mock cannot check."""
+        held = tmp_path / "held"
+        held.write_text("x")
+        proc = subprocess.Popen(
+            [sys.executable, "-c",
+             f"f = open({str(held)!r}); import time; print('ok', flush=True); time.sleep(30)"],
+            stdout=subprocess.PIPE, text=True)
+        try:
+            proc.stdout.readline()          # it has the file open
+            assert (proc.pid, "python3") in [
+                (pid, name) for pid, name in port_holders(str(held))]
+        finally:
+            proc.kill()
+            proc.wait()
+
+    @pytest.mark.skipif(not os.path.isdir("/proc"), reason="needs /proc")
+    def test_our_own_handle_is_not_a_holder(self, tmp_path):
+        """Otherwise every open would refuse itself on the second device."""
+        held = tmp_path / "mine"
+        held.write_text("x")
+        with open(held):
+            assert port_holders(str(held)) == []
