@@ -1095,6 +1095,38 @@ class TestPortNames:
         assert combo.currentData() == 9
 
 
+class TestShowingWhereTheValvesAre:
+    """Opening the tab paints the valve's current port. It must not move a
+    valve, and it must not name a port the valve is not on."""
+
+    def _stub(self, qapp, ports, current):
+        from qtpy.QtWidgets import QComboBox
+        combo = QComboBox()
+        for port in ports:
+            combo.addItem(f"Port {port}: ", port)
+        combo.setCurrentIndex(-1)
+        return combo, SimpleNamespace(
+            valveCombo=combo,
+            manual=SimpleNamespace(current_port=lambda: current))
+
+    def test_it_selects_the_port_the_valves_are_on(self, qapp):
+        combo, stub = self._stub(qapp, [1, 5, 9], current=5)
+        moved = []
+        combo.currentIndexChanged.connect(moved.append)
+        gui.ManualControlWidget._showCurrentPort(stub)
+        assert combo.currentData() == 5
+        assert moved == [], "painting the current port moved a valve"
+
+    def test_a_port_the_rig_does_not_offer_leaves_the_box_blank(self, qapp):
+        """Port 1 at power-on, on a rig whose port 1 has no tubing volume.
+        Coercing the unmatched -1 to index 0 would name port 5 while the
+        valve sat on port 1."""
+        combo, stub = self._stub(qapp, [5, 9], current=1)
+        gui.ManualControlWidget._showCurrentPort(stub)
+        assert combo.currentIndex() == -1
+        assert combo.currentData() is None
+
+
 class TestUsageTable:
     """The run tab's per-port table: painted from the ledger's snapshot,
     names read fresh from the config at each paint, hidden when empty."""

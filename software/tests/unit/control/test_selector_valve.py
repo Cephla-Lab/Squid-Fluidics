@@ -120,6 +120,20 @@ class TestGetPortNames:
         assert 25 not in offered
         assert offered[-1] == 28, "the ports after the gap kept their numbers"
 
+    def test_only_the_canonical_spelling_names_a_port(self, flow_cell_system):
+        """The model takes any string as a key, but only `port_key`'s
+        spelling is ever read back -- `get_tubing_fluid_amount_to_port`
+        looks up `port_1` and gets None for anything else. A port offered
+        on the strength of `1` or `port_01` would have no volume when a
+        draw asked for one, and `port_01` would duplicate `port_1`."""
+        sv = flow_cell_system.config.reagent_selection.selector_valves
+        del sv.tubing_fluid_amount_ul["port_25"]
+        sv.tubing_fluid_amount_ul.update({"25": 100, "port_025": 100,
+                                          "port_x": 100})
+        offered = [port for port, _label in flow_cell_system.get_port_names()]
+        assert 25 not in offered
+        assert offered.count(1) == 1
+
 
 class TestOpenPort:
     def test_open_port_single_valve(self, open_chamber_system):

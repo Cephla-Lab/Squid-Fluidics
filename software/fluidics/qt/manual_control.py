@@ -256,7 +256,7 @@ class ManualControlWidget(PostsToQtThread, QWidget):
         with QSignalBlocker(self.valveCombo):
             current = self.valveCombo.currentData()
             self._fillPorts()
-            self.valveCombo.setCurrentIndex(max(0, self.valveCombo.findData(current)))
+            self.valveCombo.setCurrentIndex(self.valveCombo.findData(current))
 
     def _syringeArgs(self):
         return (int(self.syringePortCombo.currentText()), self.volumeSpinBox.value(),
@@ -359,11 +359,20 @@ class ManualControlWidget(PostsToQtThread, QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
-        # Show where the valves are; do not move them there.
-        self.valveCombo.blockSignals(True)
-        self.valveCombo.setCurrentIndex(
-            max(0, self.valveCombo.findData(self.manual.current_port())))
-        self.valveCombo.blockSignals(False)
+        self._showCurrentPort()
+
+    def _showCurrentPort(self):
+        """Show where the valves are; do not move them there.
+
+        A valve sitting on a port this rig does not offer -- port 1 at
+        power-on, on a rig whose port 1 has no tubing volume -- has no item
+        to select, and the box is left blank. The operator reads it to know
+        where the fluid path goes, so naming a port the valve is not on is
+        worse than naming none.
+        """
+        with QSignalBlocker(self.valveCombo):
+            self.valveCombo.setCurrentIndex(
+                self.valveCombo.findData(self.manual.current_port()))
 
     def closeEvent(self, event):
         self.progress_timer.stop()

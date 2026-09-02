@@ -374,18 +374,17 @@ def available_ports(config: FluidicsConfig) -> tuple:
     but nobody has connected a line to is not a port the operator should
     be offered, nor one a sequence file may name -- it would open a valve
     onto nothing and draw air.
+
+    Asked the other way round -- which of the reachable ports has an
+    entry, rather than which entries look like ports -- because only
+    `port_key`'s spelling is ever read back: `get_tubing_fluid_amount_to_port`
+    looks up `port_1` and gets None for anything else. Parsing the keys
+    instead would offer a port whose volume then reads as missing, and let
+    `port_01` and `port_1` name the same one twice.
     """
-    sv = config.reagent_selection.selector_valves
-    reach = available_port_count(config)
-    ports = []
-    for key in sv.tubing_fluid_amount_ul:
-        try:
-            port = int(key.removeprefix("port_"))
-        except ValueError:
-            continue                    # not a port_N key; the model allows it
-        if 1 <= port <= reach:
-            ports.append(port)
-    return tuple(sorted(ports))
+    entries = config.reagent_selection.selector_valves.tubing_fluid_amount_ul
+    return tuple(port for port in range(1, available_port_count(config) + 1)
+                 if port_key(port) in entries)
 
 
 # --- Config Loading ---
