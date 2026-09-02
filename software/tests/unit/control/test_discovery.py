@@ -11,6 +11,8 @@ routes through it -- an unplugged device must read as an operator problem
 
 from types import SimpleNamespace
 
+import errno
+
 import pytest
 import serial
 
@@ -111,6 +113,20 @@ class TestThePortIsClaimed:
     def test_a_port_someone_else_holds_names_the_remedy(self, monkeypatch):
         self._serial_that_cannot_lock(monkeypatch)
         with pytest.raises(DeviceError, match="already open in another program"):
+            open_serial_port("/dev/ttyFAKE", "Widget", baudrate=9600)
+
+    def test_a_lock_failure_that_is_not_contention_keeps_its_own_error(
+            self, monkeypatch):
+        """pyserial prefixes every flock failure with "Could not exclusively
+        lock" -- ENOLCK on a filesystem that cannot lock, EINTR from a
+        signal. Reading those as "another program has it" would send the
+        operator hunting for a process that does not exist."""
+        def refuse(port, exclusive=None, **kwargs):
+            raise serial.SerialException(
+                errno.ENOLCK, f"Could not exclusively lock port {port}: "
+                              "[Errno 37] No locks available")
+        monkeypatch.setattr("fluidics.control.discovery.serial.Serial", refuse)
+        with pytest.raises(serial.SerialException, match="No locks available"):
             open_serial_port("/dev/ttyFAKE", "Widget", baudrate=9600)
 
     def test_an_ordinary_port_failure_is_not_relabelled(self, monkeypatch):

@@ -9,6 +9,8 @@ failure -- a cable, a renumbered rig, a stale config -- deserved better
 than a traceback, so the search and its error live here, once.
 """
 
+import errno
+
 import serial
 from serial.tools import list_ports
 
@@ -53,7 +55,11 @@ def open_serial_port(port, device_name, **kwargs):
     try:
         return serial.Serial(port, exclusive=True, **kwargs)
     except serial.SerialException as e:
-        if "exclusively lock" not in str(e):
+        # pyserial prefixes every flock failure this way, contention or not:
+        # ENOLCK from a filesystem that cannot lock, EINTR from a signal.
+        # Only EWOULDBLOCK means someone else holds it, and only that gets
+        # the "another program" reading -- the rest keep their own.
+        if e.errno != errno.EWOULDBLOCK or "exclusively lock" not in str(e):
             raise
         raise DeviceError(
             f"{device_name} on {port} is already open in another program. "
