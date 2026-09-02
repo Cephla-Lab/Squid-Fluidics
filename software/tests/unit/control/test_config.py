@@ -100,6 +100,37 @@ class TestSelectorValvesValidator:
                 tubing_fluid_amount_ul={"port_1": 100},
             )
 
+    def _valves(self, **overrides):
+        kwargs = dict(valve_ids=[0], number_of_ports={0: 10},
+                      tubing_fluid_amount_to_valve_ul={0: 0},
+                      tubing_fluid_amount_ul={"port_1": 100})
+        kwargs.update(overrides)
+        return SelectorValvesConfig(**kwargs)
+
+    @pytest.mark.parametrize("key", ["1", "port_01", "port_x", "port_99"])
+    def test_a_key_that_names_no_port_is_rejected(self, key):
+        """These keys decide which ports the rig offers -- a tubing volume
+        is how the config says a port is plumbed, and only `port_<n>` is
+        ever read back. So a typo used to remove a port: `port_2s` left
+        port 2 with no volume and every consumer stopped offering it, with
+        nothing pointing at the config line."""
+        with pytest.raises(ValidationError, match="name no port"):
+            self._valves(tubing_fluid_amount_ul={"port_1": 100, key: 100})
+
+    def test_a_name_mapping_key_that_names_no_port_is_rejected(self):
+        """The rename dialog writes this file; a stale key from a rig with
+        more valves would sit there unread."""
+        with pytest.raises(ValidationError, match="name no port"):
+            self._valves(name_mapping={"port_50": "DAPI"})
+
+    def test_the_reach_spans_the_whole_cascade(self):
+        """Ports are numbered across the cascade, not per valve: two
+        10-port valves reach port 19, so port_19 is a real key."""
+        sv = self._valves(valve_ids=[0, 1], number_of_ports={0: 10, 1: 10},
+                          tubing_fluid_amount_to_valve_ul={0: 0, 1: 200},
+                          tubing_fluid_amount_ul={"port_19": 100})
+        assert sv.tubing_fluid_amount_ul == {"port_19": 100}
+
     def test_valid_multi_valve_config(self):
         sv = SelectorValvesConfig(
             valve_ids=[0, 1],

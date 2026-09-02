@@ -6,13 +6,12 @@ import sys
 # and qtpy resolves the binding once for the whole application (QT_API).
 from qtpy.QtWidgets import (QApplication, QMainWindow, QTabWidget,
                             QFileDialog, QMessageBox)
-from qtpy.QtCore import QSettings
+from qtpy.QtCore import QCoreApplication, QSettings
 
 from serial import SerialException
 
 from fluidics.control.config import (
-    DEFAULT_CONFIG_PATHS, available_port_count, default_config_path,
-    load_config, port_key, save_config,
+    DEFAULT_CONFIG_PATHS, default_config_path, load_config, save_config,
 )
 from fluidics.errors import DeviceError
 from fluidics.devices import (
@@ -209,7 +208,14 @@ class FluidicsControlGUI(PostsToQtThread, QMainWindow):
         super().closeEvent(event)
 
 
-if __name__ == '__main__':
+def main(argv=None):
+    """The standalone application: bring the window up and hand over to Qt.
+
+    A function rather than a bare __main__ block so this path can be
+    driven by a test, the way run_sequences.main() already is. It was not,
+    and a name dropped from an import survived the whole suite -- nothing
+    executes what only runs under `python gui.py`.
+    """
     setup_uncaught_exception_logging()
     # One file per GUI session: bring-up, manual moves, and every run land in
     # it. Closed by logging's own shutdown at exit.
@@ -219,15 +225,19 @@ if __name__ == '__main__':
     parser.add_argument("--config", help="Rig config, YAML or legacy JSON (default: "
                         f"{' then '.join(DEFAULT_CONFIG_PATHS)}, then the last "
                         "file picked; asks otherwise).")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
-    app = QApplication(sys.argv)
+    app = QApplication.instance() or QApplication(sys.argv)
     # The identity every QSettings() in the process stores under.
     QCoreApplication.setOrganizationName("Cephla")
     QCoreApplication.setApplicationName("FluidicsControl")
     config = pick_config(args.config)
     if config is None:
-        sys.exit(1)
-    gui = FluidicsControlGUI(config, args.simulation)
-    gui.show()
-    sys.exit(app.exec_())
+        return 1
+    window = FluidicsControlGUI(config, args.simulation)
+    window.show()
+    return app.exec_()
+
+
+if __name__ == '__main__':
+    sys.exit(main())

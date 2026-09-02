@@ -33,13 +33,14 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from fluidics.control.config import available_port_count
+from fluidics.control.config import available_ports
 from fluidics.events import RunEnded, RunStarted, SequenceCompleted, SequenceStarted, plan_seconds, repeat_suffix
 from fluidics.files import atomic_write
 from fluidics.qt.support import GuiLogHandler, PostsToQtThread, _ask_yes_no, _hms, subscribe_until_detached
 from fluidics.run_log import LOGGER_NAME
 from fluidics.sequence_list import SequenceList
 from fluidics.sequences import (
+    PORT_FIELDS,
     get_fields_for_type,
     is_included,
     label_for_type,
@@ -105,18 +106,28 @@ class AddSequenceDialog(QDialog):
             if field_name == 'include':
                 continue  # handled by tree checkbox
 
-            default = field_info.default if field_info.default is not None else None
+            # A required field has no default, and pydantic spells that
+            # PydanticUndefined -- which is not None, so it used to reach
+            # int()/float() below and raise. Every fluidic type has required
+            # fields, so the dialog raised for all of them: Add Sequence was
+            # dead on arrival.
+            default = None if field_info.is_required() else field_info.default
 
             if field_name in ('name', 'round'):
                 widget = QLineEdit()
                 if default is not None:
                     widget.setText(str(default))
-            elif field_name == 'fluidic_port':
+            elif field_name in PORT_FIELDS:
+                # fill_tubing_with is a port too, and sequences.py checks it
+                # as one -- offering it as a free-typed number was the same
+                # bug this change exists to fix, one field over.
                 widget = QComboBox()
-                for i, pname in enumerate(self.port_names):
-                    widget.addItem(pname, i + 1)
+                for port, label in self.port_names:
+                    widget.addItem(label, port)
                 if default is not None:
-                    widget.setCurrentIndex(max(0, int(default) - 1))
+                    # An unmatched port selects nothing rather than silently
+                    # standing in for the first one; see _showCurrentPort.
+                    widget.setCurrentIndex(widget.findData(int(default)))
             elif field_name in ('temperature', 'incubation_time'):
                 widget = QDoubleSpinBox()
                 widget.setDecimals(2)
@@ -124,7 +135,7 @@ class AddSequenceDialog(QDialog):
                 if default is not None:
                     widget.setValue(float(default))
             else:
-                # int fields: flow_rate, volume, repeat, fill_tubing_with
+                # int fields: flow_rate, volume, repeat
                 widget = QSpinBox()
                 widget.setRange(0, 100000)
                 if default is not None:
@@ -175,7 +186,7 @@ class SequencesWidget(PostsToQtThread, QWidget):
         # dicts, validates them and performs the structural verbs; this
         # widget renders it and turns clicks into its calls.
         self._model = SequenceList(config.application,
-                                   available_port_count(config))
+                                   available_ports(config))
         self._plan = ()          # the running run's plan, rows = model rows
         # Which sequences the operator has open, by identity: a move swaps
         # the dicts themselves, so an open row follows its sequence rather

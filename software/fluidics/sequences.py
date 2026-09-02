@@ -9,7 +9,7 @@ import yaml
 from pydantic import (BaseModel, ConfigDict, Discriminator, Field, TypeAdapter,
                       ValidationError)
 
-from .control.config import available_port_count, port_range_note
+from .control.config import available_ports, port_range_note
 from .files import atomic_write
 
 
@@ -229,27 +229,31 @@ def save_sequences_yaml(sequences: list[dict], path: str) -> None:
         yaml.safe_dump({"sequences": reordered}, f, default_flow_style=False, sort_keys=False)
 
 
-def sequence_port_problems(seq: dict, limit: int) -> list[str]:
-    """The out-of-range port fields of one sequence, as "field=value"
-    messages; empty when every port fits within `limit`.
+# The port-valued fields of a sequence, and whether a falsy value means
+# "no port here" rather than port 0. There is no model metadata to derive
+# this from: a new sequence type carrying a port under another name must be
+# added here, or it only fails at run time through open_port's backstop.
+# Read by the entry points' pre-run check, the GUI's live per-row
+# validation, and the Add dialog, which offers a port combo for each.
+PORT_FIELDS = {"fluidic_port": False, "fill_tubing_with": True}
+
+
+def sequence_port_problems(seq: dict, ports) -> list[str]:
+    """The port fields of one sequence this rig does not offer, as
+    "field=value" messages; empty when every port is one of `ports`.
 
     A falsy fill_tubing_with (None, or the GUI dialog's 0) means "no fill"
     and is skipped, matching how the operations interpret it.
 
-    The port-valued fields are listed here by hand -- there is no model
-    metadata to derive them from. A new sequence type that carries a port
-    under another name must be added below, or it only fails at run time
-    through open_port's backstop. This is the one copy of that list: the
-    entry points' pre-run check and the GUI's live per-row validation both
-    read it.
+    The fields come from PORT_FIELDS, which is the one copy of that list.
     """
     problems = []
-    port = seq.get("fluidic_port")
-    if port is not None and not 1 <= port <= limit:
-        problems.append(f"fluidic_port={port}")
-    fill = seq.get("fill_tubing_with")
-    if fill and not 1 <= fill <= limit:
-        problems.append(f"fill_tubing_with={fill}")
+    for field, falsy_means_unset in PORT_FIELDS.items():
+        port = seq.get(field)
+        if port is None or (falsy_means_unset and not port):
+            continue
+        if port not in ports:
+            problems.append(f"{field}={port}")
     return problems
 
 
@@ -323,7 +327,7 @@ def validate_sequences(sequences: list[dict], config) -> None:
     check_types_against_application(sequences, config)
 
 
-def sequence_problem(seq: dict, application: str, limit: int) -> Optional[str]:
+def sequence_problem(seq: dict, application: str, ports) -> Optional[str]:
     """The verdict on one sequence, as a message or None -- the order the
     complaints are asked in, in one place.
 
@@ -341,9 +345,9 @@ def sequence_problem(seq: dict, application: str, limit: int) -> Optional[str]:
         first = e.errors()[0]
         field = ".".join(str(part) for part in first["loc"][2:]) or "sequence"
         return f"{field}: {first['msg']}"
-    problems = sequence_port_problems(validated[0].model_dump(), limit)
+    problems = sequence_port_problems(validated[0].model_dump(), ports)
     if problems:
-        return "; ".join(problems) + f": {port_range_note(limit)}"
+        return "; ".join(problems) + f": {port_range_note(ports)}"
     return None
 
 
@@ -356,13 +360,13 @@ def check_ports_against_config(sequences: list[dict], config) -> None:
     run time, hours into an experiment. Reached through validate_sequences,
     so a typo fails at time zero with the sequence named.
     """
-    limit = available_port_count(config)
+    ports = available_ports(config)
     problems = []
     for index, seq in enumerate(sequences):
         problems.extend(f"sequence {index} ({sequence_label(seq)}): {problem}"
-                        for problem in sequence_port_problems(seq, limit))
+                        for problem in sequence_port_problems(seq, ports))
     if problems:
-        raise ValueError(f"Ports out of range -- {port_range_note(limit)}: "
+        raise ValueError(f"Ports out of range -- {port_range_note(ports)}: "
                          + "; ".join(problems))
 
 

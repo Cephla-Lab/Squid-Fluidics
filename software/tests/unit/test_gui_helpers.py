@@ -683,7 +683,7 @@ class TestManualControl:
         stub = SimpleNamespace(
             manual=self.Manual(),
             session=FakeSession(),
-            valveCombo=SimpleNamespace(currentIndex=lambda: 2),
+            valveCombo=SimpleNamespace(currentData=lambda: 3),
             syringePortCombo=SimpleNamespace(currentText=lambda: "2"),
             speedCombo=SimpleNamespace(currentData=lambda: 500.0),
             volumeSpinBox=SimpleNamespace(value=lambda: 300),
@@ -1005,12 +1005,22 @@ class TestPortNames:
     it into the config and the rig's own file, the combo repaints in place."""
 
     def test_the_dialog_prefills_and_returns_only_named_ports(self, qapp):
-        dialog = gui.PortNamesDialog(None, 4, {"port_2": "DAPI"})
-        assert [edit.text() for edit in dialog._edits] == ["", "DAPI", "", ""]
-        dialog._edits[0].setText("  wash  ")
-        dialog._edits[1].setText("")            # cleared by the operator
+        dialog = gui.PortNamesDialog(None, [1, 2, 3, 4], {"port_2": "DAPI"})
+        assert [edit.text() for edit in dialog._edits.values()] == \
+            ["", "DAPI", "", ""]
+        dialog._edits[1].setText("  wash  ")
+        dialog._edits[2].setText("")            # cleared by the operator
         dialog.accept()
         assert dialog.result_mapping == {"port_1": "wash"}
+
+    def test_the_dialog_names_the_ports_the_rig_offers(self, qapp):
+        """A rig with gaps -- an unplumbed position between two lines --
+        gets a row per port it has, keyed by that port and not by row."""
+        dialog = gui.PortNamesDialog(None, [1, 5, 9], None)
+        assert list(dialog._edits) == [1, 5, 9]
+        dialog._edits[5].setText("bleach")
+        dialog.accept()
+        assert dialog.result_mapping == {"port_5": "bleach"}
 
     def test_a_rename_lands_in_config_file_and_combo(self, qapp, monkeypatch,
                                                      tmp_path, fixtures_dir):
@@ -1048,21 +1058,77 @@ class TestPortNames:
         gui.ManualControlWidget.editPortNames(stub)
         assert warned == ["Rig busy"] and constructed == []
 
-    def test_the_repaint_keeps_the_selection_and_moves_no_valve(self, qapp):
+    def _combo(self, qapp, ports, selected):
         from qtpy.QtWidgets import QComboBox
         combo = QComboBox()
-        combo.addItems(["Port 1: ", "Port 2: ", "Port 3: "])
-        combo.setCurrentIndex(2)
+        for port, label in ports:
+            combo.addItem(label, port)
+        combo.setCurrentIndex(combo.findData(selected))
+        return combo
+
+    def test_the_repaint_keeps_the_selection_and_moves_no_valve(self, qapp):
+        combo = self._combo(qapp, [(1, "Port 1: "), (2, "Port 2: "),
+                                   (3, "Port 3: ")], selected=3)
         moved = []
         combo.currentIndexChanged.connect(moved.append)
         stub = SimpleNamespace(
             valveCombo=combo,
-            manual=SimpleNamespace(
-                port_names=lambda: ["Port 1: DAPI", "Port 2: ", "Port 3: "]))
+            manual=SimpleNamespace(port_names=lambda: [
+                (1, "Port 1: DAPI"), (2, "Port 2: "), (3, "Port 3: ")]))
+        stub._fillPorts = _bind("_fillPorts", stub, gui.ManualControlWidget)
+        stub._selectPort = _bind("_selectPort", stub, gui.ManualControlWidget)
         gui.ManualControlWidget._refreshPortNames(stub)
-        assert combo.currentIndex() == 2
+        assert combo.currentData() == 3, "the rename moved the selection"
         assert combo.itemText(0) == "Port 1: DAPI"
         assert moved == [], "a rename must not move a valve"
+
+    def test_the_selection_survives_a_list_with_gaps(self, qapp):
+        """Ports the rig does not offer are absent, so the item at index
+        n is not port n+1 -- the selection follows its port."""
+        combo = self._combo(qapp, [(1, "Port 1: "), (5, "Port 5: "),
+                                   (9, "Port 9: ")], selected=9)
+        stub = SimpleNamespace(
+            valveCombo=combo,
+            manual=SimpleNamespace(port_names=lambda: [
+                (1, "Port 1: "), (5, "Port 5: x"), (9, "Port 9: ")]))
+        stub._fillPorts = _bind("_fillPorts", stub, gui.ManualControlWidget)
+        stub._selectPort = _bind("_selectPort", stub, gui.ManualControlWidget)
+        gui.ManualControlWidget._refreshPortNames(stub)
+        assert combo.currentData() == 9
+
+
+class TestShowingWhereTheValvesAre:
+    """Opening the tab paints the valve's current port. It must not move a
+    valve, and it must not name a port the valve is not on."""
+
+    def _stub(self, qapp, ports, current):
+        from qtpy.QtWidgets import QComboBox
+        combo = QComboBox()
+        for port in ports:
+            combo.addItem(f"Port {port}: ", port)
+        combo.setCurrentIndex(-1)
+        stub = SimpleNamespace(
+            valveCombo=combo,
+            manual=SimpleNamespace(current_port=lambda: current))
+        stub._selectPort = _bind("_selectPort", stub, gui.ManualControlWidget)
+        return combo, stub
+
+    def test_it_selects_the_port_the_valves_are_on(self, qapp):
+        combo, stub = self._stub(qapp, [1, 5, 9], current=5)
+        moved = []
+        combo.currentIndexChanged.connect(moved.append)
+        gui.ManualControlWidget._showCurrentPort(stub)
+        assert combo.currentData() == 5
+        assert moved == [], "painting the current port moved a valve"
+
+    def test_a_port_the_rig_does_not_offer_leaves_the_box_blank(self, qapp):
+        """Port 1 at power-on, on a rig whose port 1 has no tubing volume.
+        Coercing the unmatched -1 to index 0 would name port 5 while the
+        valve sat on port 1."""
+        combo, stub = self._stub(qapp, [5, 9], current=1)
+        gui.ManualControlWidget._showCurrentPort(stub)
+        assert combo.currentIndex() == -1
+        assert combo.currentData() is None
 
 
 class TestUsageTable:

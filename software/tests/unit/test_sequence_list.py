@@ -14,7 +14,7 @@ from ..conftest import FLOW, TEMP, in_a_fresh_interpreter
 
 
 def flow_cell(*sequences):
-    return SequenceList("Flow Cell", port_limit=24, sequences=sequences)
+    return SequenceList("Flow Cell", ports=range(1, 25), sequences=sequences)
 
 
 class TestWhatARunWouldTake:
@@ -53,6 +53,17 @@ class TestTheVerdicts:
         assert "volume" in model.problem(0)
         assert model.blocking_error().startswith("Sequence 1:")
 
+    def test_a_port_in_a_gap_is_flagged(self):
+        """The ports a rig offers need not be contiguous -- an unplumbed
+        position between two lines is not a port, and a range check would
+        wave it through."""
+        model = SequenceList("Flow Cell", ports=(1, 2, 5),
+                             sequences=[dict(FLOW, fluidic_port=3),
+                                        dict(FLOW, fluidic_port=5)])
+        assert "fluidic_port=3" in model.problem(0)
+        assert "1..2, 5" in model.problem(0), model.problem(0)
+        assert model.problem(1) is None, "port 5 is offered"
+
     def test_a_port_the_rig_lacks_is_flagged(self):
         model = flow_cell(dict(FLOW, fluidic_port=99))
         assert "1..24" in model.problem(0)
@@ -78,7 +89,7 @@ class TestWhatSetFieldTakes:
         """Only the editor's empty cell means "unset". 0 is a real
         temperature and a real incubation time, and a caller driving the
         model headlessly has no empty string to offer."""
-        model = SequenceList("Flow Cell", port_limit=24,
+        model = SequenceList("Flow Cell", ports=range(1, 25),
                              sequences=[dict(TEMP, incubation_time=5)])
         model.set_field(0, "temperature", 0)
         model.set_field(0, "incubation_time", 0.0)
@@ -184,7 +195,7 @@ def test_the_model_needs_no_qt():
     list must not drag Qt into the process."""
     loaded = in_a_fresh_interpreter(
         "import sys; import fluidics.sequence_list as m; "
-        "m.SequenceList('Flow Cell', 24, [{'type': 'priming', "
+        "m.SequenceList('Flow Cell', range(1, 25), [{'type': 'priming', "
         "'fluidic_port': 1, 'flow_rate': 1, 'volume': 1}]).validated(); "
         "print([n for n in sys.modules if 'qt' in n.lower()])")
     assert loaded == "[]", f"Qt was imported: {loaded}"

@@ -211,15 +211,18 @@ class OpenChamberOperations():
             self.sp.reset_chain()
             self.sp.dispense_to_waste()
             self.sp.execute()  # TODO: needs some refactoring here
-            for i in range(1, self.sv.available_port_number + 1):
+            # The ports the rig offers, not every position the cascade
+            # can address: one with no tubing volume has no line on it.
+            # This loop's own `if volume_to_port` used to be that rule's
+            # third spelling.
+            for i in self.sv.get_ports():
                 if use_ports is not None and i not in use_ports:
                     continue
                 volume_to_port = self.sv.get_tubing_fluid_amount_to_port(i)
-                if volume_to_port:
-                    self.sv.open_port(i)
-                    self.sp.extract(self.extract_port, volume_to_port, priming_speed_code_limit)
-                    self.sp.dispense_to_waste()
-                    self.sp.execute()
+                self.sv.open_port(i)
+                self.sp.extract(self.extract_port, volume_to_port, priming_speed_code_limit)
+                self.sp.dispense_to_waste()
+                self.sp.execute()
 
             self.sv.open_port(port)
             self.sp.extract(self.extract_port, volume, priming_speed_code_limit)

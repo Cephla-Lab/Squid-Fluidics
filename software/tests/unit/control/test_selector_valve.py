@@ -100,14 +100,39 @@ class TestGetPortNames:
         assert len(names) == 28
 
     def test_names_format(self, flow_cell_system):
+        """Each entry carries its own port number: the list holds only the
+        ports the rig offers, so an index is not a port."""
         names = flow_cell_system.get_port_names()
-        assert names[0] == "Port 1: reagent x"
-        assert names[24] == "Port 25: buffer 1"
+        assert names[0] == (1, "Port 1: reagent x")
+        assert names[24] == (25, "Port 25: buffer 1")
 
     def test_open_chamber_unmapped_port(self, open_chamber_system):
         names = open_chamber_system.get_port_names()
-        # port_2 has no mapping -> just "Port 2: "
-        assert names[1] == "Port 2: "
+        # port_2 has no name mapping -> just "Port 2: "
+        assert names[1] == (2, "Port 2: ")
+
+    def test_a_port_with_no_tubing_volume_is_not_offered(self, flow_cell_system):
+        """The cascade can address more positions than the rig has lines
+        on; a position with no tubing volume would open onto nothing."""
+        sv = flow_cell_system.config.reagent_selection.selector_valves
+        del sv.tubing_fluid_amount_ul["port_25"]
+        offered = [port for port, _label in flow_cell_system.get_port_names()]
+        assert 25 not in offered
+        assert offered[-1] == 28, "the ports after the gap kept their numbers"
+
+    def test_only_the_canonical_spelling_names_a_port(self, flow_cell_system):
+        """The model takes any string as a key, but only `port_key`'s
+        spelling is ever read back -- `get_tubing_fluid_amount_to_port`
+        looks up `port_1` and gets None for anything else. A port offered
+        on the strength of `1` or `port_01` would have no volume when a
+        draw asked for one, and `port_01` would duplicate `port_1`."""
+        sv = flow_cell_system.config.reagent_selection.selector_valves
+        del sv.tubing_fluid_amount_ul["port_25"]
+        sv.tubing_fluid_amount_ul.update({"25": 100, "port_025": 100,
+                                          "port_x": 100})
+        offered = [port for port, _label in flow_cell_system.get_port_names()]
+        assert 25 not in offered
+        assert offered.count(1) == 1
 
 
 class TestOpenPort:
@@ -136,6 +161,27 @@ class TestOpenPort:
         with pytest.raises(ValueError, match=r"1\.\.10"):
             open_chamber_system.open_port(port)
         assert open_chamber_system.get_current_port() == 5
+
+    def test_a_port_in_a_gap_is_refused_at_the_valve(self, open_chamber_system):
+        """The backstop asks the same question the pre-run check asks. It
+        gated on the cascade's reach, so a position nobody plumbed was
+        rejected at time zero and accepted here -- and this is the last
+        thing between a port number and a valve move."""
+        sv = open_chamber_system.config.reagent_selection.selector_valves
+        del sv.tubing_fluid_amount_ul["port_4"]
+        open_chamber_system.open_port(5)
+        with pytest.raises(ValueError, match=r"1\.\.3, 5\.\.10"):
+            open_chamber_system.open_port(4)
+        assert open_chamber_system.get_current_port() == 5
+
+    def test_a_zero_tubing_volume_is_no_line_either(self, open_chamber_system):
+        """Priming has always stepped over a zero volume. One rule, or the
+        GUI offers a port that priming silently skips."""
+        sv = open_chamber_system.config.reagent_selection.selector_valves
+        sv.tubing_fluid_amount_ul["port_4"] = 0
+        assert 4 not in [p for p, _ in open_chamber_system.get_port_names()]
+        with pytest.raises(ValueError):
+            open_chamber_system.open_port(4)
 
 
 class TestACancelledRunMovesNoValve:

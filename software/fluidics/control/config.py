@@ -78,6 +78,31 @@ class SelectorValvesConfig(_StrictModel):
                 )
         return self
 
+    @model_validator(mode='after')
+    def _check_port_keys(self):
+        """The port dicts are keyed by one spelling: `port_<n>`, within the
+        cascade's reach.
+
+        These keys decide which ports the rig offers -- a tubing volume is
+        how the config says a port is plumbed -- and only this spelling is
+        ever read back. So a typo used to *remove* a port: `port_2s` left
+        port 2 with no volume, and the GUI, the editor and the pre-run
+        check all stopped offering it, with nothing pointing at the config
+        line. Say so at load instead.
+        """
+        reach = sum(self.number_of_ports[v] - 1 for v in self.valve_ids) + 1
+        allowed = {f"port_{port}" for port in range(1, reach + 1)}
+        for field_name in ('tubing_fluid_amount_ul', 'name_mapping'):
+            keys = getattr(self, field_name) or {}
+            unknown = sorted(set(keys) - allowed)
+            if unknown:
+                raise ValueError(
+                    f"{field_name} has keys that name no port on this "
+                    f"cascade: {', '.join(unknown)}. Ports are spelled "
+                    f"port_1..port_{reach}."
+                )
+        return self
+
 
 class ReagentSelectionConfig(_StrictModel):
     selector_valves: SelectorValvesConfig
@@ -325,23 +350,68 @@ def _yaml_faithful(value):
     return value
 
 
-def port_range_note(limit: int) -> str:
-    """How the rig's port range is put to the operator, wherever it is
-    said -- the time-zero gate, the editor's live verdict, and the valve
-    system's own refusal at run time."""
-    return f"this configuration has ports 1..{limit}"
+def port_range_note(ports) -> str:
+    """How the rig's ports are put to the operator, wherever they are
+    named -- the time-zero gate, the editor's live verdict, and the valve
+    system's own refusal at run time.
+
+    The ports need not be contiguous: a position nobody plumbed leaves a
+    gap, and the operator is told where the gaps are rather than a range
+    that would admit them.
+    """
+    ports = sorted(ports)
+    if not ports:
+        return "this configuration has no plumbed ports"
+    spans, start = [], ports[0]
+    for previous, port in zip(ports, ports[1:] + [None]):
+        if port != previous + 1:
+            spans.append(f"{start}..{previous}" if start != previous else f"{start}")
+            start = port
+    return "this configuration has ports " + ", ".join(spans)
 
 
 def available_port_count(config: FluidicsConfig) -> int:
-    """How many fluidic ports the configured cascade offers.
+    """How many positions the configured cascade can address.
 
     The last port of every valve except the final one routes to the next
     valve, so it is plumbing, not a reagent port. Written once here -- pure
     config arithmetic -- so SelectorValveSystem (with hardware attached) and
     the pre-run sequence check (without) cannot disagree about the range.
+
+    This is the hardware's reach, not the rig's reagent ports: the valves
+    are initialized with these counts. What is actually plumbed is
+    available_ports().
     """
     sv = config.reagent_selection.selector_valves
     return sum(sv.number_of_ports[v] - 1 for v in sv.valve_ids) + 1
+
+
+def available_ports(config: FluidicsConfig) -> tuple:
+    """The ports this rig offers, in order -- the ones with a tubing
+    volume measured for them.
+
+    A port is plumbed or it is not, and the tubing volume is how the
+    config says which: every draw through a port needs it, and Priming
+    already skipped ports without one. A position the cascade can address
+    but nobody has connected a line to is not a port the operator should
+    be offered, nor one a sequence file may name -- it would open a valve
+    onto nothing and draw air.
+
+    Asked the other way round -- which of the reachable ports has an
+    entry, rather than which entries look like ports -- because only
+    `port_key`'s spelling is ever read back: `get_tubing_fluid_amount_to_port`
+    looks up `port_1` and gets None for anything else. Parsing the keys
+    instead would offer a port whose volume then reads as missing, and let
+    `port_01` and `port_1` name the same one twice.
+
+    A volume of zero is no line either, and is skipped: Priming and Clean
+    Up have always read it that way, and one rule for "is plumbed" beats a
+    port that the GUI offers, validation passes, and priming then silently
+    steps over.
+    """
+    entries = config.reagent_selection.selector_valves.tubing_fluid_amount_ul
+    return tuple(port for port in range(1, available_port_count(config) + 1)
+                 if entries.get(port_key(port)))
 
 
 # --- Config Loading ---

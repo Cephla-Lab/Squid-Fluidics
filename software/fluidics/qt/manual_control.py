@@ -25,7 +25,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from fluidics.control.config import available_port_count, port_key, save_config
+from fluidics.control.config import available_ports, port_key, save_config
 from fluidics.qt.support import PostsToQtThread, subscribe_until_detached
 
 _logger = logging.getLogger("fluidics.gui")
@@ -36,19 +36,21 @@ class PortNamesDialog(QDialog):
     After OK, result_mapping holds the config's name_mapping shape --
     {'port_<n>': name} for the named ports only -- and None before."""
 
-    def __init__(self, parent, port_count, name_mapping):
+    def __init__(self, parent, ports, name_mapping):
         super().__init__(parent)
         self.setWindowTitle("Port Names")
         self.result_mapping = None
-        self._edits = []
+        self._edits = {}
 
         names = name_mapping or {}
         form_host = QWidget()
         form = QFormLayout(form_host)
-        for port in range(1, port_count + 1):
+        # One row per port the rig offers -- naming a position with no
+        # line on it would name nothing.
+        for port in ports:
             edit = QLineEdit()
             edit.setText(names.get(port_key(port), ""))
-            self._edits.append(edit)
+            self._edits[port] = edit
             form.addRow(f"Port {port}", edit)
 
         # A cascade offers a couple dozen ports; the dialog scrolls rather
@@ -56,7 +58,7 @@ class PortNamesDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidget(form_host)
         scroll.setWidgetResizable(True)
-        scroll.setMinimumHeight(min(400, 28 * port_count + 20))
+        scroll.setMinimumHeight(min(400, 28 * len(ports) + 20))
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -69,7 +71,7 @@ class PortNamesDialog(QDialog):
     def accept(self):
         self.result_mapping = {
             port_key(port): name
-            for port, edit in enumerate(self._edits, start=1)
+            for port, edit in self._edits.items()
             if (name := edit.text().strip())}
         super().accept()
 
@@ -106,7 +108,7 @@ class ManualControlWidget(PostsToQtThread, QWidget):
         valveLayout.setContentsMargins(5, 5, 5, 5)
         valveLayout.addWidget(QLabel("Source port:"))
         self.valveCombo = QComboBox()
-        self.valveCombo.addItems(self.manual.port_names())
+        self._fillPorts()
         self.valveCombo.currentIndexChanged.connect(self.openValve)
         valveLayout.addWidget(self.valveCombo)
         self._controls.append(self.valveCombo)
@@ -220,7 +222,7 @@ class ManualControlWidget(PostsToQtThread, QWidget):
     # --- the controls: each picks a verb and hands it to _run ---
 
     def openValve(self):
-        port = self.valveCombo.currentIndex() + 1
+        port = self.valveCombo.currentData()
         self._run(lambda: self.manual.open_port(port))
 
     def editPortNames(self):
@@ -235,7 +237,7 @@ class ManualControlWidget(PostsToQtThread, QWidget):
                                 "Port names can be edited when the rig is idle.")
             return
         sv = self.config.reagent_selection.selector_valves
-        dialog = PortNamesDialog(self, available_port_count(self.config),
+        dialog = PortNamesDialog(self, available_ports(self.config),
                                  sv.name_mapping)
         if dialog.exec_() != QDialog.Accepted:
             return
@@ -252,10 +254,9 @@ class ManualControlWidget(PostsToQtThread, QWidget):
         """Repaint the port list from the config, keeping the selection --
         a rename must not move a valve."""
         with QSignalBlocker(self.valveCombo):
-            current = self.valveCombo.currentIndex()
-            self.valveCombo.clear()
-            self.valveCombo.addItems(self.manual.port_names())
-            self.valveCombo.setCurrentIndex(current)
+            current = self.valveCombo.currentData()
+            self._fillPorts()
+            self._selectPort(current)
 
     def _syringeArgs(self):
         return (int(self.syringePortCombo.currentText()), self.volumeSpinBox.value(),
@@ -337,6 +338,13 @@ class ManualControlWidget(PostsToQtThread, QWidget):
             control.setEnabled(enabled)
         self.stopButton.setEnabled(not enabled)
 
+    def _fillPorts(self):
+        """Each item carries its port number: the list holds only the
+        ports the rig offers, so its indices are not port numbers."""
+        self.valveCombo.clear()
+        for port, label in self.manual.port_names():
+            self.valveCombo.addItem(label, port)
+
     def updateProgress(self):
         elapsed = time.time() - self.operation_start_time
         progress = min(100, int((elapsed / max(self.operation_duration, 1e-9)) * 100))
@@ -351,10 +359,26 @@ class ManualControlWidget(PostsToQtThread, QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
-        # Show where the valves are; do not move them there.
-        self.valveCombo.blockSignals(True)
-        self.valveCombo.setCurrentIndex(self.manual.current_port() - 1)
-        self.valveCombo.blockSignals(False)
+        self._showCurrentPort()
+
+    def _showCurrentPort(self):
+        """Show where the valves are; do not move them there.
+
+        A valve sitting on a port this rig does not offer -- port 1 at
+        power-on, on a rig whose port 1 has no tubing volume -- has no item
+        to select, and the box is left blank. The operator reads it to know
+        where the fluid path goes, so naming a port the valve is not on is
+        worse than naming none.
+        """
+        self._selectPort(self.manual.current_port())
+
+    def _selectPort(self, port):
+        """Show `port` without moving a valve: the combo's change signal
+        opens a port, so every programmatic selection blocks it. A port the
+        list does not hold clears the selection rather than standing in for
+        the first one -- findData's -1 is the honest answer."""
+        with QSignalBlocker(self.valveCombo):
+            self.valveCombo.setCurrentIndex(self.valveCombo.findData(port))
 
     def closeEvent(self, event):
         self.progress_timer.stop()
