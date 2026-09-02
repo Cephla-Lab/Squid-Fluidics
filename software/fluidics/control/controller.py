@@ -11,7 +11,7 @@ import numpy as np
 import threading
 
 from ..subscribers import Subscribers  # noqa: F401  -- re-exported; it lived here first
-from time import time, sleep
+from time import monotonic, time, sleep
 
 SERIAL_NUMBER_DEBUGGING = '11972480'
 
@@ -19,6 +19,11 @@ SERIAL_NUMBER_DEBUGGING = '11972480'
 # transmits every 60 ms, so anything well under that adds no meaningful latency
 # while keeping idle wakeups down.
 READER_IDLE_SLEEP_S = 0.005
+# How long one reader fault stands for before the log says what it cost.
+# Long enough that a multi-second burst is a couple of lines rather than a
+# hundred, short enough that a fault is reported while the operator is
+# still watching the run it happened in.
+READER_ERROR_REPORT_SECONDS = 5.0
 
 _logger = logging.getLogger(__name__)
 
@@ -146,6 +151,19 @@ class Microcontroller():
         self.serial.write(cmd)
         return
     
+    def _take_frame(self):
+        """The next complete frame in the read buffer, consumed, or None if
+        no delimiter has arrived yet. A frame ends at the first delimiter
+        and the rest waits for the next call, so two frames arriving in one
+        read are both delivered.
+        """
+        end = self.read_buffer.find(0)
+        if end < 0:
+            return None
+        frame = bytes(self.read_buffer[:end])
+        del self.read_buffer[:end + 1]
+        return frame
+
     def read_received_packet_nowait(self, discard_buffer=False):
         '''
         If there is serial data available, return it as an array of bytes.
@@ -181,22 +199,23 @@ class Microcontroller():
             # used to leave the partial frame in the buffer, so the glitch
             # cost the next frame as well as its own; a burst of decode
             # failures is what that looked like from the log.
-            try:
-                waiting = self.serial.in_waiting
-                if waiting:
-                    self.read_buffer.extend(self.serial.read(waiting))
-            except Exception:
-                # Whatever we hold is now of unknown alignment.
-                self.read_buffer = bytearray()
-                raise
-
-            # A frame ends at the first delimiter; the rest waits for the
-            # next call, so two frames arriving together both get read.
-            end = self.read_buffer.find(0)
-            if end < 0:
-                return None
-            frame = bytes(self.read_buffer[:end])
-            del self.read_buffer[:end + 1]
+            # A frame already in hand needs no read. Reading first would
+            # put an intact frame -- the second of a pair that arrived
+            # together -- behind an I/O call that can raise, and the reset
+            # below would then discard it for a fault it had no part in.
+            frame = self._take_frame()
+            if frame is None:
+                try:
+                    waiting = self.serial.in_waiting
+                    if waiting:
+                        self.read_buffer.extend(self.serial.read(waiting))
+                except Exception:
+                    # Whatever we hold is now of unknown alignment.
+                    self.read_buffer = bytearray()
+                    raise
+                frame = self._take_frame()
+                if frame is None:
+                    return None
             output = cobs.decode(frame)
 
         # If we aren't using COBS, use fixed-length command rx
@@ -415,8 +434,9 @@ class FluidController(Microcontroller, PacketSubscribers):
     def _init_status_state(self):
         '''Set up shared packet state. Called from __init__ and by tests.'''
         self._status_lock = threading.Lock()
-        self._reader_error_text = None      # the run of faults being counted
+        self._reader_error_text = None      # the fault whose window is open
         self._reader_error_count = 0
+        self._reader_error_since = 0.0
         self._latest_status = None
         self._status_seq = 0
         self._seq_at_send = 0
@@ -435,21 +455,36 @@ class FluidController(Microcontroller, PacketSubscribers):
         self._notify_packet_subscribers(parsed)
 
     def _log_reader_error(self, error):
-        """One line per run of the same fault, with how many frames it
-        cost. A dropped frame is telemetry lost for 60 ms, not a command
-        gone wrong -- at 17 frames a second, a line each buried the run
-        log under a burst and said no more than a count would."""
+        """At most one line per REPORT_SECONDS per distinct fault, each
+        carrying what the window cost.
+
+        A dropped frame is telemetry lost for 60 ms, not a command gone
+        wrong -- at 17 frames a second, a line each buried the run log
+        under a burst and said no more than a count would.
+
+        The window is a clock, not a run of adjacent calls. Frames arrive
+        every 60 ms and this loop polls every 5 ms, so a dozen idle reads
+        and any number of good frames sit between two corrupt ones: a
+        counter that reset on anything but the same fault would reset a
+        dozen times a frame and log every one.
+        """
         text = str(error)
-        if text == self._reader_error_text:
-            self._reader_error_count += 1
+        now = monotonic()
+        if text != self._reader_error_text:
+            self._flush_reader_error()
+            self._reader_error_text = text
+            self._reader_error_count = 1
+            self._reader_error_since = now
+            _logger.error("Reader thread error: %s", text)
             return
-        self._flush_reader_error()
-        self._reader_error_text = text
-        self._reader_error_count = 1
-        _logger.error("Reader thread error: %s", text)
+        self._reader_error_count += 1
+        if now - self._reader_error_since >= READER_ERROR_REPORT_SECONDS:
+            self._flush_reader_error()      # says what the window cost
 
     def _flush_reader_error(self):
-        """Say what the last run cost, once it has stopped."""
+        """Close the open window, saying what it cost if it cost more than
+        the line already logged. A fault that happened once needs nothing
+        further, so it closes quietly."""
         if self._reader_error_count > 1:
             _logger.error("Reader thread error: %s (and %d more frames "
                           "dropped)", self._reader_error_text,
@@ -457,12 +492,23 @@ class FluidController(Microcontroller, PacketSubscribers):
         self._reader_error_text = None
         self._reader_error_count = 0
 
+    def _expire_reader_error(self):
+        """Report an open window whose time is up even though nothing more
+        has gone wrong -- a burst that ends in an idle port would otherwise
+        hold its tally until the reader stopped."""
+        if (self._reader_error_text is not None
+                and monotonic() - self._reader_error_since
+                >= READER_ERROR_REPORT_SECONDS):
+            self._flush_reader_error()
+
     def _reader_loop(self):
         while not self._terminate_reader:
             try:
                 msg = self.read_received_packet_nowait()
-                self._flush_reader_error()      # the read returned: the run,
-                                                # if any, is over
+                # Not a flush: a good frame does not end a burst. Under
+                # contention the stream alternates good and corrupt, and
+                # closing the window here would log every corrupt one.
+                self._expire_reader_error()
                 if msg is None:
                     sleep(READER_IDLE_SLEEP_S)
                     continue

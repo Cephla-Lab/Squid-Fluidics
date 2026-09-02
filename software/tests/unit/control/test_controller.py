@@ -374,6 +374,23 @@ class TestReadPacketResync:
         assert list(fc.read_received_packet_nowait()) == [0x11]
         assert list(fc.read_received_packet_nowait()) == [0x22]
 
+    def test_a_buffered_frame_survives_a_later_read_failure(self):
+        """Two frames arrive in one read; the second is complete and in
+        hand. Touching the port before delivering it would put it behind an
+        I/O call that can raise, and the buffer reset would then discard a
+        frame that had nothing to do with the fault."""
+        one = cobs.encode(bytes([0x11])) + b"\x00"
+        two = cobs.encode(bytes([0x22])) + b"\x00"
+        fc = self._controller(list(one + two))
+        assert list(fc.read_received_packet_nowait()) == [0x11]
+
+        def raises(size=1):
+            raise OSError("device reports readiness to read but returned no data")
+
+        fc.serial.read = raises
+        assert list(fc.read_received_packet_nowait()) == [0x22], \
+            "the frame already in hand was lost to an unrelated fault"
+
     def test_a_port_that_raises_mid_frame_leaves_no_residue(self):
         """pyserial raises "readiness to read but returned no data" on this
         USB port. Whatever was held is of unknown alignment, so it goes --
@@ -497,55 +514,135 @@ class _FakeThreadingNamespace:
 class TestReaderErrorLog:
     """A dropped frame is telemetry lost for 60 ms, not a command gone wrong.
     At 17 frames a second a line each buried the run log under a burst and
-    said no more than a count would, so a run of the same fault collapses
-    into one line plus the frames it cost.
+    said no more than a count would, so one fault stands for a window of
+    READER_ERROR_REPORT_SECONDS and the log says what the window cost.
+
+    The cadence these model is the real one: frames arrive every 60 ms and
+    the loop polls every 5 ms, so a dozen idle reads sit between two corrupt
+    frames, and under contention good frames sit between them too.
     """
 
-    def _bursting_controller(self, faults):
-        """A controller whose reads raise the given texts in order, then stop
-        the loop. A None in the list is a frame that read cleanly."""
+    def _controller(self, script, monkeypatch, clock=None):
+        """A controller whose reads walk `script`: a string raises it, None
+        is an idle poll, and a list is a frame. `clock` supplies monotonic,
+        so a test can advance time without spending it.
+        """
         fc = _bare_controller()
         fc._init_status_state()
-        remaining = list(faults)
+        monkeypatch.setattr(controller_module, "READER_IDLE_SLEEP_S", 0)
+        if clock is not None:
+            monkeypatch.setattr(controller_module, "monotonic", clock)
+        remaining = list(script)
 
         def read(discard_buffer=False):
             if not remaining:
                 fc._terminate_reader = True
                 return None
-            text = remaining.pop(0)
-            if text is None:
-                return None
-            raise RuntimeError(text)
+            item = remaining.pop(0)
+            if isinstance(item, str):
+                raise RuntimeError(item)
+            return item
 
         fc.read_received_packet_nowait = read
         return fc
 
-    def test_a_burst_of_one_fault_logs_once(self, caplog):
-        """Forty dropped frames: one line naming the fault, and the tally
-        when the loop ends -- not forty lines."""
-        fc = self._bursting_controller(["not enough input bytes"] * 40)
-        with caplog.at_level(logging.ERROR, logger="fluidics.control.controller"):
-            fc._reader_loop()
-        assert len(caplog.records) == 2
-        assert "not enough input bytes" in caplog.records[0].getMessage()
-        assert "39 more frames dropped" in caplog.records[1].getMessage()
+    @staticmethod
+    def _lines(caplog):
+        return [r.getMessage() for r in caplog.records]
 
-    def test_the_burst_reports_what_it_cost_once_it_stops(self, caplog):
-        """The count arrives when the run ends -- while it is still running
-        there is no total to report."""
-        fc = self._bursting_controller(["boom"] * 40 + [None])
+    def test_idle_polls_between_faults_do_not_restart_the_run(
+            self, monkeypatch, caplog):
+        """The regression this class exists for. Suppression keyed on
+        adjacency saw a dozen idle reads between corrupt frames, closed the
+        run at each one, and logged every frame -- the flood it was written
+        to stop."""
+        script = []
+        for _ in range(8):
+            script.append("not enough input bytes")
+            script.extend([None] * 12)          # 60 ms of 5 ms polls
+        fc = self._controller(script, monkeypatch)
         with caplog.at_level(logging.ERROR, logger="fluidics.control.controller"):
             fc._reader_loop()
-        assert len(caplog.records) == 2
-        assert "39 more frames dropped" in caplog.records[1].getMessage()
+        lines = self._lines(caplog)
+        assert len(lines) == 2, lines
+        assert "7 more frames dropped" in lines[1]
 
-    def test_a_different_fault_gets_its_own_line(self, caplog):
-        fc = self._bursting_controller(["boom", "boom", "other"])
+    def test_good_frames_between_faults_do_not_restart_it_either(
+            self, monkeypatch, caplog):
+        """Two readers on one port is the case this was written for, and
+        there the stream alternates: half the frames arrive intact."""
+        script = []
+        for _ in range(6):
+            script.append("not enough input bytes")
+            script.append(_make_packet(flow_raw=100))
+        fc = self._controller(script, monkeypatch)
         with caplog.at_level(logging.ERROR, logger="fluidics.control.controller"):
             fc._reader_loop()
-        # boom, boom's count, other
-        assert len(caplog.records) == 3
-        assert "other" in caplog.records[2].getMessage()
+        assert len(self._lines(caplog)) == 2, self._lines(caplog)
+        assert fc.get_mcu_status()["flowrates_raw"][0] == 100, \
+            "the good frames were dropped"
+
+    def test_a_sustained_burst_reports_once_per_window(
+            self, monkeypatch, caplog):
+        """A burst longer than the window says what it cost as it goes,
+        rather than holding everything until it ends."""
+        now = [0.0]
+        script = ["boom"] * 30
+        fc = self._controller(script, monkeypatch, clock=lambda: now[0])
+
+        original = fc.read_received_packet_nowait
+
+        def read(discard_buffer=False):
+            now[0] += 1.0                       # a second per read
+            return original(discard_buffer)
+
+        fc.read_received_packet_nowait = read
+        with caplog.at_level(logging.ERROR, logger="fluidics.control.controller"):
+            fc._reader_loop()
+        lines = self._lines(caplog)
+        # 30 s of faults against a 5 s window: opened, then closed and
+        # reopened every 5 s -- a handful of lines, not thirty.
+        assert 6 <= len(lines) <= 14, lines
+        assert any("more frames dropped" in line for line in lines)
+
+    def test_a_burst_that_ends_in_silence_still_reports(
+            self, monkeypatch, caplog):
+        """The port going quiet is not a recovery signal, but the tally
+        should not wait for the reader to stop either."""
+        now = [0.0]
+        fc = self._controller(["boom"] * 5 + [None] * 4, monkeypatch,
+                              clock=lambda: now[0])
+        original = fc.read_received_packet_nowait
+        idle = [0]
+
+        def read(discard_buffer=False):
+            result = original(discard_buffer)
+            if result is None:
+                idle[0] += 1
+                now[0] += 10.0                  # the window elapses while idle
+            return result
+
+        fc.read_received_packet_nowait = read
+        with caplog.at_level(logging.ERROR, logger="fluidics.control.controller"):
+            fc._reader_loop()
+        lines = self._lines(caplog)
+        assert len(lines) == 2, lines
+        assert "4 more frames dropped" in lines[1]
+
+    def test_a_different_fault_gets_its_own_line(self, monkeypatch, caplog):
+        fc = self._controller(["boom", "boom", "other"], monkeypatch)
+        with caplog.at_level(logging.ERROR, logger="fluidics.control.controller"):
+            fc._reader_loop()
+        lines = self._lines(caplog)
+        assert len(lines) == 3, lines
+        assert "1 more frames dropped" in lines[1]
+        assert "other" in lines[2]
+
+    def test_a_single_fault_is_one_line_and_no_tally(self, monkeypatch, caplog):
+        fc = self._controller(["boom"], monkeypatch)
+        with caplog.at_level(logging.ERROR, logger="fluidics.control.controller"):
+            fc._reader_loop()
+        assert self._lines(caplog) == ["Reader thread error: boom"]
 
 
 class TestReaderLifecycle:
