@@ -15,9 +15,13 @@ class _StuckController:
         self.stabilization_timeout_seconds = stabilization_timeout_seconds
         self.target_temperatures = [0.0] * channels
         self.actual_temperatures = [0.0] * channels  # never matches a non-zero target
+        self.output_enabled = [False] * channels
 
     def set_target_temperature(self, channel, t):
         self.target_temperatures[channel - 1] = t
+
+    def set_output_enabled(self, channel, on):
+        self.output_enabled[channel - 1] = bool(on)
 
     def get_actual_temperature(self, channel):
         return self.actual_temperatures[channel - 1]
@@ -41,12 +45,14 @@ class TestSetTemperature:
         set_temperature(tc, 42.0, control)
         assert tc.target_temperatures == [42.0]
         assert tc.actual_temperatures == [42.0]
+        assert tc.output_enabled == [True]  # driving to a setpoint must turn the TEC on
 
     def test_two_channel_sets_both_channels(self, control):
         tc = TCMControllerSimulation(sn=None, channels=2)
         set_temperature(tc, 30.0, control)
         assert tc.target_temperatures == [30.0, 30.0]
         assert tc.actual_temperatures == [30.0, 30.0]
+        assert tc.output_enabled == [True, True]  # every channel's TEC output on
 
     def test_timeout_raises_operation_error(self, control):
         tc = _StuckController(channels=1, stabilization_timeout_seconds=5)
