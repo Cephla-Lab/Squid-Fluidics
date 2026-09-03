@@ -24,6 +24,9 @@ def set_temperature(tc, target, run_control):
     run_control.checkpoint()
     for channel in range(1, tc.channels + 1):
         tc.set_target_temperature(channel, target)
+        # The setpoint alone does not drive the TEC -- the output switch is a separate
+        # command -- so assert it on, or the run just waits for a temperature that never moves.
+        tc.set_output_enabled(channel, True)
 
     # Running seconds, not wall clock: each delay() returns after one second
     # of running time, so counting them *is* the clock -- and a pause stops it.
