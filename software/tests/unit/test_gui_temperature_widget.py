@@ -82,6 +82,52 @@ def test_the_output_button_follows_the_driver_on_each_reading(channel_widget):
     assert not channel.output_btn.isChecked()
 
 
+class TestOutputReadout:
+    """What the TEC is actually driving, beside what it was told to."""
+
+    def test_it_shows_what_the_driver_last_read(self, channel_widget):
+        controller, channel = channel_widget
+        controller.output_voltages = [3.214]
+        controller.output_currents = [-1.05]
+        controller._publish()
+        deliver_posted_events()
+        assert channel.voltage_label.text() == "3.21 V"
+        assert channel.current_label.text() == "-1.05 A"
+
+    def test_a_read_the_unit_did_not_answer_is_a_dash(self, channel_widget):
+        controller, channel = channel_widget
+        controller.output_voltages = [None]
+        controller.output_currents = [None]
+        controller._publish()
+        deliver_posted_events()
+        assert channel.voltage_label.text() == "--"
+        assert channel.current_label.text() == "--"
+
+    def test_it_is_not_held_to_the_plot_s_query_interval(self, channel_widget):
+        """Live status, like the output button: a reading the plot skips
+        still moves it."""
+        controller, channel = channel_widget
+        channel.last_update = float("inf")   # no reading is ever due
+        controller.output_voltages = [1.5]
+        controller._publish()
+        deliver_posted_events()
+        assert channel.voltage_label.text() == "1.50 V"
+
+    def test_each_channel_shows_its_own(self, temperature_widget):
+        controller, widget = temperature_widget(channels=2)
+        controller.output_voltages = [1.0, 2.0]
+        controller._publish()
+        deliver_posted_events()
+        assert [c.voltage_label.text() for c in widget.plot_widgets] == \
+            ["1.00 V", "2.00 V"]
+
+    def test_an_embedder_s_freeze_leaves_the_readout_live(self, channel_widget):
+        _controller, channel = channel_widget
+        channel.setControlsEnabled(False)
+        assert channel.voltage_label.isEnabled()
+        assert channel.current_label.isEnabled()
+
+
 class TestSetControlsEnabled:
     """An embedder's run owns the TEC: the setpoint controls freeze while
     the plot and its recording carry on."""

@@ -155,6 +155,134 @@ class TestReadingsChannel:
         assert seen == [[42.0]]
 
 
+# --- The TEC's output voltage and current ---
+#
+# Polled beside the temperatures for the tab's readout. The real class is
+# built without hardware, as above, over a scripted wire: what matters is that
+# a unit which will not answer these costs the readout, never the poll loop.
+
+import logging
+import threading
+
+
+class ScriptedSerial:
+    """Answers each query from `replies`; anything else times out (b"")."""
+
+    def __init__(self, replies):
+        self.replies = replies
+        self.written = []
+        self._pending = b""
+
+    def write(self, data):
+        self.written.append(data)
+        self._pending = self.replies.get(data, b"")
+
+    def readline(self):
+        return self._pending
+
+
+def scripted_tcm(replies, channels=1):
+    tcm = TCMController.__new__(TCMController)
+    tcm.serial = ScriptedSerial(replies)
+    tcm._serial_lock = threading.Lock()
+    tcm.channels = channels
+    tcm.actual_temperatures = [0.0] * channels
+    tcm.output_voltages = [None] * channels
+    tcm.output_currents = [None] * channels
+    tcm._output_reads_failed = set()
+    tcm._subscribers = Subscribers("Temperature controller")
+    return tcm
+
+
+class TestOutputReadings:
+    def test_voltage_and_current_are_parsed_from_the_reply(self):
+        tcm = scripted_tcm({
+            b"TC1:TCACTVOL?\r": b"TC1:TCACTVOL=3.21\r",
+            b"TC1:TCACTCUR?\r": b"TC1:TCACTCUR=1.05\r",
+        })
+        assert tcm.get_output_voltage(1) == 3.21
+        assert tcm.get_output_current(1) == 1.05
+
+    def test_the_channel_picks_the_module_on_the_wire(self):
+        tcm = scripted_tcm({b"TC2:TCACTVOL?\r": b"TC2:TCACTVOL=0.5\r"},
+                           channels=2)
+        assert tcm.get_output_voltage(2) == 0.5
+        assert tcm.serial.written == [b"TC2:TCACTVOL?\r"]
+
+    def test_current_is_signed(self):
+        """Cooling drives the TEC the other way; the rig reports -0.00 idle."""
+        tcm = scripted_tcm({b"TC1:TCACTCUR?\r": b"TC1:TCACTCUR=-1.20\r"})
+        assert tcm.get_output_current(1) == -1.20
+
+    @pytest.mark.parametrize("reply", [
+        b"CMD:REPLY=2\r",          # parameter not found on this firmware
+        b"",                       # timeout
+        b"TC1:TCACTVOL=garbage\r",
+        # A late answer to an earlier query: a temperature is not a voltage.
+        b"TC1:TCACTUALTEMP=24.87\r",
+    ])
+    def test_a_read_that_fails_is_none(self, reply):
+        tcm = scripted_tcm({b"TC1:TCACTVOL?\r": reply})
+        assert tcm.get_output_voltage(1) is None
+
+    def test_a_failing_read_warns_once_not_every_poll(self, caplog):
+        tcm = scripted_tcm({b"TC1:TCACTVOL?\r": b"CMD:REPLY=2\r"})
+        with caplog.at_level(logging.WARNING):
+            for _ in range(3):
+                tcm.get_output_voltage(1)
+        assert len([r for r in caplog.records if "TCACTVOL" in r.message]) == 1
+
+    def test_a_read_that_recovers_warns_again_if_it_fails_again(self, caplog):
+        tcm = scripted_tcm({b"TC1:TCACTVOL?\r": b""})
+        with caplog.at_level(logging.WARNING):
+            tcm.get_output_voltage(1)
+            tcm.serial.replies[b"TC1:TCACTVOL?\r"] = b"TC1:TCACTVOL=1.0\r"
+            assert tcm.get_output_voltage(1) == 1.0
+            tcm.serial.replies[b"TC1:TCACTVOL?\r"] = b""
+            tcm.get_output_voltage(1)
+        assert len([r for r in caplog.records if "TCACTVOL" in r.message]) == 2
+
+    def test_a_poll_stores_both_and_still_publishes_temperatures(self):
+        """A unit that answers neither must not cost the temperature plot."""
+        tcm = scripted_tcm({b"TC1:TCACTUALTEMP?\r": b"TC1:TCACTUALTEMP=24.87\r"})
+        seen = []
+        tcm.subscribe(seen.append)
+        tcm._poll_once()
+        assert seen == [[24.87]]
+        assert tcm.output_voltages == [None]
+        assert tcm.output_currents == [None]
+
+    def test_a_poll_stores_what_the_unit_reports(self):
+        tcm = scripted_tcm({
+            b"TC1:TCACTUALTEMP?\r": b"TC1:TCACTUALTEMP=24.87\r",
+            b"TC1:TCACTVOL?\r": b"TC1:TCACTVOL=3.21\r",
+            b"TC1:TCACTCUR?\r": b"TC1:TCACTCUR=1.05\r",
+        })
+        tcm._poll_once()
+        assert tcm.output_voltages == [3.21]
+        assert tcm.output_currents == [1.05]
+
+    def test_the_subscriber_payload_is_still_the_temperatures(self):
+        """An embedder subscribes to this channel; the contract holds."""
+        tcm = scripted_tcm({
+            b"TC1:TCACTUALTEMP?\r": b"TC1:TCACTUALTEMP=24.87\r",
+            b"TC1:TCACTVOL?\r": b"TC1:TCACTVOL=3.21\r",
+        })
+        seen = []
+        tcm.subscribe(seen.append)
+        tcm._poll_once()
+        assert seen == [[24.87]]
+
+    def test_the_simulation_reports_an_idle_output(self):
+        tc = TCMControllerSimulation(channels=2)
+        assert tc.output_voltages == [0.0, 0.0]
+        assert tc.output_currents == [0.0, 0.0]
+        assert tc.get_output_voltage(1) == 0.0
+        assert tc.get_output_current(2) == 0.0
+        with pytest.raises(ValueError):
+            tc.get_output_voltage(3)
+
+
 class TestStart:
     def test_start_is_idempotent_and_close_joins(self):
         tc = TCMControllerSimulation(channels=1)

@@ -14,8 +14,8 @@ class TCMController:
     """Driver for the TCM temperature controller (1- or 2-channel variant).
 
     Channels are addressed 1-based (channel=1 → wire module "TC1").
-    target_temperatures and actual_temperatures are 0-indexed lists of
-    length `channels`.
+    target_temperatures, actual_temperatures, output_voltages and
+    output_currents are 0-indexed lists of length `channels`.
     """
 
     def __init__(self, sn, channels=2, tolerance_celsius=1.0,
@@ -34,6 +34,11 @@ class TCMController:
         self.target_temperatures = [self._read_target(c) for c in range(1, channels + 1)]
         self.actual_temperatures = [0.0] * channels
         self.output_enabled = [self._read_output_enabled(c) for c in range(1, channels + 1)]
+        # What the TEC is actually driving, per channel: None until the poll
+        # loop has read it, and whenever the unit will not answer.
+        self.output_voltages = [None] * channels
+        self.output_currents = [None] * channels
+        self._output_reads_failed = set()
 
         self._subscribers = Subscribers("Temperature controller")
         self._terminate_polling = False
@@ -76,6 +81,39 @@ class TCMController:
         response = self.send_command("TCSW?", self._module(channel))
         return response.rsplit("=", 1)[-1].strip() == "1"
 
+    def _read_output(self, param, channel):
+        """One of the TEC's output readings, or None if the unit would not
+        give it.
+
+        These are for the tab's readout, polled beside the temperatures, so
+        a failure here must never raise into the poll loop: a firmware that
+        lacks the parameter answers CMD:REPLY=2, and that would take the
+        temperature plot down with it. It warns when a read starts failing,
+        not on every poll.
+
+        The reply is checked against the parameter asked for. Nothing
+        flushes the input between commands, so after a timeout a late
+        answer to an earlier query can arrive here -- and a temperature
+        parses perfectly well as a voltage.
+        """
+        module = self._module(channel)
+        try:
+            response = self.send_command(f"{param}?", module)
+            if not response:
+                raise ValueError("no reply (timeout)")
+            head, _, value = response.rpartition("=")
+            if head != f"{module}:{param}":
+                raise ValueError(f"unexpected reply {response!r}")
+            reading = float(value)
+        except Exception as e:
+            if (param, channel) not in self._output_reads_failed:
+                self._output_reads_failed.add((param, channel))
+                _logger.warning("Temperature controller channel %s: cannot "
+                                "read %s: %s", channel, param, e)
+            return None
+        self._output_reads_failed.discard((param, channel))
+        return reading
+
     # --- public API ---
 
     def get_target_temperature(self, channel):
@@ -108,6 +146,16 @@ class TCMController:
             temp = self.actual_temperatures[channel - 1]
         return temp
 
+    def get_output_voltage(self, channel):
+        """The TEC's actual output voltage in volts, or None (see
+        _read_output)."""
+        return self._read_output("TCACTVOL", channel)
+
+    def get_output_current(self, channel):
+        """The TEC's actual output current in amps, signed -- cooling drives
+        it the other way -- or None (see _read_output)."""
+        return self._read_output("TCACTCUR", channel)
+
     # --- background polling and publishing ---
 
     def subscribe(self, callback):
@@ -119,7 +167,8 @@ class TCMController:
         self._subscribers.unsubscribe(callback)
 
     def start(self):
-        """Begin polling and publishing actual temperatures, once a second.
+        """Begin polling and publishing actual temperatures, once a second;
+        each poll also refreshes output_voltages and output_currents.
 
         Consumer-driven, not part of bring-up: the run path reads
         temperatures synchronously (sequence_utils.set_temperature), so a
@@ -138,12 +187,20 @@ class TCMController:
     def _update_loop(self):
         while not self._terminate_polling:
             time.sleep(1)
-            for c in range(1, self.channels + 1):
-                # During a set_temperature stabilization the run path polls
-                # the same reads synchronously; both interleave safely on
-                # _serial_lock, at the cost of doubled wire traffic.
-                self.actual_temperatures[c - 1] = self.get_actual_temperature(c)
-            self._publish()
+            self._poll_once()
+
+    def _poll_once(self):
+        for c in range(1, self.channels + 1):
+            # During a set_temperature stabilization the run path polls
+            # the same reads synchronously; both interleave safely on
+            # _serial_lock, at the cost of doubled wire traffic.
+            self.actual_temperatures[c - 1] = self.get_actual_temperature(c)
+            # Not part of the published payload, which stays the
+            # temperatures: the tab reads these off the driver when a
+            # publish arrives, as it does output_enabled.
+            self.output_voltages[c - 1] = self.get_output_voltage(c)
+            self.output_currents[c - 1] = self.get_output_current(c)
+        self._publish()
 
     def _publish(self):
         # Also the seam tests drive, so nothing there needs the thread.
@@ -179,6 +236,9 @@ class TCMControllerSimulation:
         self.target_temperatures = [10.0] * channels
         self.actual_temperatures = [10.0] * channels
         self.output_enabled = [False] * channels
+        # Actual always sits on target here, so the TEC never has to drive.
+        self.output_voltages = [0.0] * channels
+        self.output_currents = [0.0] * channels
 
         self._subscribers = Subscribers("Temperature controller")
         self._terminate_polling = False
@@ -222,6 +282,14 @@ class TCMControllerSimulation:
     def get_actual_temperature(self, channel):
         self._check_channel(channel)
         return self.actual_temperatures[channel - 1]
+
+    def get_output_voltage(self, channel):
+        self._check_channel(channel)
+        return self.output_voltages[channel - 1]
+
+    def get_output_current(self, channel):
+        self._check_channel(channel)
+        return self.output_currents[channel - 1]
 
     def subscribe(self, callback):
         self._subscribers.subscribe(callback)
