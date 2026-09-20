@@ -1,3 +1,6 @@
+import logging
+import threading
+
 import pytest
 
 from fluidics.control.temperature_controller import TCMControllerSimulation
@@ -101,6 +104,38 @@ from fluidics.control.controller import Subscribers
 from fluidics.control.temperature_controller import TCMController
 
 
+class ScriptedSerial:
+    """Answers each query from `replies`; anything else times out (b"")."""
+
+    def __init__(self, replies):
+        self.replies = replies
+        self.written = []
+        self._pending = b""
+
+    def write(self, data):
+        self.written.append(data)
+        self._pending = self.replies.get(data, b"")
+
+    def readline(self):
+        return self._pending
+
+
+def scripted_tcm(replies, channels=1):
+    """A TCMController without hardware, over a scripted wire. The one place
+    the driver is built by __new__, so an attribute __init__ gains is added
+    here once -- pump_helpers.bare_pump, for this driver."""
+    tcm = TCMController.__new__(TCMController)
+    tcm.serial = ScriptedSerial(replies)
+    tcm._serial_lock = threading.Lock()
+    tcm.channels = channels
+    tcm.actual_temperatures = [0.0] * channels
+    tcm.output_voltages = [None] * channels
+    tcm.output_currents = [None] * channels
+    tcm._output_reads_failed = set()
+    tcm._subscribers = Subscribers("Temperature controller")
+    return tcm
+
+
 class TestReadingsChannel:
     def test_subscriber_receives_each_publish(self):
         tc = TCMControllerSimulation(channels=2)
@@ -146,8 +181,7 @@ class TestReadingsChannel:
     def test_the_real_class_publishes_the_same_way(self):
         """The channel lives identically on both classes; the real one is
         built here without hardware, the interrupt-test way."""
-        tcm = TCMController.__new__(TCMController)
-        tcm._subscribers = Subscribers("Temperature controller")
+        tcm = scripted_tcm({})
         tcm.actual_temperatures = [42.0]
         seen = []
         tcm.subscribe(seen.append)
@@ -161,58 +195,23 @@ class TestReadingsChannel:
 # built without hardware, as above, over a scripted wire: what matters is that
 # a unit which will not answer these costs the readout, never the poll loop.
 
-import logging
-import threading
-
-
-class ScriptedSerial:
-    """Answers each query from `replies`; anything else times out (b"")."""
-
-    def __init__(self, replies):
-        self.replies = replies
-        self.written = []
-        self._pending = b""
-
-    def write(self, data):
-        self.written.append(data)
-        self._pending = self.replies.get(data, b"")
-
-    def readline(self):
-        return self._pending
-
-
-def scripted_tcm(replies, channels=1):
-    tcm = TCMController.__new__(TCMController)
-    tcm.serial = ScriptedSerial(replies)
-    tcm._serial_lock = threading.Lock()
-    tcm.channels = channels
-    tcm.actual_temperatures = [0.0] * channels
-    tcm.output_voltages = [None] * channels
-    tcm.output_currents = [None] * channels
-    tcm._output_reads_failed = set()
-    tcm._subscribers = Subscribers("Temperature controller")
-    return tcm
-
 
 class TestOutputReadings:
     def test_voltage_and_current_are_parsed_from_the_reply(self):
         tcm = scripted_tcm({
             b"TC1:TCACTVOL?\r": b"TC1:TCACTVOL=3.21\r",
-            b"TC1:TCACTCUR?\r": b"TC1:TCACTCUR=1.05\r",
+            # Signed: cooling drives the TEC the other way, and the rig
+            # reports -0.00 idle.
+            b"TC1:TCACTCUR?\r": b"TC1:TCACTCUR=-1.05\r",
         })
         assert tcm.get_output_voltage(1) == 3.21
-        assert tcm.get_output_current(1) == 1.05
+        assert tcm.get_output_current(1) == -1.05
 
     def test_the_channel_picks_the_module_on_the_wire(self):
         tcm = scripted_tcm({b"TC2:TCACTVOL?\r": b"TC2:TCACTVOL=0.5\r"},
                            channels=2)
         assert tcm.get_output_voltage(2) == 0.5
         assert tcm.serial.written == [b"TC2:TCACTVOL?\r"]
-
-    def test_current_is_signed(self):
-        """Cooling drives the TEC the other way; the rig reports -0.00 idle."""
-        tcm = scripted_tcm({b"TC1:TCACTCUR?\r": b"TC1:TCACTCUR=-1.20\r"})
-        assert tcm.get_output_current(1) == -1.20
 
     @pytest.mark.parametrize("reply", [
         b"CMD:REPLY=2\r",          # parameter not found on this firmware
@@ -258,19 +257,13 @@ class TestOutputReadings:
             b"TC1:TCACTVOL?\r": b"TC1:TCACTVOL=3.21\r",
             b"TC1:TCACTCUR?\r": b"TC1:TCACTCUR=1.05\r",
         })
-        tcm._poll_once()
-        assert tcm.output_voltages == [3.21]
-        assert tcm.output_currents == [1.05]
-
-    def test_the_subscriber_payload_is_still_the_temperatures(self):
-        """An embedder subscribes to this channel; the contract holds."""
-        tcm = scripted_tcm({
-            b"TC1:TCACTUALTEMP?\r": b"TC1:TCACTUALTEMP=24.87\r",
-            b"TC1:TCACTVOL?\r": b"TC1:TCACTVOL=3.21\r",
-        })
         seen = []
         tcm.subscribe(seen.append)
         tcm._poll_once()
+        assert tcm.output_voltages == [3.21]
+        assert tcm.output_currents == [1.05]
+        # An embedder subscribes to this channel: the payload is still the
+        # temperatures, whatever else the poll read.
         assert seen == [[24.87]]
 
     def test_the_simulation_reports_an_idle_output(self):

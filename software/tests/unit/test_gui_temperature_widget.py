@@ -121,12 +121,6 @@ class TestOutputReadout:
         assert [c.voltage_label.text() for c in widget.plot_widgets] == \
             ["1.00 V", "2.00 V"]
 
-    def test_an_embedder_s_freeze_leaves_the_readout_live(self, channel_widget):
-        _controller, channel = channel_widget
-        channel.setControlsEnabled(False)
-        assert channel.voltage_label.isEnabled()
-        assert channel.current_label.isEnabled()
-
 
 class TestSetControlsEnabled:
     """An embedder's run owns the TEC: the setpoint controls freeze while
@@ -149,6 +143,8 @@ class TestSetControlsEnabled:
         assert channel.record_btn.isEnabled(), "the recording froze with them"
         assert channel.interval_input.isEnabled()
         assert channel.window_input.isEnabled()
+        assert channel.voltage_label.isEnabled(), "the readout froze too"
+        assert channel.current_label.isEnabled()
 
     def test_the_container_reaches_every_channel(self, temperature_widget):
         """Two channels, so freezing one twice cannot pass for freezing
