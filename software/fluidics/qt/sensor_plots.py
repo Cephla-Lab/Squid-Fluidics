@@ -243,8 +243,9 @@ class SensorTabWidget(QWidget):
 
 
 class TemperatureChannelWidget(TimeSeriesPlotWidget):
-    """One channel's worth of temperature UI: target/actual readout, plot,
-    record toggle, query interval, window size."""
+    """One channel's worth of temperature UI: target/actual readout, the
+    TEC's output voltage and current, plot, record toggle, query interval,
+    window size."""
 
     def __init__(self, controller, channel, parent=None):
         # Temperature moves slowly; polling faster than 2 s buys nothing.
@@ -283,7 +284,9 @@ class TemperatureChannelWidget(TimeSeriesPlotWidget):
         # themselves, so a control added to this row is not left thawed.
         self._controls = (self.temp_input, self.set_btn, self.save_btn,
                           self.output_btn)
-        row.addWidget(QLabel("Current:"))
+        # "Actual", as the plot and the CSV call it: "Current" would read as
+        # amps beside the row below.
+        row.addWidget(QLabel("Actual:"))
         row.addWidget(self.temp_label)
         row.addWidget(QLabel("Target:"))
         row.addWidget(self.temp_input)
@@ -292,6 +295,20 @@ class TemperatureChannelWidget(TimeSeriesPlotWidget):
         row.addWidget(self.save_btn)
         row.addWidget(self.output_btn)
         control_layout.addLayout(row)
+
+        # What the TEC is actually driving, beside what it was told to: an
+        # output that is ON at 0 V is a unit holding itself off. Read-only,
+        # so not among _controls -- it stays live under an embedder's run.
+        output_row = QHBoxLayout()
+        self.voltage_label = QLabel("--")
+        self.current_label = QLabel("--")
+        output_row.addWidget(QLabel("Output voltage:"))
+        output_row.addWidget(self.voltage_label)
+        output_row.addSpacing(16)
+        output_row.addWidget(QLabel("Output current:"))
+        output_row.addWidget(self.current_label)
+        output_row.addStretch()
+        control_layout.addLayout(output_row)
         control.setLayout(control_layout)
 
         plot_box = self._build_plot_box(f"Channel {self.channel} Plot")
@@ -304,11 +321,13 @@ class TemperatureChannelWidget(TimeSeriesPlotWidget):
         self.output_btn.toggled.connect(self._on_output_toggled)
 
         self._sync_output_button()
+        self._sync_output_readout()
 
     def _on_reading(self, temp, current_time):
         # The driver's output state can change under a run (make_safe
         # switches it off after an abort); follow it rather than assume it.
         self._sync_output_button()
+        self._sync_output_readout()
         if current_time - self.last_update < self.query_interval:
             return
         self.temp_label.setText(f"{temp:.1f}°C")
@@ -357,6 +376,15 @@ class TemperatureChannelWidget(TimeSeriesPlotWidget):
         self.output_btn.setChecked(on)
         self.output_btn.blockSignals(False)
         self.output_btn.setText("Output ON" if on else "Output OFF")
+
+    def _sync_output_readout(self):
+        # Live status like the button above, so not held to query_interval.
+        # None is a read the unit did not answer (TCMController._read_polled).
+        for label, readings, unit in (
+                (self.voltage_label, self.controller.output_voltages, "V"),
+                (self.current_label, self.controller.output_currents, "A")):
+            reading = readings[self.channel - 1]
+            label.setText("--" if reading is None else f"{reading:.2f} {unit}")
 
     def _on_output_toggled(self, checked):
         try:
