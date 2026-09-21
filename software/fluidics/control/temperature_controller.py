@@ -120,6 +120,9 @@ class TCMController:
         lacks the parameter answers CMD:REPLY=2, and that would take the
         temperature plot down with it.
         """
+        # Outside the try, as in get_actual_temperature: None means the unit
+        # would not answer, and a wrong channel is not that.
+        self._check_channel(channel)
         try:
             reading = float(self._query(param, channel))
         except Exception as e:

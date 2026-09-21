@@ -278,6 +278,20 @@ class TestOutputReadings:
         # temperatures, whatever else the poll read.
         assert seen == [[24.87]]
 
+    @pytest.mark.parametrize("read", ["get_output_voltage", "get_output_current"])
+    def test_a_channel_the_unit_does_not_have_raises_as_the_simulation_does(
+            self, read, caplog):
+        """None means the unit would not answer. A wrong channel is the
+        caller's mistake, and must not pass for that -- or warn as one."""
+        tcm = scripted_tcm({}, channels=1)
+        with caplog.at_level(logging.WARNING):
+            with pytest.raises(ValueError, match="channel"):
+                getattr(tcm, read)(2)
+        assert tcm.serial.written == []
+        assert caplog.records == []
+        with pytest.raises(ValueError, match="channel"):
+            getattr(TCMControllerSimulation(channels=1), read)(2)
+
     def test_the_simulation_reports_an_idle_output(self):
         tc = TCMControllerSimulation(channels=2)
         assert tc.output_voltages == [0.0, 0.0]
