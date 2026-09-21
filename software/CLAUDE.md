@@ -122,7 +122,7 @@ Per sensor, `monitor` is `off` (plot only), `warn` (log and carry on), or `stop`
 
 Notices go to `MERFISHOperations(on_warning=...)`, which becomes the `DrawGuard`'s `log`. It defaults to the fluidics logger's WARNING (console + run log); the GUI passes a channel that marshals to the GUI thread and shows a non-modal line under the progress bar. A `warn` fault also lands in the flow CSV's Fault column when recording -- its own row, carrying the tripping sample's timestamp.
 
-**Only Flow Cell is guarded.** `OpenChamberOperations` is never handed the sensors, so a `warn`/`stop` mode configured on an Open Chamber machine is inert; the GUI says so at startup, forces the mode to `off`, and disables the per-sensor control.
+**Only Flow Cell is guarded.** `OpenChamberOperations` is never handed the sensors, so a `warn`/`stop` mode configured on an Open Chamber machine is inert. Bring-up says so and forces the mode to `off` (`build_devices` → `on_issue(ISSUE_DRAW_PROTECTION, …)`), so the GUI's bring-up dialog, a headless run's log and an embedder's issue list all carry it; `draw_protection_available(config)` is the one statement of the rule, and the Flow Sensors tab disables the per-sensor control from it.
 
 Not guarded: the dispense-to-waste inside `_empty_syringe_pump_on_full`, and `Priming`/`Clean Up` — both move liquid out the waste port rather than through the flow cell, so the sensors would read nothing and every one would fault.
 

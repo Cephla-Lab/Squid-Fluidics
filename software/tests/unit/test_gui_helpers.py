@@ -276,53 +276,26 @@ class TestRecordingSaveDialog:
 
 
 class TestDrawProtectionUnavailable:
-    """Only MERFISHOperations arms the sensors, so on any other application a
-    configured warn/stop mode is inert. Silence there would leave the operator
-    believing a draw is protected when nothing is watching it.
+    """The finding and the switch-off are bring-up's (fluidics.devices, tested
+    in test_devices); what is left to the window is how it tells the operator:
+    the bring-up dialog, under the flow sensor's title like the tab it concerns.
 
-    Called unbound against a stub, since the method touches only self.flowSensors
-    and a message box -- constructing a QMainWindow needs a QApplication.
+    Called unbound against a stub, since the method touches only the hint
+    table and a message box -- constructing a QMainWindow needs a QApplication.
     """
 
-    class Stub:
-        def __init__(self, sensors):
-            self.flowSensors = sensors
-
-    class Sensor:
-        def __init__(self, name, monitor):
-            self.name = name
-            self.monitor = monitor
-
-    @pytest.fixture
-    def shown(self, monkeypatch):
-        messages = []
+    def test_it_is_shown_under_the_flow_sensor_title(self, monkeypatch):
+        from fluidics.devices import ISSUE_DRAW_PROTECTION
+        shown = []
         monkeypatch.setattr(gui.QMessageBox, "warning",
-                            lambda parent, title, text: messages.append(text))
-        return messages
+                            lambda parent, title, text: shown.append((title, text)))
+        stub = type("Stub", (), {"_BRINGUP_HINTS": gui.FluidicsControlGUI._BRINGUP_HINTS})()
+        gui.FluidicsControlGUI._report_bringup_issue(
+            stub, ISSUE_DRAW_PROTECTION, "Draw protection is configured for syringe_draw ...")
+        assert shown == [("Flow Sensor", "Draw protection is configured for syringe_draw ...")]
 
-    def _run(self, sensors, draw_protection):
-        stub = self.Stub(sensors)
-        gui.FluidicsControlGUI._warn_if_draw_protection_unavailable(
-            stub, draw_protection)
-        return stub
-
-    def test_a_configured_mode_is_reported(self, shown):
-        self._run([self.Sensor("syringe_draw", "stop")], draw_protection=False)
-        assert len(shown) == 1
-        assert "syringe_draw" in shown[0]
-
-    def test_the_mode_is_forced_off_so_the_gui_cannot_show_it_as_active(self, shown):
-        stub = self._run([self.Sensor("s", "stop")], draw_protection=False)
-        assert stub.flowSensors[0].monitor == "off"
-
-    def test_sensors_already_off_are_not_reported(self, shown):
-        self._run([self.Sensor("s", "off")], draw_protection=False)
-        assert shown == []
-
-    def test_nothing_is_reported_when_protection_is_available(self, shown):
-        stub = self._run([self.Sensor("s", "stop")], draw_protection=True)
-        assert shown == []
-        assert stub.flowSensors[0].monitor == "stop"
+    def test_the_window_no_longer_decides_it(self):
+        assert not hasattr(gui.FluidicsControlGUI, "_warn_if_draw_protection_unavailable")
 
 
 class RecordingWriter:

@@ -35,6 +35,7 @@ from .open_chamber_operations import OpenChamberOperations
 # hints key on the same names the emit sites use.
 ISSUE_TEMPERATURE_CONTROLLER = "temperature_controller"
 ISSUE_FLOW_SENSORS = "flow_sensors"
+ISSUE_DRAW_PROTECTION = "draw_protection"
 
 
 _logger = logging.getLogger(__name__)
@@ -160,6 +161,8 @@ def build_devices(config, simulation=False, on_issue=None, run_control=None,
     Degradation policy is the GUI's: a temperature controller that fails to
     come up on hardware, or flow sensors that fail in either mode, are
     reported through on_issue and left out rather than failing the launch.
+    So is draw protection configured where nothing will act on it
+    (draw_protection_available): reported, and switched off.
     The controller, pump, and valves are not survivable -- those raise, after
     closing whatever had already started.
 
@@ -225,6 +228,7 @@ def build_devices(config, simulation=False, on_issue=None, run_control=None,
             # names the sensor and its index.
             flow_sensors = []
             on_issue(ISSUE_FLOW_SENSORS, f"Failed to initialize flow sensors: {e}")
+        _switch_off_inert_draw_protection(config, flow_sensors, on_issue)
 
         selector_valves = SelectorValveSystem(controller, config, run_control)
         disc_pump = (DiscPump(controller, run_control)
@@ -248,6 +252,30 @@ def build_devices(config, simulation=False, on_issue=None, run_control=None,
     return DeviceSet(config, controller, syringe_pump, selector_valves,
                      disc_pump, temperature_controller, flow_sensors,
                      run_control)
+
+
+def _switch_off_inert_draw_protection(config, flow_sensors, on_issue):
+    """A warn/stop mode on an application that never arms the sensors would
+    leave the operator believing a draw is protected when nothing is watching
+    it: switch it off and say so. Here rather than in a window, so a headless
+    run and an embedder hear it too."""
+    if draw_protection_available(config):
+        return
+    configured = [sensor.name for sensor in flow_sensors if sensor.monitor != "off"]
+    if not configured:
+        return
+    for sensor in flow_sensors:
+        sensor.monitor = "off"
+    on_issue(ISSUE_DRAW_PROTECTION,
+             f"Draw protection is configured for {', '.join(configured)} but "
+             f"is only available for the Flow Cell application. The sensors "
+             f"will read and plot; they will not stop a draw.")
+
+
+def draw_protection_available(config):
+    """Whether anything will act on a flow sensor's warn/stop mode: only the
+    Flow Cell operations are handed the sensors (build_operations)."""
+    return config.application == "Flow Cell"
 
 
 def build_operations(config, devices, on_warning=None):

@@ -15,8 +15,10 @@ from fluidics.control.config import (
 )
 from fluidics.errors import DeviceError
 from fluidics.devices import (
+    ISSUE_DRAW_PROTECTION,
     ISSUE_FLOW_SENSORS,
     ISSUE_TEMPERATURE_CONTROLLER,
+    draw_protection_available,
 )
 from fluidics.system import FluidicsSystem
 from fluidics.events import RunEnded  # noqa: F401  (re-exported; see below)
@@ -121,10 +123,12 @@ class FluidicsControlGUI(PostsToQtThread, QMainWindow):
             self.sensorTabs.append(temperatureControlTab)
 
         if self.flowSensors:
-            draw_protection = self.config.application == "Flow Cell"
-            self._warn_if_draw_protection_unavailable(draw_protection)
-            flowSensorTab = FlowSensorControlWidget(self.flowSensors,
-                                                    draw_protection=draw_protection)
+            # A configured mode that nothing will act on was switched off
+            # and reported at bring-up (ISSUE_DRAW_PROTECTION); the tab only
+            # has to show the control as what it is.
+            flowSensorTab = FlowSensorControlWidget(
+                self.flowSensors,
+                draw_protection=draw_protection_available(self.config))
             self.tabWidget.addTab(flowSensorTab, "Flow Sensors")
             self.sensorTabs.append(flowSensorTab)
 
@@ -143,32 +147,13 @@ class FluidicsControlGUI(PostsToQtThread, QMainWindow):
             "Flow Sensor",
             "\n\nCheck that the sensor is connected to the matching I2C "
             "index. The Flow Sensor tab will not be available."),
+        ISSUE_DRAW_PROTECTION: ("Flow Sensor", ""),
     }
 
     def _report_bringup_issue(self, kind, message):
         _logger.warning(message)
         title, hint = self._BRINGUP_HINTS.get(kind, ("Hardware", ""))
         QMessageBox.warning(self, title, message + hint)
-
-    def _warn_if_draw_protection_unavailable(self, draw_protection):
-        """Say so loudly when a configured mode will not be acted on.
-
-        Only MERFISHOperations arms the sensors, so on any other application a
-        config asking for warn or stop is inert. Silence there would leave the
-        operator believing a draw is protected when nothing is watching it.
-        """
-        if draw_protection:
-            return
-        configured = [s.name for s in self.flowSensors if s.monitor != "off"]
-        if not configured:
-            return
-        for sensor in self.flowSensors:
-            sensor.monitor = "off"
-        msg = (f"Draw protection is configured for {', '.join(configured)} but "
-               f"is only available for the Flow Cell application. The sensors "
-               f"will read and plot; they will not stop a draw.")
-        _logger.warning(msg)
-        QMessageBox.warning(self, "Flow Sensor", msg)
 
     RUN_TAB, MANUAL_TAB = 0, 1
 
