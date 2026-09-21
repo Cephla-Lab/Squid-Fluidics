@@ -38,7 +38,7 @@ class TCMController:
         # loop has read it, and whenever the unit will not answer.
         self.output_voltages = [None] * channels
         self.output_currents = [None] * channels
-        self._output_reads_failed = set()
+        self._reads_failed = set()
 
         self._subscribers = Subscribers("Temperature controller")
         self._terminate_polling = False
@@ -67,6 +67,10 @@ class TCMController:
 
     def send_command(self, command, module):
         with self._serial_lock:
+            # Whatever is waiting answers a command that already timed out.
+            # Left there it is read as this command's reply, and every reply
+            # after it lands one command late.
+            self.serial.reset_input_buffer()
             self.serial.write(f"{module}:{command}\r".encode())
             response = self.serial.readline().decode().strip()
             if response[:4] == "CMD:" and response[-1] != "1" and response[-1] != "8":
@@ -81,6 +85,32 @@ class TCMController:
         response = self.send_command("TCSW?", self._module(channel))
         return response.rsplit("=", 1)[-1].strip() == "1"
 
+    def _query(self, param, channel):
+        """The value text of the reply to `param`?, ValueError unless the
+        reply is for that parameter.
+
+        send_command drops what was waiting before it writes, but a reply
+        that lands after that is still read by the next command. Sliced by
+        position, a current is a plausible temperature -- "TC1:TCACTCUR=-0.00"
+        reads as 0.0 -- so the reply says what it answers before it is
+        believed.
+        """
+        module = self._module(channel)
+        response = self.send_command(f"{param}?", module)
+        if not response:
+            raise ValueError("no reply (timeout)")
+        head, _, value = response.rpartition("=")
+        if head != f"{module}:{param}":
+            raise ValueError(f"unexpected reply {response!r}")
+        return value
+
+    def _poll_failed(self, param, channel, error):
+        # Warns when a polled read starts failing, not once a second.
+        if (param, channel) not in self._reads_failed:
+            self._reads_failed.add((param, channel))
+            _logger.warning("Temperature controller channel %s: cannot "
+                            "read %s: %s", channel, param, error)
+
     def _read_output(self, param, channel):
         """One of the TEC's output readings, or None if the unit would not
         give it.
@@ -88,30 +118,14 @@ class TCMController:
         These are for the tab's readout, polled beside the temperatures, so
         a failure here must never raise into the poll loop: a firmware that
         lacks the parameter answers CMD:REPLY=2, and that would take the
-        temperature plot down with it. It warns when a read starts failing,
-        not on every poll.
-
-        The reply is checked against the parameter asked for. Nothing
-        flushes the input between commands, so after a timeout a late
-        answer to an earlier query can arrive here -- and a temperature
-        parses perfectly well as a voltage.
+        temperature plot down with it.
         """
-        module = self._module(channel)
         try:
-            response = self.send_command(f"{param}?", module)
-            if not response:
-                raise ValueError("no reply (timeout)")
-            head, _, value = response.rpartition("=")
-            if head != f"{module}:{param}":
-                raise ValueError(f"unexpected reply {response!r}")
-            reading = float(value)
+            reading = float(self._query(param, channel))
         except Exception as e:
-            if (param, channel) not in self._output_reads_failed:
-                self._output_reads_failed.add((param, channel))
-                _logger.warning("Temperature controller channel %s: cannot "
-                                "read %s: %s", channel, param, e)
+            self._poll_failed(param, channel, e)
             return None
-        self._output_reads_failed.discard((param, channel))
+        self._reads_failed.discard((param, channel))
         return reading
 
     # --- public API ---
@@ -139,9 +153,11 @@ class TCMController:
         self.output_enabled[channel - 1] = bool(on)
 
     def get_actual_temperature(self, channel):
-        response = self.send_command("TCACTUALTEMP?", self._module(channel))
+        # Outside the try: a wrong channel is the caller's mistake, not a bad
+        # reply to ride out on the last value.
+        self._check_channel(channel)
         try:
-            temp = float(response[17:])
+            temp = float(self._query("TCACTUALTEMP", channel))
         except ValueError:
             temp = self.actual_temperatures[channel - 1]
         return temp
@@ -194,7 +210,16 @@ class TCMController:
             # During a set_temperature stabilization the run path polls
             # the same reads synchronously; both interleave safely on
             # _serial_lock, at the cost of doubled wire traffic.
-            self.actual_temperatures[c - 1] = self.get_actual_temperature(c)
+            try:
+                self.actual_temperatures[c - 1] = self.get_actual_temperature(c)
+                self._reads_failed.discard(("TCACTUALTEMP", c))
+            except Exception as e:
+                # The last temperature stands. This loop feeds the display,
+                # and raising here ends its thread; a run's own read of the
+                # same parameter (sequence_utils.set_temperature) still
+                # raises, so a unit that refuses fails the run rather than
+                # holding it on a frozen value.
+                self._poll_failed("TCACTUALTEMP", c, e)
             # Not part of the published payload, which stays the
             # temperatures: the tab reads these off the driver when a
             # publish arrives, as it does output_enabled.
