@@ -90,6 +90,16 @@ Speed codes (0–40) map to stroke times via `SPEED_SEC_MAPPING`. Use `flow_rate
 
 `SelectorValveSystem` manages multiple rotary valves daisy-chained in series. Port addressing is linearized: ports 1–9 map to valve 0, ports 10–18 to valve 1, etc. The last port of each valve (except the final one) routes to the next valve in the chain. `open_port(port_index)` handles the routing automatically.
 
+### Temperature Controller
+
+`TCMController` speaks the Yexian TCM's ASCII protocol at 57600 baud: `TC<n>:PARAM?` is answered `TC<n>:PARAM=value`, a set or save with `CMD:REPLY=<code>` (1 set OK, 8 save OK, anything else raises out of `send_command`). Channels are 1-based and name the module on the wire (`TC1`, `TC2`). No checksum or address suffix is used.
+
+- **A reply is checked before it is believed.** Numeric readings go through `_query(param, module)`, which raises `ValueError` unless the reply is for the parameter asked. Never slice a reply by position: `"TC1:TCACTCUR=-0.00"[17:]` is a plausible `0.0` °C. `send_command` also drops whatever is waiting before each write, so an answer that arrives after its command timed out is not read by the next one. `_read_output_enabled` is the one reader still outside `_query` — routing it there would turn a `TCSW?` timeout at bring-up from "output off" into a failed bring-up.
+- **`_query` takes the module, not the channel.** `_module()` raises `ValueError` for a channel the unit lacks, and callers that ride out a bad reply catch `ValueError`, so they resolve the module before their `try` — a wrong channel must raise, as it does in simulation, not pass for an unanswered read.
+- **Two readers, two policies.** The display's poll reads temperature, `TCACTVOL` and `TCACTCUR` through `_read_polled`, which returns `None` and warns when a read *starts* failing (not every second); on `None` the last temperature stands and the tab shows `--`. Raising there would end the poll thread and the plot with it. A run reads through `get_actual_temperature`, where an error reply still raises, so a unit that refuses fails the run.
+- **Polling is consumer-driven.** `start()` is called by the GUI, not at bring-up; a headless run pays no polling traffic. The subscriber payload is the list of temperatures and stays that — an embedder subscribes to it — so the tab reads `output_voltages`, `output_currents` and `output_enabled` off the driver when a publish arrives.
+- **Open: reply framing.** `send_command` reads with pyserial's `readline()`, which waits for `\n`; the vendor manual says every reply ends in `\r` alone. If a unit follows its manual, each command waits out the 0.5 s timeout (and a poll is three commands per channel). The fix — `read_until(b"\r")` plus the manual's 50 ms gap between commands, which the timeout currently supplies by accident — changes run-path timing and wants a hardware check. `time python -m tests.hardware.diagnose_temperature_controller --sn <serial>` tells the two apart: 15 queries take about 8 s with `\r` only, about 1 s with `\r\n`.
+
 ### Experiment Execution Flow
 
 1. YAML config defines hardware serial numbers, valve IDs, reagent mappings, tubing volumes
@@ -130,7 +140,7 @@ Not guarded: the dispense-to-waste inside `_empty_syringe_pump_on_full`, and `Pr
 - **`fluidics/qt/support.py`** — `PostsToQtThread` (the one cross-thread idiom: `_post_event(name, *args)` runs a method on the Qt thread), `GuiLogHandler` (feeds the run tab's log pane), `subscribe_until_detached`, and the small dialog/format helpers
 - **`fluidics/qt/sequence_editor.py`** — `SequencesWidget` (renders the sequence list, the run controls, the log pane) and `AddSequenceDialog`
 - **`fluidics/qt/manual_control.py`** — `ManualControlWidget`
-- **`fluidics/qt/sensor_plots.py`** — the live temperature and flow plots, their rolling windows and per-plot CSV recording
+- **`fluidics/qt/sensor_plots.py`** — the live temperature and flow plots, their rolling windows and per-plot CSV recording; each temperature channel also shows the TEC's output voltage and current, live and unrecorded
 
 Qt is reached through `qtpy` everywhere, `gui.py` included — two bindings in one process is a crash, and qtpy resolves it once (`QT_API`). PyQt5 and matplotlib are the `[gui]` extra, so the core package (sequences, control, worker, CLI) installs headless.
 

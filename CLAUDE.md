@@ -63,7 +63,7 @@ These must stay in sync. Same applies to `VALVE_POSITIONS`/`ValvesStates_t` and 
 - **`fluidics/control/controller.py`** — Core `FluidController` class wrapping serial communication; `FluidControllerSimulation` for testing without hardware
 - **`fluidics/control/syringe_pump.py`** — Tecan XCalibur syringe pump control (uses `tecancavro/` submodule); has simulation class
 - **`fluidics/control/selector_valve.py`** — `SelectorValveSystem` manages cascaded multi-port rotary valve routing with port-to-reagent mapping
-- **`fluidics/control/temperature_controller.py`** — TCM temperature controller with CRC32 checksums; has simulation class
+- **`fluidics/control/temperature_controller.py`** — TCM temperature controller: an ASCII protocol over serial, each reply checked against the parameter asked for; polls temperature and the TEC's output voltage and current for the GUI; has simulation class
 - **`fluidics/control/disc_pump.py`** — Peristaltic disc pump wrapper
 - **`fluidics/control/_def.py`** — Shared constants (command IDs, valve positions, sensor params, PID limits)
 - **`fluidics/sequences.py`** — Sequence loading/saving/validation with pydantic discriminated union models
