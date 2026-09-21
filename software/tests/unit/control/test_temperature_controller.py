@@ -109,7 +109,12 @@ class ScriptedSerial:
 
     The input is a buffer of lines, as the port's is: a reply waits there
     until it is read, and `late()` puts one there that nobody is waiting
-    for -- the answer to a command that already timed out."""
+    for -- the answer to a command that already timed out.
+
+    A read hands back one line, which is the port when replies end "\r\n".
+    When they end "\r" alone, as the manual has it, pyserial's readline
+    returns everything waiting at once: a late reply then spoils one read
+    and no more. The driver has to be right for both."""
 
     def __init__(self, replies):
         self.replies = replies
@@ -229,7 +234,8 @@ class TestOutputReadings:
         b"CMD:REPLY=2\r",          # parameter not found on this firmware
         b"",                       # timeout
         b"TC1:TCACTVOL=garbage\r",
-        # A late answer to an earlier query: a temperature is not a voltage.
+        # A late answer to an earlier query, landing after the flush: a
+        # temperature is not a voltage.
         b"TC1:TCACTUALTEMP=24.87\r",
     ])
     def test_a_read_that_fails_is_none(self, reply):
@@ -278,52 +284,42 @@ class TestOutputReadings:
         # temperatures, whatever else the poll read.
         assert seen == [[24.87]]
 
-    @pytest.mark.parametrize("read", ["get_output_voltage", "get_output_current"])
-    def test_a_channel_the_unit_does_not_have_raises_as_the_simulation_does(
-            self, read, caplog):
-        """None means the unit would not answer. A wrong channel is the
-        caller's mistake, and must not pass for that -- or warn as one."""
-        tcm = scripted_tcm({}, channels=1)
-        with caplog.at_level(logging.WARNING):
-            with pytest.raises(ValueError, match="channel"):
-                getattr(tcm, read)(2)
-        assert tcm.serial.written == []
-        assert caplog.records == []
-        with pytest.raises(ValueError, match="channel"):
-            getattr(TCMControllerSimulation(channels=1), read)(2)
-
     def test_the_simulation_reports_an_idle_output(self):
         tc = TCMControllerSimulation(channels=2)
         assert tc.output_voltages == [0.0, 0.0]
         assert tc.output_currents == [0.0, 0.0]
         assert tc.get_output_voltage(1) == 0.0
         assert tc.get_output_current(2) == 0.0
-        with pytest.raises(ValueError):
-            tc.get_output_voltage(3)
 
 
 # --- A reply that is not the one asked for ---
 #
-# The poll now puts three kinds of reply on the wire, and an answer that
-# comes after its command timed out is read by whoever asks next. A current
-# read as a temperature is a wrong number; an error reply read by the
-# temperature query used to end the poll thread.
+# The poll puts three kinds of reply on the wire, and an answer that comes
+# after its command timed out is read by whoever asks next. A current read
+# as a temperature is a wrong number; an error reply read by the temperature
+# query raises, which in the poll loop ends the display's thread.
 
 class TestStaleReplies:
-    def test_a_late_reply_does_not_reach_the_next_command(self):
-        tcm = scripted_tcm({b"TC1:TCACTUALTEMP?\r": b"TC1:TCACTUALTEMP=24.87\r"})
-        tcm.serial.late(b"TC1:TCACTCUR=-0.00\r")
-        assert tcm.get_actual_temperature(1) == 24.87
-
-    def test_the_wire_is_back_in_step_afterwards(self):
-        """Dropped, not shifted: each query gets its own answer again."""
+    def test_a_late_reply_is_dropped_not_read_by_the_next_command(self):
+        """Dropped, not shifted: every query after it gets its own answer."""
         tcm = scripted_tcm({
             b"TC1:TCACTUALTEMP?\r": b"TC1:TCACTUALTEMP=24.87\r",
             b"TC1:TCACTVOL?\r": b"TC1:TCACTVOL=3.21\r",
         })
         tcm.serial.late(b"TC1:TCACTCUR=-0.00\r")
-        tcm.get_actual_temperature(1)
+        assert tcm.get_actual_temperature(1) == 24.87
         assert tcm.get_output_voltage(1) == 3.21
+
+    def test_a_reply_for_another_parameter_is_not_a_target(self):
+        """"TC1:TCACTCUR=-0.00" sliced as a target is 0.0, and it seeds
+        target_temperatures at bring-up."""
+        tcm = scripted_tcm({b"TC1:TCADJTEMP?\r": b"TC1:TCACTCUR=-0.00\r"})
+        with pytest.raises(ValueError, match="unexpected reply"):
+            tcm._read_target(1)
+
+    def test_the_target_is_read_from_its_own_reply(self):
+        tcm = scripted_tcm({b"TC1:TCADJTEMP?\r": b"TC1:TCADJTEMP=25.01\r"})
+        assert tcm._read_target(1) == 25.01
 
     def test_a_reply_for_another_parameter_is_not_a_temperature(self):
         """The one read a flush cannot save: the late reply lands after it.
@@ -332,28 +328,25 @@ class TestStaleReplies:
         tcm.actual_temperatures = [24.0]
         assert tcm.get_actual_temperature(1) == 24.0
 
-    def test_a_poll_keeps_the_last_temperature_through_an_error_reply(self):
-        tcm = scripted_tcm({b"TC1:TCACTUALTEMP?\r": b"CMD:REPLY=2\r"})
+    @pytest.mark.parametrize("reply", [
+        b"CMD:REPLY=2\r",           # raises out of the read: ends the thread
+        b"",                         # timeout
+        b"TC1:TCACTCUR=-0.00\r",    # a late reply, landing after the flush
+    ])
+    def test_a_poll_keeps_the_last_temperature_and_says_so_once(
+            self, reply, caplog):
+        """A temperature that has stopped updating looks like a steady one;
+        the log is the only place the difference shows."""
+        tcm = scripted_tcm({b"TC1:TCACTUALTEMP?\r": reply})
         tcm.actual_temperatures = [24.0]
         seen = []
         tcm.subscribe(seen.append)
-        tcm._poll_once()   # must not raise: that ended the poll thread
-        assert seen == [[24.0]]
-
-    def test_that_poll_warns_once_not_every_second(self, caplog):
-        tcm = scripted_tcm({b"TC1:TCACTUALTEMP?\r": b"CMD:REPLY=2\r"})
         with caplog.at_level(logging.WARNING):
             for _ in range(3):
                 tcm._poll_once()
+        assert seen == [[24.0]] * 3
         assert len([r for r in caplog.records
                     if "TCACTUALTEMP" in r.message]) == 1
-
-    def test_a_channel_the_unit_does_not_have_is_still_an_error(self):
-        """Not a bad reply: keeping the last value would hide the mistake."""
-        tcm = scripted_tcm({}, channels=1)
-        with pytest.raises(ValueError, match="channel"):
-            tcm.get_actual_temperature(2)
-        assert tcm.serial.written == []
 
     def test_a_run_s_own_read_still_raises(self):
         """Only the display's poll carries on. A run waiting on
@@ -362,6 +355,22 @@ class TestStaleReplies:
         tcm = scripted_tcm({b"TC1:TCACTUALTEMP?\r": b"CMD:REPLY=2\r"})
         with pytest.raises(Exception, match="CMD:REPLY=2"):
             tcm.get_actual_temperature(1)
+
+
+@pytest.mark.parametrize("read", [
+    "get_actual_temperature", "get_output_voltage", "get_output_current"])
+def test_a_channel_the_unit_does_not_have_raises_as_the_simulation_does(
+        read, caplog):
+    """A caller's mistake, not a reply to ride out: keeping the last value,
+    or None and a warning, would pass it off as the unit's."""
+    tcm = scripted_tcm({}, channels=1)
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(ValueError, match="channel"):
+            getattr(tcm, read)(2)
+    assert tcm.serial.written == []
+    assert caplog.records == []
+    with pytest.raises(ValueError, match="channel"):
+        getattr(TCMControllerSimulation(channels=1), read)(2)
 
 
 class TestStart:

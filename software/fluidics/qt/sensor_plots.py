@@ -379,7 +379,7 @@ class TemperatureChannelWidget(TimeSeriesPlotWidget):
 
     def _sync_output_readout(self):
         # Live status like the button above, so not held to query_interval.
-        # None is a read the unit did not answer (TCMController._read_output).
+        # None is a read the unit did not answer (TCMController._read_polled).
         for label, readings, unit in (
                 (self.voltage_label, self.controller.output_voltages, "V"),
                 (self.current_label, self.controller.output_currents, "A")):
