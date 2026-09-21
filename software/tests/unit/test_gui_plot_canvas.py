@@ -13,6 +13,7 @@ scroll. These pin both, on the real canvas under Qt's offscreen platform.
 
 import pytest
 
+from matplotlib.transforms import Bbox
 from qtpy.QtWidgets import QVBoxLayout, QWidget
 
 from fluidics.control.flow_sensor import FlowSensorSimulation
@@ -47,10 +48,20 @@ def shown_at(qapp, widget, height):
 
 def overflow(canvas):
     """How far what the figure draws reaches past the figure, in pixels
-    (top, bottom); nothing is cut off when both are zero."""
-    figure = canvas.figure
-    drawn = figure.axes[0].get_tightbbox(canvas.get_renderer())
-    return (max(0, round(drawn.y1 - figure.bbox.height)), max(0, round(-drawn.y0)))
+    (top, bottom); nothing is cut off when both are zero.
+
+    From the title's and the two axes' own extents, not Axes.get_tightbbox:
+    newer matplotlib (3.10) leaves out of that box the part of a label lying
+    outside the figure -- the very thing being measured -- so it reads "fits"
+    for a 130 px y label on a 104 px canvas. The per-artist extents say the
+    same on 3.5 and 3.10.
+    """
+    renderer = canvas.get_renderer()
+    axes = canvas.figure.axes[0]
+    drawn = Bbox.union([axes.title.get_window_extent(renderer),
+                        axes.xaxis.get_tightbbox(renderer),
+                        axes.yaxis.get_tightbbox(renderer)])
+    return (max(0, round(drawn.y1 - canvas.figure.bbox.height)), max(0, round(-drawn.y0)))
 
 
 def test_the_labels_of_a_short_plot_are_not_cut_off(qapp, flow_plot):
@@ -82,7 +93,10 @@ def test_a_layout_short_of_room_cannot_flatten_the_plot(qapp, flow_plot):
         host.show()
         qapp.processEvents()
         canvas = flow_plot.canvas
-        assert canvas.height() >= canvas.minimumSizeHint().height() > 0
+        canvas.draw()
+        # Not "at least its own hint": newer matplotlib does declare 10 x 10,
+        # and a 10 px plot honours that. What the hint is for is this.
+        assert overflow(canvas) == (0, 0)
     finally:
         layout.removeWidget(flow_plot)
         flow_plot.setParent(None)
