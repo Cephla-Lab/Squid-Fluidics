@@ -14,13 +14,13 @@ from qtpy.QtCore import QSize
 from qtpy.QtWidgets import (QWidget, QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
                             QPushButton, QSpinBox, QComboBox, QFileDialog, QMessageBox)
 
+import matplotlib
 # backend_qtagg, not backend_qt5agg: the qt5 spelling pins the Qt5
 # binding (and forces it outright on matplotlib >= 3.6), which is the
 # two-bindings-in-one-process crash qtpy is here to avoid.
-import matplotlib
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
-from matplotlib.ticker import FuncFormatter
+from matplotlib.ticker import FuncFormatter, MaxNLocator
 
 from fluidics.qt.support import PostsToQtThread, subscribe_until_detached
 from fluidics.sensor_series import SensorSeries
@@ -59,30 +59,38 @@ class MplCanvas(FigureCanvasQTAgg):
     3.5 misspells the override and declares nothing), so a layout short of
     room squeezes the plot to a sliver instead of taking the room from
     something that can scroll. This one declares the height its labels need
-    -- 163 px for the flow plot at the default font -- measured from the
-    figure after each draw, so it follows the font, the dpi and the labels'
-    text rather than a number chosen here. It is a bound, not the exact
-    least: the layout finds a few pixels of slack below it.
+    -- about 160 px for the flow plot at the default font -- measured from
+    the figure whenever the labels, the dpi or the pixel ratio change, so it
+    follows them rather than a number chosen here. It is a bound, not the
+    exact least: the layout finds a few pixels of slack below it.
     """
 
-    # An axis is drawn with at least this many ticks (MaxNLocator's
-    # min_n_ticks), so that many tick labels is the least an axes can hold.
-    _MIN_TICKS = 2
+    # An axis is drawn with at least this many ticks, so that many tick
+    # labels is the least an axes can hold.
+    _MIN_TICKS = MaxNLocator.default_params["min_n_ticks"]
 
     def __init__(self, parent=None, width=5, height=4, dpi=100):
         fig = Figure(figsize=(width, height), dpi=dpi, layout="constrained")
         self.axes = fig.add_subplot(111)
         super(MplCanvas, self).__init__(fig)
         self._legible_height = 0    # nothing is drawn yet, so nothing can be cut off
+        self._measured_for = None   # what _legible_height was measured with
 
     def minimumSizeHint(self):
         return QSize(0, self._legible_height)
 
     def draw(self):
         super().draw()
-        needed = self._measure_legible_height()
-        if needed != self._legible_height:
-            self._legible_height = needed
+        # The measure is a tenth of a draw, and its answer moves with none of
+        # what a redraw brings -- not the data, not the canvas size -- only
+        # with these. (The plots clear and relabel the axes on every refresh;
+        # the texts come back the same.)
+        axes = self.axes
+        measured_for = (axes.get_title(), axes.get_xlabel(), axes.get_ylabel(),
+                        self.figure.dpi, self.devicePixelRatioF())
+        if measured_for != self._measured_for:
+            self._measured_for = measured_for
+            self._legible_height = self._measure_legible_height()
             self.updateGeometry()
 
     def _measure_legible_height(self):
@@ -93,13 +101,14 @@ class MplCanvas(FigureCanvasQTAgg):
         renderer = self.get_renderer()
         axes = self.axes
         box = axes.get_window_extent(renderer)
-        above = (max(0, axes.title.get_window_extent(renderer).y1 - box.y1)
+        # An empty title still reports its pad above the axes.
+        above = (axes.title.get_window_extent(renderer).y1 - box.y1
                  if axes.get_title() else 0)
         x_axis = axes.xaxis.get_tightbbox(renderer)     # tick labels and the x label
-        below = max(0, box.y0 - x_axis.y0) if x_axis is not None else 0
-        tick_labels = [label.get_window_extent(renderer).height
-                       for label in axes.get_yticklabels() if label.get_text()]
-        ticks = self._MIN_TICKS * max(tick_labels, default=0)
+        below = box.y0 - x_axis.y0 if x_axis is not None else 0
+        ticks = self._MIN_TICKS * max(
+            (label.get_window_extent(renderer).height
+             for label in axes.get_yticklabels()), default=0)
         # The y label is centred on the axes, not on the figure, and the axes
         # sit off-centre by half of what the two sides differ by -- so that
         # difference is height the label needs on top of its own length.

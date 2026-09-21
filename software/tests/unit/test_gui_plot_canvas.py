@@ -98,6 +98,5 @@ def test_a_layout_short_of_room_cannot_flatten_the_plot(qapp, flow_plot):
         # and a 10 px plot honours that. What the hint is for is this.
         assert overflow(canvas) == (0, 0)
     finally:
-        layout.removeWidget(flow_plot)
-        flow_plot.setParent(None)
+        flow_plot.setParent(None)   # or the host takes the fixture's widget with it
         host.deleteLater()

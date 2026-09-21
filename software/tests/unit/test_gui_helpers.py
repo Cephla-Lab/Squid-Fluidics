@@ -275,29 +275,6 @@ class TestRecordingSaveDialog:
         assert stub.record_btn.text() == "Start Recording"
 
 
-class TestDrawProtectionUnavailable:
-    """The finding and the switch-off are bring-up's (fluidics.devices, tested
-    in test_devices); what is left to the window is how it tells the operator:
-    the bring-up dialog, under the flow sensor's title like the tab it concerns.
-
-    Called unbound against a stub, since the method touches only the hint
-    table and a message box -- constructing a QMainWindow needs a QApplication.
-    """
-
-    def test_it_is_shown_under_the_flow_sensor_title(self, monkeypatch):
-        from fluidics.devices import ISSUE_DRAW_PROTECTION
-        shown = []
-        monkeypatch.setattr(gui.QMessageBox, "warning",
-                            lambda parent, title, text: shown.append((title, text)))
-        stub = type("Stub", (), {"_BRINGUP_HINTS": gui.FluidicsControlGUI._BRINGUP_HINTS})()
-        gui.FluidicsControlGUI._report_bringup_issue(
-            stub, ISSUE_DRAW_PROTECTION, "Draw protection is configured for syringe_draw ...")
-        assert shown == [("Flow Sensor", "Draw protection is configured for syringe_draw ...")]
-
-    def test_the_window_no_longer_decides_it(self):
-        assert not hasattr(gui.FluidicsControlGUI, "_warn_if_draw_protection_unavailable")
-
-
 class RecordingWriter:
     """A csv.writer stand-in. Shared with test_gui_flow_widget."""
 
@@ -927,6 +904,20 @@ class TestBringupDialogs:
         with pytest.raises(SystemExit):
             gui.FluidicsControlGUI(None, is_simulation=True)
         assert dialogs and "free to rotate" in dialogs[0][1]
+
+    def test_inert_draw_protection_is_shown_under_the_flow_sensor_title(self, monkeypatch):
+        """The finding and the switch-off are bring-up's (fluidics.devices,
+        tested in test_devices); what is left to the window is the dialog,
+        titled like the tab it concerns. Called unbound: the method touches
+        only the hint table and a message box."""
+        from fluidics.devices import ISSUE_DRAW_PROTECTION
+        shown = []
+        monkeypatch.setattr(gui.QMessageBox, "warning",
+                            lambda parent, title, text: shown.append((title, text)))
+        stub = SimpleNamespace(_BRINGUP_HINTS=gui.FluidicsControlGUI._BRINGUP_HINTS)
+        gui.FluidicsControlGUI._report_bringup_issue(
+            stub, ISSUE_DRAW_PROTECTION, "Draw protection is configured for syringe_draw ...")
+        assert shown == [("Flow Sensor", "Draw protection is configured for syringe_draw ...")]
 
 
 class TestReAnchoring:

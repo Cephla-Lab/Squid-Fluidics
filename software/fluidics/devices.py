@@ -10,8 +10,9 @@ reference.
 `on_issue(kind, message)` is how a degraded bring-up is reported without this
 module knowing about Qt: the GUI shows a QMessageBox naming the tab that will
 be missing, the CLI takes the default and prints. It is called only for
-failures that are survivable by design (no temperature controller, no flow
-sensors); anything else raises.
+what a bring-up survives by design -- a device left out (no temperature
+controller, no flow sensors) or a configured mode switched off because
+nothing would act on it (draw protection); anything else raises.
 """
 
 import logging
@@ -30,8 +31,8 @@ from .merfish_operations import MERFISHOperations
 from .open_chamber_operations import OpenChamberOperations
 
 
-# The vocabulary of survivable bring-up failures, passed to on_issue as its
-# `kind`. Constants rather than bare literals so the GUI's per-kind dialog
+# The vocabulary of what a degraded bring-up reports, passed to on_issue as
+# its `kind`. Constants rather than bare literals so the GUI's per-kind dialog
 # hints key on the same names the emit sites use.
 ISSUE_TEMPERATURE_CONTROLLER = "temperature_controller"
 ISSUE_FLOW_SENSORS = "flow_sensors"
@@ -293,6 +294,8 @@ def build_operations(config, devices, on_warning=None):
                                  on_warning=on_warning,
                                  run_control=devices.run_control)
     if config.application == "Open Chamber":
+        # Not handed the flow sensors: draw_protection_available says so to
+        # everyone else. Arm them here and that predicate changes with it.
         return OpenChamberOperations(config, devices.syringe_pump,
                                      devices.selector_valves,
                                      devices.disc_pump,

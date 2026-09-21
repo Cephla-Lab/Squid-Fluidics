@@ -123,9 +123,8 @@ class FluidicsControlGUI(PostsToQtThread, QMainWindow):
             self.sensorTabs.append(temperatureControlTab)
 
         if self.flowSensors:
-            # A configured mode that nothing will act on was switched off
-            # and reported at bring-up (ISSUE_DRAW_PROTECTION); the tab only
-            # has to show the control as what it is.
+            # A configured mode nothing will act on was switched off and
+            # reported at bring-up (ISSUE_DRAW_PROTECTION); here it only greys out.
             flowSensorTab = FlowSensorControlWidget(
                 self.flowSensors,
                 draw_protection=draw_protection_available(self.config))

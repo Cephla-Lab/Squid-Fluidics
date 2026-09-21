@@ -140,7 +140,7 @@ Not guarded: the dispense-to-waste inside `_empty_syringe_pump_on_full`, and `Pr
 - **`fluidics/qt/support.py`** — `PostsToQtThread` (the one cross-thread idiom: `_post_event(name, *args)` runs a method on the Qt thread), `GuiLogHandler` (feeds the run tab's log pane), `subscribe_until_detached`, and the small dialog/format helpers
 - **`fluidics/qt/sequence_editor.py`** — `SequencesWidget` (renders the sequence list, the run controls, the log pane) and `AddSequenceDialog`
 - **`fluidics/qt/manual_control.py`** — `ManualControlWidget`
-- **`fluidics/qt/sensor_plots.py`** — the live temperature and flow plots, their rolling windows and per-plot CSV recording; each temperature channel also shows the TEC's output voltage and current, live and unrecorded. `MplCanvas` is built to be embedded short: constrained layout (the default gives the labels a fraction of the height and cuts "Seconds Ago" off below ~390 px), and a `minimumSizeHint` measured from its own labels, so a host's layout takes room from something that can scroll rather than flattening the plot
+- **`fluidics/qt/sensor_plots.py`** — the live temperature and flow plots, their rolling windows and per-plot CSV recording; each temperature channel also shows the TEC's output voltage and current, live and unrecorded. `MplCanvas` stays legible when embedded short: constrained layout plus a `minimumSizeHint` measured from its own labels
 
 Qt is reached through `qtpy` everywhere, `gui.py` included — two bindings in one process is a crash, and qtpy resolves it once (`QT_API`). PyQt5 and matplotlib are the `[gui]` extra, so the core package (sequences, control, worker, CLI) installs headless.
 
