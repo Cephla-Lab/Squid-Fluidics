@@ -99,6 +99,12 @@ def _op_seconds(pump, op, held_ul):
 
 def _replay(config, sequences):
     control = _MeteredRunControl()
+    # Without the flow sensors: an estimate is the pump's time, which a
+    # sensor adds nothing to, and a simulated one starts a publish thread
+    # only to be closed. It also keeps bring-up's findings about them (a
+    # draw-protection mode nothing acts on) from being found again, and
+    # logged again, at every plan.
+    config = config.model_copy(update={"flow_sensors": None})
     # instant: the simulation paces itself to feel real -- a second per
     # command, slept for real on the paths that carry no run_control (the
     # valves' homing, the drain's blocking commands). An estimate wants the

@@ -13,14 +13,15 @@ from types import SimpleNamespace
 import pytest
 
 import fluidics.devices as devices_module
-from fluidics.control.config import TemperatureControllerConfig
+from fluidics.control.config import FlowSensorConfig, TemperatureControllerConfig
 from fluidics.control.controller import FluidControllerSimulation
 from fluidics.control.disc_pump import DiscPump
 from fluidics.control.flow_sensor import FlowSensorSimulation
 from fluidics.control.selector_valve import SelectorValveSystem
 from fluidics.control.syringe_pump import SyringePumpSimulation
 from fluidics.control.temperature_controller import TCMControllerSimulation
-from fluidics.devices import DeviceSet, build_devices, build_operations, build_worker
+from fluidics.devices import (DeviceSet, build_devices, build_operations, build_worker,
+                              draw_protection_available)
 from fluidics.errors import RunControl
 from fluidics.merfish_operations import MERFISHOperations
 from fluidics.open_chamber_operations import OpenChamberOperations
@@ -158,6 +159,62 @@ class TestSurvivableFailures:
         assert all(s._stop_reading.is_set() for s in started)
         assert RecordingController.last.closes == 1
         assert RecordingTCM.last.closes == 1
+
+
+class TestInertDrawProtection:
+    """Only the Flow Cell operations are handed the sensors, so a warn/stop
+    mode configured for any other application watches nothing. Bring-up says
+    so and switches it off, whoever is bringing the rig up -- the GUI, the
+    CLI, an embedder -- rather than leaving it to a window to notice."""
+
+    @staticmethod
+    def with_sensors(config, *modes):
+        config.flow_sensors = [
+            FlowSensorConfig(index=i, name=f"sensor_{i}", monitor=mode)
+            for i, mode in enumerate(modes, start=1)]
+        return config
+
+    def test_it_is_available_for_the_flow_cell_only(self, flow_cell_config,
+                                                   open_chamber_config):
+        assert draw_protection_available(flow_cell_config)
+        assert not draw_protection_available(open_chamber_config)
+
+    def test_a_configured_mode_is_reported_and_switched_off(self, open_chamber_config, built):
+        issues = RecordingIssues()
+        devices = built(self.with_sensors(open_chamber_config, "stop"),
+                        simulation=True, on_issue=issues)
+        assert [s.monitor for s in devices.flow_sensors] == ["off"]
+        assert [kind for kind, _ in issues.issues] == ["draw_protection"]
+        assert "sensor_1" in issues.issues[0][1]
+
+    def test_only_the_sensors_that_asked_are_named(self, open_chamber_config, built):
+        issues = RecordingIssues()
+        devices = built(self.with_sensors(open_chamber_config, "off", "warn"),
+                        simulation=True, on_issue=issues)
+        assert [s.monitor for s in devices.flow_sensors] == ["off", "off"]
+        (_, message), = issues.issues
+        assert "sensor_2" in message and "sensor_1" not in message
+
+    def test_sensors_already_off_are_not_reported(self, open_chamber_config, built):
+        issues = RecordingIssues()
+        built(self.with_sensors(open_chamber_config, "off"),
+              simulation=True, on_issue=issues)
+        assert issues.issues == []
+
+    def test_the_flow_cell_keeps_its_mode(self, flow_cell_config, built):
+        issues = RecordingIssues()
+        devices = built(self.with_sensors(flow_cell_config, "stop"),
+                        simulation=True, on_issue=issues)
+        assert [s.monitor for s in devices.flow_sensors] == ["stop"]
+        assert issues.issues == []
+
+    def test_a_headless_bringup_hears_it_too(self, open_chamber_config, built, caplog):
+        """No on_issue is the CLI's case: the notice goes to the log, where
+        before this lived in the library only the GUI ever said it."""
+        with caplog.at_level("WARNING", logger="fluidics"):
+            built(self.with_sensors(open_chamber_config, "stop"), simulation=True)
+        assert any("only available for the Flow Cell" in r.getMessage()
+                   for r in caplog.records)
 
 
 class TestBuildOperationsWiring:

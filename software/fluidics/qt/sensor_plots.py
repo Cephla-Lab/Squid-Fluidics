@@ -4,20 +4,23 @@ so an embedding application (Squid) can import them without the standalone app."
 
 import csv
 import logging
+import math
 import os
 import re
 import time
 from datetime import datetime
 
+from qtpy.QtCore import QSize
 from qtpy.QtWidgets import (QWidget, QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
                             QPushButton, QSpinBox, QComboBox, QFileDialog, QMessageBox)
 
+import matplotlib
 # backend_qtagg, not backend_qt5agg: the qt5 spelling pins the Qt5
 # binding (and forces it outright on matplotlib >= 3.6), which is the
 # two-bindings-in-one-process crash qtpy is here to avoid.
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
-from matplotlib.ticker import FuncFormatter
+from matplotlib.ticker import FuncFormatter, MaxNLocator
 
 from fluidics.qt.support import PostsToQtThread, subscribe_until_detached
 from fluidics.sensor_series import SensorSeries
@@ -44,10 +47,76 @@ def _safe_filename_part(text):
 
 
 class MplCanvas(FigureCanvasQTAgg):
+    """The plots' canvas: one that can still be read when it is short.
+
+    Embedded, a plot gets a fraction of the height the standalone tab gives
+    it, and two defaults fail there. matplotlib's default layout gives the
+    title and the x axis a *fraction* of the figure (12% and 11%), so below
+    about 390 px the "Seconds Ago" label is cut off; constrained layout gives
+    them their own pixels and the axes whatever is left.
+
+    And a FigureCanvas declares no height it needs (10 px at best; matplotlib
+    3.5 misspells the override and declares nothing), so a layout short of
+    room squeezes the plot to a sliver instead of taking the room from
+    something that can scroll. This one declares the height its labels need
+    -- about 160 px for the flow plot at the default font -- measured from
+    the figure whenever the labels, the dpi or the pixel ratio change, so it
+    follows them rather than a number chosen here. It is a bound, not the
+    exact least: the layout finds a few pixels of slack below it.
+    """
+
+    # An axis is drawn with at least this many ticks, so that many tick
+    # labels is the least an axes can hold.
+    _MIN_TICKS = MaxNLocator.default_params["min_n_ticks"]
+
     def __init__(self, parent=None, width=5, height=4, dpi=100):
-        fig = Figure(figsize=(width, height), dpi=dpi)
+        fig = Figure(figsize=(width, height), dpi=dpi, layout="constrained")
         self.axes = fig.add_subplot(111)
         super(MplCanvas, self).__init__(fig)
+        self._legible_height = 0    # nothing is drawn yet, so nothing can be cut off
+        self._measured_for = None   # what _legible_height was measured with
+
+    def minimumSizeHint(self):
+        return QSize(0, self._legible_height)
+
+    def draw(self):
+        super().draw()
+        # The measure is a tenth of a draw, and its answer moves with none of
+        # what a redraw brings -- not the data, not the canvas size -- only
+        # with these. (The plots clear and relabel the axes on every refresh;
+        # the texts come back the same.)
+        axes = self.axes
+        measured_for = (axes.get_title(), axes.get_xlabel(), axes.get_ylabel(),
+                        self.figure.dpi, self.devicePixelRatioF())
+        if measured_for != self._measured_for:
+            self._measured_for = measured_for
+            self._legible_height = self._measure_legible_height()
+            self.updateGeometry()
+
+    def _measure_legible_height(self):
+        """The least canvas height, in Qt's pixels, at which the title, the x
+        axis and the y label all fit. From the labels' own extents, not from
+        where the layout put the axes this time -- on a canvas already too
+        short the layout gives up, and its positions say nothing."""
+        renderer = self.get_renderer()
+        axes = self.axes
+        box = axes.get_window_extent(renderer)
+        # An empty title still reports its pad above the axes.
+        above = (axes.title.get_window_extent(renderer).y1 - box.y1
+                 if axes.get_title() else 0)
+        x_axis = axes.xaxis.get_tightbbox(renderer)     # tick labels and the x label
+        below = box.y0 - x_axis.y0 if x_axis is not None else 0
+        ticks = self._MIN_TICKS * max(
+            (label.get_window_extent(renderer).height
+             for label in axes.get_yticklabels()), default=0)
+        # The y label is centred on the axes, not on the figure, and the axes
+        # sit off-centre by half of what the two sides differ by -- so that
+        # difference is height the label needs on top of its own length.
+        y_label = (axes.yaxis.label.get_window_extent(renderer).height
+                   + abs(below - above))
+        pad = matplotlib.rcParams["figure.constrained_layout.h_pad"] * self.figure.dpi
+        needed = max(above + below + ticks, y_label) + 2 * pad
+        return math.ceil(needed / self.devicePixelRatioF())
 
 
 class TimeSeriesPlotWidget(PostsToQtThread, QWidget):

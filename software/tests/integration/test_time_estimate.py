@@ -12,6 +12,7 @@ import time
 
 import pytest
 
+from fluidics.control.config import FlowSensorConfig
 from fluidics.control.controller import FluidControllerSimulation
 from fluidics.time_estimate import (SET_TEMPERATURE_SECONDS, VALVE_MOVE_SECONDS,
                                     _op_seconds, estimate_run_time, plan_run)
@@ -127,6 +128,33 @@ class TestTheReplayIsSafe:
             seconds, durations = estimate_run_time(flow_cell_config, [bad, FLOW_CELL_STEP])
         assert len(durations) == 2 and seconds > 0
         assert "Could not price the run" in caplog.text
+
+    def test_the_replay_builds_no_flow_sensors(self, flow_cell_config, caplog):
+        """An estimate is the pump's time; a sensor adds nothing to it, and a
+        simulated one starts a publish thread only to be closed. The replay
+        prices a rig without them, whatever the config says. Checked through
+        the sensor's own bring-up log line: a sensor that raised instead
+        would be a survivable failure to build_devices, and the estimate would
+        carry on -- so a raise here proves nothing."""
+        assert flow_cell_config.flow_sensors, "the fixture is meant to configure one"
+        with caplog.at_level(logging.INFO, logger="fluidics"):
+            seconds, _ = estimate_run_time(flow_cell_config, [FLOW_CELL_STEP])
+        assert seconds > 0
+        assert "Simulated flow sensor" not in caplog.text
+
+    def test_a_bring_up_finding_is_not_repeated_by_every_plan(self, open_chamber_config,
+                                                              caplog):
+        """Bring-up switches off a draw-protection mode nothing will act on and
+        says so once (test_devices). The replay rebuilds from the same config,
+        which still asks for the mode; it must not find it again at every
+        plan, or a GUI run would log the finding twice at each start."""
+        open_chamber_config.flow_sensors = [
+            FlowSensorConfig(index=1, name="syringe_draw", monitor="stop")]
+        step = {"type": "add_reagent", "fluidic_port": 1, "flow_rate": 500, "volume": 100}
+        with caplog.at_level(logging.WARNING, logger="fluidics"):
+            estimate_run_time(open_chamber_config, [step])
+            estimate_run_time(open_chamber_config, [step])
+        assert "Draw protection is configured" not in caplog.text
 
 
 class TestTheRunCarriesThePlan:
