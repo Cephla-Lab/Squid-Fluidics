@@ -1,9 +1,8 @@
 import logging
 
 from cobs import cobs
-import serial
 from ._def import *
-from .discovery import find_serial_port
+from .discovery import find_serial_port, open_serial_port
 from datetime import datetime
 import os
 from pathlib import Path
@@ -123,7 +122,8 @@ class Microcontroller():
         '''
         self.read_buffer = []
         port = find_serial_port(self.serial_number, "Fluid controller (Teensy)")
-        self.serial = serial.Serial(port, 2000000)
+        self.serial = open_serial_port(port, "Fluid controller (Teensy)",
+                                       baudrate=2000000)
         _logger.info('Teensy connected')
         return
     
