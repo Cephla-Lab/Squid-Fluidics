@@ -81,3 +81,29 @@ class TestAtomicWrite:
         umask = os.umask(0)
         os.umask(umask)
         assert (os.stat(path).st_mode & 0o777) == (0o666 & ~umask)
+
+    def test_windows_has_no_fchmod_and_a_save_needs_none(self, tmp_path,
+                                                         monkeypatch):
+        """os.fchmod is Unix-only before Python 3.13 and the rigs run
+        3.10, so on Windows every save raised AttributeError. The module
+        sees a stand-in rather than a patched os: os.name is what
+        pathlib picks its flavour by."""
+        import fluidics.files as files
+
+        class WindowsOs:
+            name = "nt"
+
+            def __getattr__(self, attr):
+                if attr == "fchmod":
+                    raise AttributeError(
+                        "module 'os' has no attribute 'fchmod'")
+                return getattr(os, attr)
+
+        monkeypatch.setattr(files, "os", WindowsOs())
+        path = tmp_path / "config.yaml"
+        path.write_text("a: 1")
+        with atomic_write(path) as f:
+            f.write("a: 2")
+        assert path.read_text() == "a: 2"
+        assert [p.name for p in tmp_path.iterdir()] == ["config.yaml"], \
+            "no temp left behind"
