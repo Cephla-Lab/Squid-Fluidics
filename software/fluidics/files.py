@@ -40,8 +40,8 @@ def atomic_write(path, encoding="utf-8"):
 
     The handle is a sibling temp file, os.replace'd onto `path` after
     the block; on any failure the temp is removed, `path` is untouched,
-    and the exception goes on. A file being replaced keeps its own
-    permissions; a new file gets the mode a plain open() would have
+    and the exception goes on. On POSIX a file being replaced keeps its
+    own permissions; a new file gets the mode a plain open() would have
     given it (mkstemp's private 0600 must not stick to a config or a
     report the operator reads back).
     """
@@ -53,7 +53,11 @@ def atomic_write(path, encoding="utf-8"):
         # anywhere below -- the mode setup included -- must close it, not
         # strand it open while the name is unlinked.
         with open(fd, "w", encoding=encoding) as f:
-            os.fchmod(f.fileno(), _mode_for(path))
+            # POSIX only, like the problem it solves: on Windows access
+            # is the directory's ACL and mkstemp's mode restricts
+            # nothing -- and os.fchmod is not there before Python 3.13.
+            if os.name == "posix":
+                os.fchmod(f.fileno(), _mode_for(path))
             yield f
         os.replace(tmp, path)
     except BaseException:
