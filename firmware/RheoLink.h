@@ -62,6 +62,16 @@ enum RheoLinkCommand_t {
 #define RheoLink_TIMEOUT 2000
 #define RheoLink_MAX_RETRIES 5
 #define RheoLink_RETRY_DELAY 10
+// For status polls: one attempt. A valve NACKs for the whole of a move
+// (IDEX RheoLink protocol 2321383F, "Busy Status"), so a poll that is not
+// answered is expected, and the next sensor tick asks again.
+#define RheoLink_NO_RETRY 0
+
+// read_register()'s codes for "the valve did not answer over I2C" (31-36).
+// While a valve moves these mean busy, not failed.
+inline bool RheoLink_no_answer(uint8_t status) {
+  return status >= 31 && status <= 36;
+}
 
 class RheoLink {
   public:
@@ -72,8 +82,12 @@ class RheoLink {
     // state machine (INTERNAL_STATE_MOVING_ROTARY), which polls
     // read_register(RheoLink_STATUS) once per sensor tick -- a delay loop
     // here would stall control loops, telemetry, and command reception.
-    uint8_t send_command(RheoLinkCommand_t cmd, uint8_t data = RheoLink_DUMMY_DATA);
-    uint8_t read_register(RheoLinkCommand_t target);
+    // Both give up after max_retries retries (RheoLink_RETRY_DELAY apart)
+    // and return the error.
+    uint8_t send_command(RheoLinkCommand_t cmd, uint8_t data = RheoLink_DUMMY_DATA,
+                         uint8_t max_retries = RheoLink_MAX_RETRIES);
+    uint8_t read_register(RheoLinkCommand_t target,
+                          uint8_t max_retries = RheoLink_MAX_RETRIES);
     uint8_t pos_min;
     uint8_t pos_max;
   private:
