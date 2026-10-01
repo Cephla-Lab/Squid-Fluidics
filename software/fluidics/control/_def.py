@@ -3,6 +3,10 @@ import numpy as np
 MCU_CMD_LENGTH = 15
 MCU_MSG_LENGTH = 30
 
+# Status-packet byte offsets, mirrored from firmware/bus_rules.h
+# (test_firmware_mirror.py compares them).
+VALVE_POS_OFFSETS = (6, 7, 8, 9, 10, 17)   # selector-valve slot -> byte
+
 # MCU - COMPUTER
 T_DIFF_COMPUTER_MCU_MISMATCH_FAULT_THRESHOLD_SECONDS = 3
 

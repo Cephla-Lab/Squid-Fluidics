@@ -59,35 +59,6 @@ class TestUintToBytes:
         assert result == [np.uint8(1), np.uint8(2), np.uint8(3), np.uint8(4)]
 
 
-class TestRawToPsi:
-    """Test the raw_to_psi conversion formula from get_mcu_status.
-
-    Formula: (raw - output_min) * (p_max - p_min) / (output_max - output_min) + p_min
-    With: output_min=0, output_max=16383, p_min=-15, p_max=15
-    """
-
-    @staticmethod
-    def raw_to_psi(raw_pressure):
-        return (
-            (raw_pressure - MCU_CONSTANTS._output_min)
-            * (MCU_CONSTANTS._p_max - MCU_CONSTANTS._p_min)
-            / (MCU_CONSTANTS._output_max - MCU_CONSTANTS._output_min)
-            + MCU_CONSTANTS._p_min
-        )
-
-    def test_min_raw_gives_min_psi(self):
-        result = self.raw_to_psi(0)
-        assert result == pytest.approx(-15.0)
-
-    def test_max_raw_gives_max_psi(self):
-        result = self.raw_to_psi(16383)
-        assert result == pytest.approx(15.0)
-
-    def test_midpoint_gives_zero_psi(self):
-        result = self.raw_to_psi(16383 / 2)
-        assert result == pytest.approx(0.0, abs=0.01)
-
-
 from fluidics.control.controller import FluidController, FluidControllerSimulation
 from fluidics.control._def import COMMAND_STATUS
 
@@ -779,3 +750,70 @@ class TestTheSimulationMatchesTheRealController:
         assert fc.wait_for_completion() == COMMAND_STATUS.COMPLETED_WITHOUT_ERRORS
         assert fc.send_command_blocking(CMD_SET.CLEAR) == \
             COMMAND_STATUS.COMPLETED_WITHOUT_ERRORS
+
+
+import io
+
+
+def _recording_controller():
+    """A bare controller whose outgoing frames land in fc.frames."""
+    fc = _bare_controller()
+    fc._init_status_state()
+    fc.cmd_uid = 0
+    fc.frames = []
+    fc.send_mcu_command = fc.frames.append
+    return fc
+
+
+class TestValveSlotsInThePacket:
+    def test_six_valves_with_the_sixth_at_byte_17(self):
+        msg = _make_packet()
+        for value, byte in enumerate((6, 7, 8, 9, 10, 17), start=1):
+            msg[byte] = value
+        parsed = _bare_controller()._parse_packet(msg)
+        assert parsed["selector_valves_pos"] == [1, 2, 3, 4, 5, 6]
+
+    def test_a_slot_with_no_valve_reads_0(self):
+        parsed = _bare_controller()._parse_packet(_make_packet())
+        assert parsed["selector_valves_pos"] == [0] * 6
+
+    def test_the_dead_pressure_fields_are_gone(self):
+        assert "pressures" not in _bare_controller()._parse_packet(_make_packet())
+
+
+class TestMeasurementLog:
+    def _logged_row(self, msg):
+        fc = _bare_controller()
+        fc.log_measurements = True
+        fc.measurement_file = io.StringIO()
+        fc.counter_measurement_file_flush = 0
+        fc._log_packet(fc._parse_packet(msg))
+        return fc.measurement_file.getvalue().rstrip("\n")
+
+    def test_every_row_has_a_field_for_each_header_column(self):
+        row = self._logged_row(_make_packet())
+        header = controller_module.MEASUREMENT_CSV_HEADER
+        assert len(row.split(",")) == len(header.split(","))
+
+    def test_the_header_names_six_valves_and_no_pressures(self):
+        header = controller_module.MEASUREMENT_CSV_HEADER.split(",")
+        assert [h for h in header if h.startswith("sv")] == [f"sv{i}" for i in range(6)]
+        assert not {"p0", "p1", "p2", "p3"} & set(header)
+
+
+class TestInitializeRotaryEncoding:
+    def test_two_arguments_send_the_five_byte_frame(self):
+        fc = _recording_controller()
+        fc.send_command(CMD_SET.INITIALIZE_ROTARY, 1, 10)
+        assert [int(b) for b in fc.frames[0]] == [0, 1, CMD_SET.INITIALIZE_ROTARY, 1, 10]
+
+    def test_an_address_adds_a_sixth_byte(self):
+        fc = _recording_controller()
+        fc.send_command(CMD_SET.INITIALIZE_ROTARY, 1, 10, 0x1A)
+        assert [int(b) for b in fc.frames[0]] == [0, 1, CMD_SET.INITIALIZE_ROTARY, 1, 10, 0x1A]
+
+
+class TestSimulationValveSlots:
+    def test_the_simulation_has_six_valve_slots(self):
+        fc = FluidControllerSimulation(serial_number="test")
+        assert sorted(fc.get_mcu_status()["selector_valves_pos"]) == list(range(6))

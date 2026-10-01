@@ -69,7 +69,7 @@ RheoLink::RheoLink()
   -----------------------------------------------------------------------------
   DESCRIPTION: begin() initializes the I2C bus
 
-  OPERATION:   We set the I2C address. The Wire library handles setting the low bit for read/write so we shift the address down a bit. Then, we store the I2C bus object pointer to a local variable
+  OPERATION:   We store the address (shifted for Wire), then probe the valve with retries; the valve counts as initialized only if the probe is acknowledged.
 
   ARGUMENTS:
       TwoWire *w:      Pointer to TwoWire object for I2C
@@ -95,17 +95,33 @@ RheoLink::RheoLink()
 uint8_t RheoLink::begin(TwoWire &w, uint8_t address, uint8_t p_min, uint8_t p_max) {
 
   address_ = address >> 1;
-  
+
   w_ = &w;
   w_->begin();
-  w_->beginTransmission(address_);
-
-  init_ = true;
 
   pos_min = p_min;
   pos_max = p_max;
 
-  return w_->endTransmission(address_);
+  // Initialized only if the valve answers. A valve NACKs while it is moving
+  // (IDEX RheoLink protocol 2321383F, "Busy Status"), so the probe gets the
+  // retry budget send_command() uses. Marking a silent valve initialized made
+  // every later status read on the shared bus spend that budget again.
+  uint8_t err;
+  uint8_t retry_count = 0;
+  do {
+    w_->beginTransmission(address_);
+    err = w_->endTransmission();
+    if (err == 0) {
+      break;
+    }
+    if (retry_count < RheoLink_MAX_RETRIES) {
+      delay(RheoLink_RETRY_DELAY);
+    }
+    retry_count++;
+  } while (retry_count <= RheoLink_MAX_RETRIES);
+
+  init_ = (err == 0);
+  return err;
 }
 /*
   -----------------------------------------------------------------------------

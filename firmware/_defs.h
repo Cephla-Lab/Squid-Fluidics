@@ -27,9 +27,13 @@
 #define FLUIDSENSORBACK_C  31
 
 #define SELECTORVALVE_WIRE Wire
-#define SELECTORVALVE_QTY  2     // Only 2 are actually installed here
-#define SELECTORVALVE_MAX  5     // Support up to 5 valves  
-const uint8_t SELECTORVALVE_ADDRS[] = {0x0E, 0x10, 0x12, 0x00, 0x00}; // 0x00 is dummy address
+// Six slots on every build -- the v4s board has six valve ports, and an
+// unused slot costs one object: a slot talks to its valve only once
+// INITIALIZE_ROTARY got an ACK. Addresses are the 8-bit write form (see
+// bus_rules.h); INITIALIZE_ROTARY may give a slot another one.
+#define SELECTORVALVE_MAX  6
+#define SELECTORVALVE_QTY  SELECTORVALVE_MAX
+const uint8_t SELECTORVALVE_ADDRS[SELECTORVALVE_MAX] = {0x0E, 0x10, 0x12, 0x14, 0x16, 0x18};
 
 #define SLF3X_WIRE0   Wire
 #define SLF3X_WIRE1   Wire1

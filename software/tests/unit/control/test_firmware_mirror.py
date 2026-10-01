@@ -77,6 +77,13 @@ def parse_define(header, name):
         return float(literal)           # 1000.0, 10.0 -- == is numeric anyway
 
 
+def parse_array(header, name):
+    """The integer elements of one `const <type> NAME[...] = {...};`."""
+    m = re.search(rf"\b{name}\s*\[[^\]]*\]\s*=\s*\{{(.*?)\}}", _read(header), re.S)
+    assert m, f"array {name} not found in firmware/{header}"
+    return [int(x.strip(), 0) for x in m.group(1).split(",") if x.strip()]
+
+
 def _members(cls):
     return {k: v for k, v in vars(cls).items()
             if not k.startswith("_") and isinstance(v, int)}
@@ -135,3 +142,26 @@ class TestScalarMirrors:
     def test_scalar_matches_firmware(self, py_name, py_value, header, c_name):
         assert py_value == parse_define(header, c_name), (
             f"{py_name} != firmware/{header}:{c_name}")
+
+
+from fluidics.control.valve_address import (
+    DEFAULT_VALVE_ADDRESSES, MAX_VALVES, VALVE_ADDR_MAX, VALVE_ADDR_MIN)
+
+
+class TestPacketAndAddressMirrors:
+    """The status-packet offsets and valve-address rules, firmware/bus_rules.h
+    and _defs.h against the host."""
+
+    def test_valve_status_bytes(self):
+        assert list(_def.VALVE_POS_OFFSETS) == parse_array("bus_rules.h", "VALVE_POS_OFFSET")
+
+    def test_default_valve_addresses(self):
+        assert list(DEFAULT_VALVE_ADDRESSES) == parse_array("_defs.h", "SELECTORVALVE_ADDRS")
+
+    def test_valve_slot_count(self):
+        assert MAX_VALVES == parse_define("_defs.h", "SELECTORVALVE_MAX")
+        assert MAX_VALVES == len(_def.VALVE_POS_OFFSETS)
+
+    def test_valve_address_range(self):
+        assert VALVE_ADDR_MIN == parse_define("bus_rules.h", "VALVE_ADDR_MIN")
+        assert VALVE_ADDR_MAX == parse_define("bus_rules.h", "VALVE_ADDR_MAX")
