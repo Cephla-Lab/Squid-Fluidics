@@ -30,3 +30,15 @@ class TestFlowSensorCollision:
     @pytest.mark.parametrize("addr", [0x0E, 0x12, 0x14, 0x16, 0x18, 0x1A])
     def test_other_addresses_are_clear(self, addr):
         assert not conflicts_with_flow_sensor(addr)
+
+
+from fluidics.control.valve_address import effective_address
+
+
+class TestEffectiveAddress:
+    def test_the_slot_default_without_a_configured_address(self):
+        assert effective_address(1) == 0x10
+        assert effective_address(1, {0: 0x1C}) == 0x10
+
+    def test_a_configured_address_wins(self):
+        assert effective_address(1, {1: 0x1A}) == 0x1A

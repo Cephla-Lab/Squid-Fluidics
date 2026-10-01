@@ -3,6 +3,7 @@ import logging
 from ..errors import DeviceError, RunControl
 from ._def import CMD_SET
 from .config import available_port_count
+from .valve_address import effective_address
 
 _logger = logging.getLogger(__name__)
 
@@ -17,7 +18,16 @@ class SelectorValve():
         sv = self.config.reagent_selection.selector_valves
         self.tubing_fluid_amount_ul = sv.tubing_fluid_amount_to_valve_ul[valve_id]
         self.number_of_ports = sv.number_of_ports[valve_id]
-        self.fc.send_command(CMD_SET.INITIALIZE_ROTARY, valve_id, self.number_of_ports)
+        addresses = sv.i2c_addresses or {}
+        self.i2c_address = effective_address(valve_id, addresses)
+        if valve_id in addresses:
+            self.fc.send_command(CMD_SET.INITIALIZE_ROTARY, valve_id,
+                                 self.number_of_ports, addresses[valve_id])
+        else:
+            # The two-argument form: the firmware's default for this slot,
+            # and the only form firmware predating host-set addresses knows.
+            self.fc.send_command(CMD_SET.INITIALIZE_ROTARY, valve_id,
+                                 self.number_of_ports)
         self.open(self.position)
         _logger.info("Selector valve id = %s initialized.", valve_id)
 
@@ -33,6 +43,14 @@ class SelectorValve():
         self.fc.send_command(CMD_SET.SET_ROTARY_VALVE, self.id, port)
         self.fc.wait_for_completion(run_control=run_control)
         current_position = self.get_current_position()
+        if current_position == 0:
+            # The firmware reports 0 for a slot whose valve never answered
+            # INITIALIZE_ROTARY: unplugged, unpowered, or at another address.
+            self.position = 0
+            raise DeviceError(
+                f"Selector valve {self.id} is not responding at I2C address "
+                f"0x{self.i2c_address:02X} -- check its signal cable, its 24 V "
+                "power, and that the valve is set to that address")
         if current_position != port:
             self.position = current_position    # the truth the readback gave
             raise DeviceError(f"Selector valve {self.id}: at position "

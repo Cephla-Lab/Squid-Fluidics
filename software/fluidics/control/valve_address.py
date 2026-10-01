@@ -31,3 +31,11 @@ def conflicts_with_flow_sensor(addr):
     """True when a valve at `addr` puts the flow sensor's address on the wire
     (0x10 >> 1 == 0x08)."""
     return (addr >> 1) == FLOW_SENSOR_ADDRESS
+
+
+def effective_address(valve_id, i2c_addresses=None):
+    """The address valve `valve_id` is driven at: its configured one, else
+    its slot's default."""
+    if i2c_addresses and valve_id in i2c_addresses:
+        return i2c_addresses[valve_id]
+    return DEFAULT_VALVE_ADDRESSES[valve_id]

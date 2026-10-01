@@ -9,6 +9,8 @@ from typing import Dict, List, Literal, Optional
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .valve_address import MAX_VALVES, effective_address, is_valid_valve_address
+
 
 DEFAULT_CONFIG_PATHS = ("./config.yaml", "./config.json")
 
@@ -57,6 +59,10 @@ class SelectorValvesConfig(_StrictModel):
     tubing_fluid_amount_to_valve_ul: Dict[int, int]
     name_mapping: Optional[Dict[str, str]] = None
     tubing_fluid_amount_ul: Dict[str, int]
+    # A valve's I2C address (8-bit form) when it is not its slot's default
+    # (valve_address.DEFAULT_VALVE_ADDRESSES). Set after moving a valve with
+    # readdress_valve.py -- e.g. off 0x10 for a flow sensor on J20.
+    i2c_addresses: Optional[Dict[int, int]] = None
 
     @model_validator(mode='after')
     def _check_valve_id_consistency(self):
@@ -74,6 +80,33 @@ class SelectorValvesConfig(_StrictModel):
                 raise ValueError(
                     f"{field_name} keys don't match valve_ids: {', '.join(parts)}"
                 )
+        return self
+
+    @model_validator(mode='after')
+    def _check_valve_addresses(self):
+        for valve_id in self.valve_ids:
+            if not 0 <= valve_id < MAX_VALVES:
+                raise ValueError(
+                    f"valve id {valve_id} is out of range: the controller has "
+                    f"valve slots 0-{MAX_VALVES - 1}")
+        given = self.i2c_addresses or {}
+        unlisted = sorted(set(given) - set(self.valve_ids))
+        if unlisted:
+            raise ValueError(f"i2c_addresses names valves not in valve_ids: {unlisted}")
+        for valve_id, addr in given.items():
+            if not is_valid_valve_address(addr):
+                raise ValueError(
+                    f"i2c_addresses.{valve_id} = 0x{addr:02X} is not a RheoLink "
+                    "address: even, 0x0E-0xFE")
+        seen = {}
+        for valve_id in self.valve_ids:
+            addr = effective_address(valve_id, given)
+            if addr in seen:
+                raise ValueError(
+                    f"valves {valve_id} and {seen[addr]} would both be at I2C "
+                    f"address 0x{addr:02X}; give one of them another address in "
+                    "i2c_addresses")
+            seen[addr] = valve_id
         return self
 
 
