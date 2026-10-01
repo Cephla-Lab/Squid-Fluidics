@@ -166,9 +166,15 @@ class TecanAPISerial(TecanAPI):
         if self.ser_port not in reg:
             reg[port] = {}
             reg[port]['info'] = {k: v for k, v in self.ser_info.items()}
+            # LOCAL PATCH (Squid-Fluidics): exclusive=True, to match
+            # fluidics.control.discovery.open_serial_port. Two programs on
+            # one port both get corrupt data, and this is the port that
+            # moves liquid: a stolen reply here is a TecanAPITimeout partway
+            # through a plunger move, retried silently by _sendRcv above.
             reg[port]['_ser'] = serial.Serial(port=port,
                                     baudrate=reg[port]['info']['baud'],
-                                    timeout=reg[port]['info']['timeout'])
+                                    timeout=reg[port]['info']['timeout'],
+                                    exclusive=True)
             reg[port]['_devices'] = [self.id_]
         else:
             if len(set(self.ser_info.items()) &
