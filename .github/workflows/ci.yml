@@ -76,3 +76,7 @@ jobs:
       - name: Build firmware
         run: pio run
         working-directory: firmware
+
+      - name: Test firmware bus rules (native)
+        run: pio test -e native
+        working-directory: firmware
