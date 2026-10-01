@@ -841,7 +841,11 @@ void onPacketReceived(const uint8_t* buffer, size_t size) {
         }
         uint8_t max_pos = buffer[4];
         uint8_t addr = (size == 6) ? buffer[5] : SELECTORVALVE_ADDRS[idx];
-        if (!valve_address_valid(addr) || valve_slot_at(addr, idx) >= 0) {
+        // The controller keeps its slots across host sessions. Drop this
+        // slot's old state first, so a refused request never leaves an earlier
+        // session's address and pos_max live behind a host that moves on.
+        selectorvalves[idx].deinit();
+        if (!valve_address_valid(addr)) {
           execution_status = CMD_INVALID;
           return;
         }
@@ -849,6 +853,15 @@ void onPacketReceived(const uint8_t* buffer, size_t size) {
         if (flow_sensor_on_valve_bus() && valve_address_conflicts(addr, SLF3X_ADDRESS)) {
           execution_status = CMD_INVALID;
           return;
+        }
+        // Another slot holding this address holds it from an earlier
+        // configuration -- the host's config admits no duplicates -- so the
+        // newest INITIALIZE_ROTARY wins. Refusing it instead left the stale
+        // slot driving this valve when two valves swapped addresses. The
+        // dropped slot reports 0 until the host initializes it again.
+        int8_t holder = valve_slot_at(addr, idx);
+        if (holder >= 0) {
+          selectorvalves[holder].deinit();
         }
         uint8_t result = selectorvalves[idx].begin(SELECTORVALVE_WIRE, addr, 1, max_pos);
         if (result == 0) {
