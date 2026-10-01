@@ -84,18 +84,23 @@ reagent_selection:
       port_26: 700
       port_27: 900
       port_28: 900
+    # Optional: a valve's I2C address (8-bit form: even, 0x0E-0xFE) when it is
+    # not its slot's default (0x0E, 0x10, 0x12, 0x14, 0x16, 0x18 for valve ids
+    # 0-5). Set it after moving a valve with readdress_valve.py.
+    # i2c_addresses:
+    #   1: 0x1A
   common_tubing_fluid_amount_ul: 800
 # Optional -- omit the whole section if no flow sensor is fitted.
 #
 # index is the sensor's physical position on the board, which is its I2C bus
-# and fixes which packet bytes carry it: 1 = Wire1 = bytes 23-24, 2 = Wire2 =
-# bytes 25-26. Bus 0 is not supported; it carries the selector valves, whose
-# transactions would stall flow reads during a valve move.
+# and fixes which packet bytes carry it: 1 = Wire1 (J15) = bytes 23-24,
+# 2 = Wire2 (J17) = bytes 25-26, 0 = Wire (J20) = bytes 15-16. Bus 0 is the
+# selector valves' bus: a sensor there needs every valve off I2C address 0x10
+# (the sensor's own 0x08 on the wire) -- see i2c_addresses above.
 #
-# One or two sensors, in any combination. A single sensor may sit at index 2
-# with nothing at index 1 -- it reads bytes 25-26 and 23-24 report no sensor.
-# Note only index 1 feeds the firmware's closed-loop flow control and the
-# CLEAR_LINES guard; a sensor at index 2 is read and plotted but not fed back.
+# Up to three sensors, in any combination; an index with no sensor reports no
+# reading. Only index 1 feeds the firmware's closed-loop flow control and the
+# CLEAR_LINES guard; sensors at index 2 and 0 are read and plotted, not fed back.
 flow_sensors:
 - index: 1
   name: syringe_draw

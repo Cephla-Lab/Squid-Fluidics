@@ -65,6 +65,8 @@ Communicates with Teensy at 2,000,000 baud using COBS framing. Commands are 15-b
 
 `fluidics/control/_def.py` defines `CMD_SET`, `COMMAND_STATUS`, and `VALVE_POSITIONS` — these **must stay in sync** with `firmware/_defs.h` enums (`SerialCommands_t`, `CommandExecution_t`, `ValvesStates_t`).
 
+So do `VALVE_POS_OFFSETS` / `FLOW_SLOT_OFFSETS` (`firmware/bus_rules.h`) and the valve-address constants in `fluidics/control/valve_address.py` (`SELECTORVALVE_ADDRS`, `SELECTORVALVE_MAX`, `SLF3X_ADDRESS`); `tests/unit/control/test_firmware_mirror.py` checks all of them.
+
 ### Hardware Abstraction Layers
 
 Each hardware class has a `*Simulation` counterpart in the same file:
