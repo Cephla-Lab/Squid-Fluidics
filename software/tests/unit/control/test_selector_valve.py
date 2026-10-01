@@ -228,3 +228,45 @@ class TestAnUnresponsiveValve:
         with pytest.raises(DeviceError,
                            match=r"Selector valve 1 is not responding at I2C address 0x10"):
             valve.open(2)
+
+
+class _InitStatusController(FluidControllerSimulation):
+    """A simulated controller whose INITIALIZE_ROTARY answers `init_status`."""
+
+    def __init__(self, init_status):
+        super().__init__(serial_number="test")
+        self.COMMAND_SECONDS = 0
+        self.init_status = init_status
+
+    def wait_for_completion(self, timeout=30, run_control=None):
+        if self.sent and self.sent[-1][0] == CMD_SET.INITIALIZE_ROTARY:
+            return self.init_status
+        return super().wait_for_completion(timeout, run_control)
+
+
+class TestAValveIsInitializedBeforeItMoves:
+    def _valve(self, fixtures_dir, init_status, i2c_addresses=None):
+        from fluidics.control.selector_valve import SelectorValve
+        config = load_config(str(fixtures_dir / "flow_cell_config.yaml"))
+        config.reagent_selection.selector_valves.i2c_addresses = i2c_addresses
+        fc = _InitStatusController(init_status)
+        return SelectorValve, fc, config
+
+    def test_a_refused_initialization_raises_before_any_move(self, fixtures_dir):
+        """Firmware older than host-set addresses rejects the address byte and
+        keeps whatever the slot held before; a move would drive that valve and
+        its position readback would agree."""
+        from fluidics.control._def import COMMAND_STATUS
+        SelectorValve, fc, config = self._valve(
+            fixtures_dir, COMMAND_STATUS.CMD_INVALID, {0: 0x1A})
+        with pytest.raises(DeviceError, match=r"refused.*0x1A.*reflash"):
+            SelectorValve(fc, config, 0)
+        assert not [s for s in fc.sent if s[0] == CMD_SET.SET_ROTARY_VALVE]
+
+    def test_an_unanswered_initialization_raises_before_any_move(self, fixtures_dir):
+        from fluidics.control._def import COMMAND_STATUS
+        SelectorValve, fc, config = self._valve(
+            fixtures_dir, COMMAND_STATUS.CMD_EXECUTION_ERROR)
+        with pytest.raises(DeviceError, match=r"Selector valve 1 is not responding at I2C address 0x10"):
+            SelectorValve(fc, config, 1)
+        assert not [s for s in fc.sent if s[0] == CMD_SET.SET_ROTARY_VALVE]
