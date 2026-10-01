@@ -834,3 +834,10 @@ class TestFlowSlotsInThePacket:
         parsed = _bare_controller()._parse_packet(msg)
         assert parsed["flowrates_raw"][2] == -1
         assert parsed["selector_valves_pos"][5] == 4
+
+
+class TestSetRotaryAddressEncoding:
+    def test_from_and_to_follow_the_command(self):
+        fc = _recording_controller()
+        fc.send_command(CMD_SET.SET_ROTARY_ADDRESS, 0x10, 0x1A)
+        assert [int(b) for b in fc.frames[0]] == [0, 1, 24, 0x10, 0x1A]

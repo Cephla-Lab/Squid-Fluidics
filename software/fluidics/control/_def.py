@@ -76,6 +76,7 @@ class CMD_SET:
   REMOVE_ALL_MEDIUM            = 21
   DELAY_MS                     = 22
   EJECT_MEDIUM                 = 23
+  SET_ROTARY_ADDRESS           = 24
 
 class COMMAND_STATUS:
   COMPLETED_WITHOUT_ERRORS  = 0

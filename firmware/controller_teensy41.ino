@@ -1443,6 +1443,49 @@ void onPacketReceived(const uint8_t* buffer, size_t size) {
         time_cmd_operation = 0;
       }
       break;
+    case SET_ROTARY_ADDRESS: {
+        // [uid, uid, cmd, from_addr, to_addr], 8-bit write form. A bench
+        // operation (software/readdress_valve.py) with one valve on the bus:
+        // sends RheoLink 'N'. IDEX applies the new address only after the
+        // valve's driver board resets (protocol 2321383F), so this neither
+        // waits nor verifies -- the tool does, after a power cycle.
+        if (size != 5) {
+          state = INTERNAL_STATE_IDLE;
+          execution_status = CMD_INVALID;
+          return;
+        }
+        if (state != INTERNAL_STATE_IDLE) {
+          // Busy: refuse without disturbing the operation in progress.
+          execution_status = CMD_INVALID;
+          return;
+        }
+        uint8_t from_addr = buffer[3];
+        uint8_t to_addr = buffer[4];
+        if (!valve_address_valid(from_addr) || !valve_address_valid(to_addr)
+            || from_addr == to_addr
+            || valve_address_conflicts(to_addr, SLF3X_ADDRESS)
+            || valve_slot_at(to_addr, -1) >= 0) {
+          execution_status = CMD_INVALID;
+          return;
+        }
+        RheoLink target;
+        uint8_t err = target.begin(SELECTORVALVE_WIRE, from_addr, 1, 1);
+        if (err == 0) {
+          err = target.send_command(RheoLink_NEW_ADDR, to_addr);
+        }
+        if (err != 0) {
+          execution_status = CMD_EXECUTION_ERROR;
+          return;
+        }
+        // The valve stops answering at from_addr once it resets; a slot still
+        // pointed there would only poll silence.
+        int8_t stale = valve_slot_at(from_addr, -1);
+        if (stale >= 0) {
+          selectorvalves[stale].deinit();
+        }
+        execution_status = COMPLETED_WITHOUT_ERRORS;
+      }
+      break;
     default:
       state = INTERNAL_STATE_IDLE;
       execution_status = CMD_INVALID;

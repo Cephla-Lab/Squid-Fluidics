@@ -131,5 +131,6 @@ enum SerialCommands_t {
   VOL_INTEGRATE_SETTING        = 20,
   REMOVE_ALL_MEDIUM            = 21,
   DELAY_MS                     = 22,
-  EJECT_MEDIUM                 = 23
+  EJECT_MEDIUM                 = 23,
+  SET_ROTARY_ADDRESS           = 24
 };

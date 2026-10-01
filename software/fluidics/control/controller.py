@@ -880,6 +880,14 @@ class FluidController(Microcontroller, PacketSubscribers):
             command_array.append(dt_2)
             command_array.append(dt_1)
             command_array.append(dt_0)
+        elif command == CMD_SET.SET_ROTARY_ADDRESS:
+            # Re-address one selector valve (readdress_valve.py): its current
+            # and its new I2C address, 8-bit write form.
+            assert len(args) == 2, "Need the current and the new I2C address"
+            for addr in args:
+                assert np.uint8(addr) == addr, "I2C address is not uint8"
+            command_array.append(np.uint8(args[0]))
+            command_array.append(np.uint8(args[1]))
         else:
             # If we don't recognize the command, raise an error
             raise Exception("Command not recognized")
