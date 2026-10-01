@@ -215,7 +215,11 @@ def build_devices(config, simulation=False, on_issue=None, run_control=None,
     flow_sensors = []
     try:
         controller.begin()
-        controller.send_command(CMD_SET.CLEAR)
+        # Waited on: CLEAR homes whatever valves a still-powered controller
+        # kept from the last session, and a moving valve does not answer its
+        # address (IDEX RheoLink protocol), so initializing one during that
+        # home would fail it as "not responding".
+        controller.send_command_blocking(CMD_SET.CLEAR)
 
         try:
             flow_sensors = start_flow_sensors(controller, config, simulation)
