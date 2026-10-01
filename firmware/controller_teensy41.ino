@@ -502,9 +502,12 @@ void sendStatusPacket() {
   buffer_tx[3] = execution_status;
   buffer_tx[4] = state;
 
+#ifndef BOARD_V4S
+  // v4s has no bubble sensors; their pins float, so byte 5 stays 0.
   uint8_t fs1 = fluidsensor_front.read();
   uint8_t fs2 = fluidsensor_back.read();
   buffer_tx[5] = byte((fs1 << 4) | fs2);
+#endif
 
   // Selector valves. A slot whose valve never answered reports 0 -- not the
   // driver's 22 ("not initialized") -- which the host reads as "no valve".
@@ -513,6 +516,8 @@ void sendStatusPacket() {
         ? byte(selectorvalves[i].read_register(RheoLink_STATUS)) : 0;
   }
 
+#ifndef BOARD_V4S
+  // v4s has no solenoid driver or disc pump; bytes 11-14 stay 0.
   buffer_tx[11] =  byte(valves.local_state >> 8);
   buffer_tx[12] =  byte(valves.local_state & 0xFF);
 
@@ -520,6 +525,7 @@ void sendStatusPacket() {
   uint16_t normed_power = static_cast<uint16_t>(intermediate);
   buffer_tx[13] = byte(normed_power >> 8);
   buffer_tx[14] = byte(normed_power & 0xFF);
+#endif
 
   // debug: include peak pressure and target pressure
   if (false) {
@@ -578,6 +584,33 @@ void disableControlLoops() {
 }
 
 
+// What this build's board can carry out. FLUIDICS V4 SIMPLE (BOARD_V4S) has
+// only the I2C buses: no solenoid driver, bubble sensors, pressure sensors or
+// disc pump -- their pins are unconnected. A whitelist, so a command added
+// later is refused on v4s until someone decides it belongs there.
+bool board_supports(SerialCommands_t cmd) {
+#ifdef BOARD_V4S
+  switch (cmd) {
+    case CLEAR:
+    case INITIALIZE_FLOW_SENSOR:
+    case INITIALIZE_ROTARY:
+    case INITIALIZE_BANG_BANG_PARAMS:   // stores parameters only
+    case INITIALIZE_PID_PARAMS:         // stores parameters only
+    case SET_ROTARY_VALVE:
+    case STOP_CLOSED_LOOP:
+    case VOL_INTEGRATE_SETTING:
+    case DELAY_MS:
+    case SET_ROTARY_ADDRESS:
+      return true;
+    default:
+      return false;
+  }
+#else
+  (void)cmd;
+  return true;
+#endif
+}
+
 // We process the incoming command here
 void onPacketReceived(const uint8_t* buffer, size_t size) {
   // If we don't have enough bytes, return out before having a buffer overflow
@@ -590,11 +623,18 @@ void onPacketReceived(const uint8_t* buffer, size_t size) {
   cmd_uid = (buffer[0] << 8) + buffer[1];
   // we got a new command!
   time_since_cmd_started = 0;
+  if (!board_supports(cmd_rxed)) {
+    state = INTERNAL_STATE_IDLE;
+    execution_status = CMD_INVALID;
+    return;
+  }
   switch (cmd_rxed) {
     case CLEAR: {
         // Stop all operations
         disableControlLoops();
-        valves.clear_all();
+#ifndef BOARD_V4S
+        valves.clear_all();   // v4s has no solenoid driver behind pins 2/3/10
+#endif
         // Home every selector valve at once: the sends are quick I2C
         // writes, and the waiting happens in the state machine, in
         // parallel -- not one blocking (up to 8 s) wait per valve inside
