@@ -49,6 +49,10 @@ RheoLink selectorvalves[SELECTORVALVE_QTY];
 uint8_t  rotary_target[SELECTORVALVE_QTY] = {0};
 uint8_t  rotary_retries[SELECTORVALVE_QTY];
 uint32_t rotary_attempt_ms[SELECTORVALVE_QTY];
+// False while a target still waits for its first send: CLEAR found the valve
+// not answering -- moving, most likely -- and the state machine sends once it
+// answers, within the same total budget.
+bool     rotary_sent[SELECTORVALVE_QTY];
 #define ROTARY_MAX_RETRIES 3
 
 // SLF3X flowrate sensor
@@ -131,7 +135,7 @@ void loop() {
     // SELECTOR VALVE STATUS
     uint8_t selectorvalve_status[SELECTORVALVE_QTY];
     for (uint8_t i = 0; i < SELECTORVALVE_QTY; i++) {
-      selectorvalve_status[i] = byte(selectorvalves[i].read_register(RheoLink_STATUS));
+      selectorvalve_status[i] = byte(selectorvalves[i].read_register(RheoLink_STATUS, RheoLink_NO_RETRY));
     }
     // PRESSURE
     // Sized SSCX_MAX, not SSCX_QTY: indices 0 and 1 are read unconditionally
@@ -228,21 +232,41 @@ void loop() {
       case INTERNAL_STATE_MOVING_ROTARY: {
           // Each active valve is judged the way the old blocking wait in
           // set_position() judged it, once per tick instead of in a delay
-          // loop: the target position ends its move; a status above pos_max
-          // (an error report) or a per-attempt timeout re-sends the
-          // position, up to the same four attempts in all. All active
-          // valves move in parallel -- CLEAR homes every valve at once.
+          // loop: the target position ends its move; an error the valve
+          // reports (a status above pos_max) or a per-attempt timeout
+          // re-sends the position, up to the same four attempts in all. A
+          // poll the valve did not answer is not an error report: a valve
+          // NACKs for the whole of a move, so it means "still moving", and
+          // only the timeout ends that wait. All active valves move in
+          // parallel -- CLEAR homes every valve at once.
           bool any_moving = false;
           bool failed = false;
           for (uint8_t i = 0; i < SELECTORVALVE_QTY; i++) {
             if (rotary_target[i] == 0) {
               continue;
             }
-            if (selectorvalve_status[i] == rotary_target[i]) {
+            uint8_t status = selectorvalve_status[i];
+            if (status == rotary_target[i]) {
               rotary_target[i] = 0;
               continue;
             }
-            if ((selectorvalve_status[i] > selectorvalves[i].pos_max)
+            bool busy = RheoLink_no_answer(status);
+            if (!rotary_sent[i]) {
+              // CLEAR found this valve busy: send as soon as it answers,
+              // within the budget of a full set of attempts.
+              if (!busy
+                  && selectorvalves[i].send_command(RheoLink_POS, rotary_target[i]) == 0) {
+                rotary_sent[i] = true;
+                rotary_attempt_ms[i] = millis();
+              }
+              else if ((millis() - rotary_attempt_ms[i])
+                       > (uint32_t)RheoLink_TIMEOUT * (ROTARY_MAX_RETRIES + 1)) {
+                failed = true;
+              }
+              any_moving = true;
+              continue;
+            }
+            if ((!busy && status > selectorvalves[i].pos_max)
                 || ((millis() - rotary_attempt_ms[i]) > RheoLink_TIMEOUT)) {
               if (rotary_retries[i] < ROTARY_MAX_RETRIES) {
                 rotary_retries[i]++;
@@ -476,7 +500,7 @@ void sendStatusPacket() {
 
   // Read from selector valves
   for (uint8_t i = 0; i < SELECTORVALVE_QTY; i++) {
-    buffer_tx[6 + i] =  byte(selectorvalves[i].read_register(RheoLink_STATUS));
+    buffer_tx[6 + i] =  byte(selectorvalves[i].read_register(RheoLink_STATUS, RheoLink_NO_RETRY));
   }
   // Fill remaining entries of buffer with 0
   for (uint8_t i = SELECTORVALVE_QTY; i < SELECTORVALVE_MAX; i++) {
@@ -590,11 +614,19 @@ void onPacketReceived(const uint8_t* buffer, size_t size) {
         for (uint8_t i = 0; i < SELECTORVALVE_QTY; i++) {
           rotary_target[i] = 0;
           uint8_t send_err = selectorvalves[i].send_command(RheoLink_POS, 1);
-          err |= send_err;
-          if (send_err == 0) {
+          // A NACK (Wire error 2 or 3) is a valve that does not answer --
+          // moving, most likely, if a move was interrupted. Arm it unsent:
+          // the state machine sends once it answers. Other failures (22, not
+          // initialized, included) still report at once.
+          bool not_answering = (send_err == 2 || send_err == 3);
+          if (send_err != 0 && !not_answering) {
+            err |= send_err;
+          }
+          else {
             rotary_target[i] = 1;
             rotary_retries[i] = 0;
             rotary_attempt_ms[i] = millis();
+            rotary_sent[i] = (send_err == 0);
             homing = true;
           }
         }
@@ -970,6 +1002,7 @@ void onPacketReceived(const uint8_t* buffer, size_t size) {
         rotary_target[idx] = pos;
         rotary_retries[idx] = 0;
         rotary_attempt_ms[idx] = millis();
+        rotary_sent[idx] = true;
         execution_status = IN_PROGRESS;
         state = INTERNAL_STATE_MOVING_ROTARY;
       }

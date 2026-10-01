@@ -135,7 +135,7 @@ uint8_t RheoLink::begin(TwoWire &w, uint8_t address, uint8_t p_min, uint8_t p_ma
   DEPENDENCIES: Wire.h
   -----------------------------------------------------------------------------
 */
-uint8_t RheoLink::send_command(RheoLinkCommand_t cmd, uint8_t data ) {
+uint8_t RheoLink::send_command(RheoLinkCommand_t cmd, uint8_t data, uint8_t max_retries) {
   uint8_t checksum;
   uint8_t err;
   uint8_t retry_count = 0;
@@ -166,13 +166,16 @@ uint8_t RheoLink::send_command(RheoLinkCommand_t cmd, uint8_t data ) {
       break;
     }
 
-    // If we have retries left, wait and try again
-    if (retry_count < RheoLink_MAX_RETRIES) {
+    // If we have retries left, wait and try again. The count goes up on
+    // every failed attempt: incremented only inside this if, it stopped at
+    // the limit while the while() stayed true, and a device that kept
+    // NACKing -- any valve, for the length of a move -- held the loop forever.
+    if (retry_count < max_retries) {
       delay(RheoLink_RETRY_DELAY);
-      retry_count++;
     }
+    retry_count++;
 
-  } while (retry_count <= RheoLink_MAX_RETRIES);
+  } while (retry_count <= max_retries);
   
   return err;
 }
@@ -204,12 +207,12 @@ uint8_t RheoLink::send_command(RheoLinkCommand_t cmd, uint8_t data ) {
   DEPENDENCIES: Wire.h
   -----------------------------------------------------------------------------
 */
-uint8_t RheoLink::read_register(RheoLinkCommand_t target){
+uint8_t RheoLink::read_register(RheoLinkCommand_t target, uint8_t max_retries){
   if (!init_){
     return 22;
   }
   
-  uint8_t err = this->send_command(target);
+  uint8_t err = this->send_command(target, 'x', max_retries);  // 'x': RheoLink_DUMMY_DATA
 
   // If there was a problem connecting, return an error
   if(err != 0){
@@ -229,13 +232,16 @@ uint8_t RheoLink::read_register(RheoLinkCommand_t target){
       break;
     }
 
-    // If we have retries left, wait and try again
-    if (retry_count < RheoLink_MAX_RETRIES) {
+    // If we have retries left, wait and try again. The count goes up on
+    // every failed attempt: incremented only inside this if, it stopped at
+    // the limit while the while() stayed true, and a device that kept
+    // NACKing -- any valve, for the length of a move -- held the loop forever.
+    if (retry_count < max_retries) {
       delay(RheoLink_RETRY_DELAY);
-      retry_count++;
     }
+    retry_count++;
 
-  } while (retry_count <= RheoLink_MAX_RETRIES);
+  } while (retry_count <= max_retries);
 
   // If we didn't get any data after all retries, return an error
   if(bytes_received == 0){
