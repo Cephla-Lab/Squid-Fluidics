@@ -841,3 +841,61 @@ class TestSetRotaryAddressEncoding:
         fc = _recording_controller()
         fc.send_command(CMD_SET.SET_ROTARY_ADDRESS, 0x10, 0x1A)
         assert [int(b) for b in fc.frames[0]] == [0, 1, 24, 0x10, 0x1A]
+
+
+
+class _InFlightTransport:
+    """The MCU end of the port, with the race that matters at bring-up.
+
+    For each frame written it queues the status packet already on its way --
+    the firmware's previous UID and a terminal status -- and then acts on the
+    frame: it completes the command, except CLEAR when `withhold_clear`, so a
+    wait that returns anyway was fooled by the in-flight packet. Queued
+    packets are published on the next status poll, after send_command has
+    recorded its publish sequence, as the reader thread would publish them.
+    No threads: the suite's fast clock would outrun them.
+    """
+
+    def __init__(self, fc, firmware_uid=0, withhold_clear=True):
+        self.fc = fc
+        self.firmware_uid = firmware_uid   # 0: the last session ended on CLEAR
+        self.withhold_clear = withhold_clear
+        self.queued = []
+        self._peek = fc._peek_status
+        fc._peek_status = self.peek
+
+    def __call__(self, frame):
+        uid = (int(frame[0]) << 8) + int(frame[1])
+        cmd = int(frame[2])
+        self.queued.append((self.firmware_uid, cmd))
+        self.firmware_uid = 0 if cmd == CMD_SET.CLEAR else uid
+        if not (cmd == CMD_SET.CLEAR and self.withhold_clear):
+            self.queued.append((self.firmware_uid, cmd))
+
+    def peek(self):
+        while self.queued:
+            uid, cmd = self.queued.pop(0)
+            self.fc._publish_status(self.fc._parse_packet(_make_packet(uid=uid, cmd=cmd)))
+        return self._peek()
+
+
+def _transport_controller(**kwargs):
+    fc = _bare_controller()
+    fc._init_status_state()
+    fc.cmd_uid = 0
+    fc.send_mcu_command = _InFlightTransport(fc, **kwargs)
+    return fc
+
+
+class TestClearIsCorrelated:
+    def test_a_packet_in_flight_when_clear_is_written_does_not_complete_it(self):
+        """The firmware reports UID 0 after every CLEAR and after a reset, so
+        the packet already on its way when a CLEAR is written looked exactly
+        like that CLEAR's completion."""
+        fc = _transport_controller()
+        with pytest.raises(TimeoutError, match=r"command 0 \(uid 0\)"):
+            fc.clear(timeout=0.3)
+
+    def test_clear_returns_on_its_own_completion(self):
+        fc = _transport_controller(withhold_clear=False)
+        assert fc.clear(timeout=1) == COMMAND_STATUS.COMPLETED_WITHOUT_ERRORS

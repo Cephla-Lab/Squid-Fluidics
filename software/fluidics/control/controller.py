@@ -8,6 +8,7 @@ from datetime import datetime
 import os
 from pathlib import Path
 import numpy as np
+import random
 import threading
 
 from ..subscribers import Subscribers  # noqa: F401  -- re-exported; it lived here first
@@ -907,6 +908,26 @@ class FluidController(Microcontroller, PacketSubscribers):
             self._seq_at_send = self._status_seq
         pass
 
+    def clear(self, timeout=30):
+        '''Send CLEAR and wait for its own completion.
+
+        The firmware reports UID 0 after every CLEAR and after a reset, so the
+        status packet already on its way when CLEAR is written -- left from an
+        earlier session's CLEAR, or a fresh boot -- looks exactly like this
+        CLEAR's completion, and the publish-sequence check cannot tell: it
+        only excludes packets read before the write. So a harmless command
+        with a random UID goes first. Once the MCU has answered it, the packet
+        in flight at the CLEAR carries that UID, and the only UID-0 packets
+        left are this CLEAR's. STOP_CLOSED_LOOP is that command: every
+        firmware has it, every board accepts it, and CLEAR repeats what it
+        does.
+        '''
+        self.cmd_uid = random.randrange(1, 0xFFFF)   # send_command adds 1
+        self.send_command(CMD_SET.STOP_CLOSED_LOOP)
+        self.wait_for_completion(timeout=timeout)
+        self.send_command(CMD_SET.CLEAR)
+        return self.wait_for_completion(timeout=timeout)
+
     def send_command_blocking(self, command, *args, timeout=30):
         '''Send a command, then write logs while waiting for it to complete.
 
@@ -960,6 +981,14 @@ class FluidControllerSimulation(PacketSubscribers):
 
     def send_command_blocking(self, command, *args, timeout=30):
         self.send_command(command, *args)
+        return self.wait_for_completion(timeout=timeout)
+
+    def clear(self, timeout=30):
+        """The real controller's clear(): its UID probe, then CLEAR, each
+        waited on."""
+        self.send_command(CMD_SET.STOP_CLOSED_LOOP)
+        self.wait_for_completion(timeout=timeout)
+        self.send_command(CMD_SET.CLEAR)
         return self.wait_for_completion(timeout=timeout)
 
     def wait_for_completion(self, timeout=30, run_control=None):

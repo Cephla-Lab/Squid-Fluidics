@@ -63,6 +63,9 @@ class FakeController:
         self.commands.append((command,) + args)
         return self.statuses.pop(0)
 
+    def clear(self, timeout=30):
+        return self.send_command_blocking(CMD_SET.CLEAR)
+
     def get_mcu_status(self):
         return {"selector_valves_pos": [self.position, 0, 0, 0, 0, 0]}
 
