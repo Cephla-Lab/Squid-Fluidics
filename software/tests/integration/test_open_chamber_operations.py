@@ -105,6 +105,25 @@ class TestOpenChamberVolumes:
         assert sp.executed[-1] == [("extract", 2, 1000, priming),
                                    ("dispense", 3, 1000, c)]
 
+    def test_use_ports_narrows_the_walk(self, open_chamber_rig):
+        """`priming_or_clean_up` has always taken `use_ports`, but this
+        dispatch never passed it -- so a caller asking for three ports
+        primed all ten, and only a direct call to the method worked.
+        MERFISHOperations passes it; these two were the odd ones out."""
+        ops, sp = open_chamber_rig
+        ops.process_sequence({"type": "priming", "fluidic_port": 10,
+                              "flow_rate": 1000, "volume": 1000,
+                              "use_ports": [2, 5, 7]})
+        # Dump, three port chains, final fill-and-dispense -- not twelve.
+        assert len(sp.executed) == 5
+
+    def test_use_ports_narrows_clean_up_too(self, open_chamber_rig):
+        ops, sp = open_chamber_rig
+        ops.process_sequence({"type": "clean_up", "fluidic_port": 10,
+                              "flow_rate": 1000, "volume": 1000,
+                              "use_ports": [2, 5]})
+        assert len(sp.executed) == 4
+
 
 class TestProcessSequence:
     def test_add_reagent(self, oc_ops):
