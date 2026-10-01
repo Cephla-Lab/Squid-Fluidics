@@ -81,30 +81,40 @@ class TestCheckReaddressRequest:
 
 class TestReaddressValve:
     def test_the_whole_exchange(self):
-        fc = FakeController([OK, OK], position=1)
+        fc = FakeController([OK, OK, OK], position=1)
         prompts = []
         assert readdress_valve(fc, 0x10, 0x1A, 10, prompts.append) == 1
-        assert fc.commands == [(CMD_SET.SET_ROTARY_ADDRESS, 0x10, 0x1A),
+        assert fc.commands == [(CMD_SET.CLEAR,),
+                               (CMD_SET.SET_ROTARY_ADDRESS, 0x10, 0x1A),
                                (CMD_SET.INITIALIZE_ROTARY, 0, 10, 0x1A)]
         assert len(prompts) == 1 and "power" in prompts[0]
 
+    def test_a_controller_that_will_not_clear_is_power_cycled_first(self):
+        """CLEAR zeroes the command uid on both sides and idles the firmware;
+        without it a stale status from an earlier run can answer the
+        re-address."""
+        fc = FakeController([COMMAND_STATUS.CMD_EXECUTION_ERROR])
+        with pytest.raises(DeviceError, match="power-cycle the controller"):
+            readdress_valve(fc, 0x10, 0x1A, 10, lambda _: None)
+        assert fc.commands == [(CMD_SET.CLEAR,)]
+
     def test_old_firmware_is_told_to_reflash(self):
-        fc = FakeController([COMMAND_STATUS.CMD_INVALID])
+        fc = FakeController([OK, COMMAND_STATUS.CMD_INVALID])
         with pytest.raises(DeviceError, match="reflash"):
             readdress_valve(fc, 0x10, 0x1A, 10, lambda _: None)
 
     def test_no_valve_at_from(self):
-        fc = FakeController([COMMAND_STATUS.CMD_EXECUTION_ERROR])
+        fc = FakeController([OK, COMMAND_STATUS.CMD_EXECUTION_ERROR])
         with pytest.raises(DeviceError, match="No valve answered at 0x10"):
             readdress_valve(fc, 0x10, 0x1A, 10, lambda _: None)
 
     def test_silent_after_the_power_cycle(self):
-        fc = FakeController([OK, COMMAND_STATUS.CMD_EXECUTION_ERROR])
+        fc = FakeController([OK, OK, COMMAND_STATUS.CMD_EXECUTION_ERROR])
         with pytest.raises(DeviceError, match="does not answer at 0x1A"):
             readdress_valve(fc, 0x10, 0x1A, 10, lambda _: None)
 
     def test_an_answer_that_is_not_a_position(self):
-        fc = FakeController([OK, OK], position=66)
+        fc = FakeController([OK, OK, OK], position=66)
         with pytest.raises(DeviceError, match="reports 66"):
             readdress_valve(fc, 0x10, 0x1A, 10, lambda _: None)
 

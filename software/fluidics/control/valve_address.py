@@ -69,6 +69,15 @@ def readdress_valve(fc, from_addr, to_addr, ports, power_cycle):
     """
     check_readdress_request(from_addr, to_addr)
 
+    # CLEAR first: it zeroes the command uid on both sides, so no stale status
+    # from an earlier session can answer what follows, and it idles the
+    # firmware, which SET_ROTARY_ADDRESS requires.
+    status = fc.send_command_blocking(CMD_SET.CLEAR)
+    if status != COMMAND_STATUS.COMPLETED_WITHOUT_ERRORS:
+        raise DeviceError(
+            f"The controller did not clear (MCU status {status}) -- "
+            "power-cycle the controller, then run this again.")
+
     status = fc.send_command_blocking(CMD_SET.SET_ROTARY_ADDRESS, from_addr, to_addr)
     if status == COMMAND_STATUS.CMD_INVALID:
         raise DeviceError(

@@ -1,7 +1,8 @@
 """Move one selector valve to a new I2C address (bench use).
 
-Connect exactly ONE valve to the controller first: every valve on the bus
-hears a command sent to --from. Typical use, freeing 0x10 for a flow sensor
+Power-cycle the controller and connect exactly ONE valve first: every device
+on the valve bus hears a command sent to --from (a J20 flow sensor answers
+0x10 as well, so unplug it). Typical use, freeing 0x10 for a flow sensor
 on J20:
 
     python readdress_valve.py --from 0x10 --to 0x1A
@@ -50,7 +51,9 @@ def main(argv=None):
         return 2
     serial_number = load_config(config_path).microcontroller.serial_number
 
-    input("Connect exactly ONE selector valve to the controller, then press Enter.")
+    input("Power-cycle the controller, connect exactly ONE selector valve and "
+          "nothing else on the valve bus (unplug a J20 flow sensor), then press "
+          "Enter.")
     fc = FluidController(serial_number)
     fc.begin()
     try:
