@@ -9,7 +9,8 @@ from typing import Dict, List, Literal, Optional
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .valve_address import MAX_VALVES, effective_address, is_valid_valve_address
+from .valve_address import (FLOW_SENSOR_ADDRESS, MAX_VALVES, conflicts_with_flow_sensor,
+                            effective_address, is_valid_valve_address)
 
 
 DEFAULT_CONFIG_PATHS = ("./config.yaml", "./config.json")
@@ -133,9 +134,10 @@ class TemperatureControllerConfig(_StrictModel):
 class FlowSensorConfig(_StrictModel):
     """One SLF3X flow sensor on the Teensy's I2C bus.
 
-    index is the I2C bus the sensor sits on (1 = Wire1, 2 = Wire2). Bus 0
-    is excluded: it is shared with the selector valves, whose driver emits
-    a general-call transaction after every command.
+    index is the I2C bus the sensor sits on: 1 = Wire1 (J15), 2 = Wire2
+    (J17), 0 = Wire (J20). Bus 0 is the selector valves' bus, so a sensor
+    there needs every valve off I2C address 0x10 -- 0x08 on the wire, the
+    sensor's own address (see selector_valves.i2c_addresses).
 
     The monitor fields are per-sensor tuning for draw protection, consumed in
     the operations layer:
@@ -148,7 +150,7 @@ class FlowSensorConfig(_StrictModel):
     monitor is the starting mode only; the GUI switches it per sensor at
     runtime. Bad tuning is otherwise only discoverable by restarting a run.
     """
-    index: Literal[1, 2]
+    index: Literal[0, 1, 2]
     name: str
     monitor: Literal["off", "warn", "stop"] = "off"
     ramp_up_seconds: float = Field(default=3.0, gt=0)
@@ -180,15 +182,21 @@ class FluidicsConfig(_StrictModel):
         if len(set(names)) != len(names):
             raise ValueError("flow_sensors entries must have unique name values")
 
-        # Two is the hardware ceiling: slot i is transmitted at packet bytes
-        # 23 + 2*i, and a third would grow the packet past MCU_MSG_LENGTH.
-        # Unique indices already bound the count, so this only fires if the
-        # Literal on `index` is ever widened.
-        if len(self.flow_sensors) > 2:
-            raise ValueError(
-                "at most two flow sensors are supported; the status packet has "
-                "room for two readings (bytes 23-24 and 25-26)"
-            )
+        # Bus 0 is the valves' bus: a valve at 0x10 answers at the sensor's
+        # 0x08 on the wire. Caught here, before the serial port opens; the
+        # firmware refuses it as well.
+        if any(s.index == 0 for s in self.flow_sensors):
+            sv = self.reagent_selection.selector_valves
+            for valve_id in sv.valve_ids:
+                addr = effective_address(valve_id, sv.i2c_addresses)
+                if conflicts_with_flow_sensor(addr):
+                    raise ValueError(
+                        f"selector valve {valve_id} is at I2C address 0x{addr:02X}, "
+                        f"which is 0x{FLOW_SENSOR_ADDRESS:02X} on the wire -- the "
+                        "flow sensor's own address. A flow sensor at index 0 (J20) "
+                        "shares the valves' bus: move the valve with "
+                        "readdress_valve.py, then set reagent_selection."
+                        f"selector_valves.i2c_addresses.{valve_id}")
         return self
 
 

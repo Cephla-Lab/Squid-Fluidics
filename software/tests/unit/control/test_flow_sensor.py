@@ -28,9 +28,10 @@ class FakeController(PacketSubscribers):
         self.commands.append((command, args))
         return self._status
 
-    def publish(self, flow_raw, flow_2_raw=0):
+    def publish(self, flow_raw, flow_2_raw=0, flow_slot2_raw=0):
         parsed = FluidController._parse_packet(
-            self, _make_packet(flow_raw=flow_raw, flow_2_raw=flow_2_raw))
+            self, _make_packet(flow_raw=flow_raw, flow_2_raw=flow_2_raw,
+                               flow_slot2_raw=flow_slot2_raw))
         self._notify_packet_subscribers(parsed)
 
 
@@ -330,3 +331,26 @@ class TestFaultChannel:
         sensor.close()
         sensor.notify_fault("stop", self._fault_like(), 3.0)
         assert seen == [("stop", 2.0)]
+
+
+class TestTheJ20Sensor:
+    def test_index_0_reads_slot_2(self):
+        fc = FakeController()
+        j20 = FlowSensor(fc, index=0, name="j20")
+        fc.publish(INVALID_RAW, flow_2_raw=INVALID_RAW, flow_slot2_raw=600)
+        assert j20.latest_flow_ul_min == pytest.approx(1200.0)
+
+    def test_three_sensors_read_their_own_slots(self):
+        fc = FakeController()
+        sensors = [FlowSensor(fc, index=i, name=f"s{i}") for i in (1, 2, 0)]
+        fc.publish(100, flow_2_raw=200, flow_slot2_raw=300)
+        assert [s.latest_flow_ul_min for s in sensors] == pytest.approx([200.0, 400.0, 600.0])
+
+    def test_the_simulation_agrees_on_the_slot(self):
+        assert FlowSensorSimulation(index=0).packet_slot == 2
+
+    def test_a_refused_init_says_reflash_or_move_the_valve(self):
+        sensor = FlowSensor(FakeController(status=COMMAND_STATUS.CMD_INVALID),
+                            index=0, name="j20")
+        with pytest.raises(RuntimeError, match="reflash.*0x10"):
+            sensor.begin()

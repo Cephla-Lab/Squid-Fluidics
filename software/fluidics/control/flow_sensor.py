@@ -39,14 +39,20 @@ INVALID_RAW = 32767
 MEDIUM_WATER = MCU_CONSTANTS.MEDIUM_WATER
 PERFORM_CRC = True
 
+# Config index (= the I2C bus) -> packet slot, mirroring firmware/bus_rules.h
+# FLOW_SLOT_BUS (slot -> bus: 1, 2, 0). A table rather than `index - 1`:
+# index 0 would give slot -1, which Python reads as the *last* slot.
+PACKET_SLOT_BY_INDEX = {1: 0, 2: 1, 0: 2}
+
 
 class FlowSensor:
     """One SLF3X flow sensor.
 
     index is the sensor's physical position on the board, which is its I2C bus
-    (1 = Wire1, 2 = Wire2) and fixes which pair of packet bytes carries it:
-    index 1 reads bytes 23-24, index 2 reads bytes 25-26. The firmware applies
-    the same mapping, so the two stay in step.
+    (1 = Wire1/J15, 2 = Wire2/J17, 0 = Wire/J20) and fixes which packet bytes
+    carry it: index 1 reads bytes 23-24, index 2 bytes 25-26, index 0 bytes
+    15-16. The firmware applies the same mapping (bus_rules.h), so the two
+    stay in step.
 
     monitor/ramp_up_seconds/tolerance_fraction are draw-protection policy. The
     driver never consults them -- it carries them because the config declares
@@ -66,7 +72,7 @@ class FlowSensor:
         self.tolerance_fraction = tolerance_fraction
         # Derived, not passed: index and slot must always agree, so carrying
         # them as independent arguments only creates a way for them to differ.
-        self.packet_slot = index - 1
+        self.packet_slot = PACKET_SLOT_BY_INDEX[index]
 
         self._latest = None
         self._lock = threading.Lock()
@@ -97,6 +103,12 @@ class FlowSensor:
             # FluidControllerSimulation has no MCU to report a status and
             # returns None; treat that as success rather than "unknown" so
             # begin() works against the simulation too.
+            if status == COMMAND_STATUS.CMD_INVALID:
+                raise RuntimeError(
+                    f"Flow sensor '{self.name}' on index {self.index}: the "
+                    "controller refused it. Index 0 (J20) needs firmware with "
+                    "J20 support -- reflash -- and no selector valve at I2C "
+                    "address 0x10.")
             if status is not None and status != COMMAND_STATUS.COMPLETED_WITHOUT_ERRORS:
                 raise RuntimeError(
                     f"Flow sensor '{self.name}' on index {self.index} failed to "
@@ -181,7 +193,7 @@ class FlowSensorSimulation:
         self.monitor = monitor
         self.ramp_up_seconds = ramp_up_seconds
         self.tolerance_fraction = tolerance_fraction
-        self.packet_slot = index - 1
+        self.packet_slot = PACKET_SLOT_BY_INDEX[index]
 
         self.simulated_flow_ul_min = 500.0
         self._subscribers = Subscribers(f"Flow sensor '{name}'")
@@ -238,9 +250,9 @@ class FlowSensorSimulation:
 def build_flow_sensors(fluid_controller, config, simulation=False):
     """Construct FlowSensor instances from config. Does not call begin().
 
-    Slot is `index - 1`, matching the firmware: index is the physical board
-    position, which is the I2C bus, which fixes the packet slot. Index 1 reads
-    bytes 23-24, index 2 reads bytes 25-26.
+    Slot comes from PACKET_SLOT_BY_INDEX, matching the firmware: index is the
+    physical board position, which is the I2C bus, which fixes the packet
+    slot.
 
     Deliberately derived from index rather than from position in the config
     list, so reordering the YAML cannot silently repoint a sensor at a

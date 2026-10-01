@@ -175,3 +175,8 @@ class TestPacketAndAddressMirrors:
 
     def test_flow_sensor_address(self):
         assert FLOW_SENSOR_ADDRESS == parse_define("SLF3X.h", "SLF3X_ADDRESS")
+
+    def test_flow_slot_by_bus(self):
+        from fluidics.control.flow_sensor import PACKET_SLOT_BY_INDEX
+        firmware = parse_array("bus_rules.h", "FLOW_SLOT_BUS")
+        assert {bus: slot for slot, bus in enumerate(firmware)} == PACKET_SLOT_BY_INDEX

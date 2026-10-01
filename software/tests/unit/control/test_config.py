@@ -235,12 +235,34 @@ class TestFlowSensorConfig:
         assert sensor.tolerance_fraction == 0.1
         assert sensor.max_flow_rate_ul_min == 1500
 
-    @pytest.mark.parametrize("bad_index", [0, 3, -1])
-    def test_index_must_be_1_or_2(self, bad_index):
+    @pytest.mark.parametrize("bad_index", [3, -1])
+    def test_index_must_be_0_1_or_2(self, bad_index):
         with pytest.raises(ValidationError):
             FluidicsConfig(**_make_config_dict(
                 flow_sensors=[{"index": bad_index, "name": "s"}]
             ))
+
+    def test_three_sensors_accepted(self):
+        config = FluidicsConfig(**_make_config_dict(flow_sensors=[
+            {"index": 1, "name": "a"}, {"index": 2, "name": "b"},
+            {"index": 0, "name": "c"},
+        ]))
+        assert [s.index for s in config.flow_sensors] == [1, 2, 0]
+
+    def test_index_0_with_a_valve_on_the_default_0x10_is_rejected(self):
+        with pytest.raises(ValidationError,
+                           match=r"selector valve 1 is at I2C address 0x10.*readdress_valve\.py"):
+            FluidicsConfig(**_make_config_dict(**{
+                "reagent_selection.selector_valves": _valves([0, 1]),
+                "flow_sensors": [{"index": 0, "name": "j20"}],
+            }))
+
+    def test_index_0_with_valve_1_relocated_is_accepted(self):
+        config = FluidicsConfig(**_make_config_dict(**{
+            "reagent_selection.selector_valves": _valves([0, 1], i2c_addresses={1: 0x1A}),
+            "flow_sensors": [{"index": 0, "name": "j20"}],
+        }))
+        assert config.flow_sensors[0].index == 0
 
     def test_unknown_monitor_mode_rejected(self):
         with pytest.raises(ValidationError):
