@@ -8,6 +8,7 @@ from datetime import datetime
 import os
 from pathlib import Path
 import numpy as np
+import random
 import threading
 
 from ..subscribers import Subscribers  # noqa: F401  -- re-exported; it lived here first
@@ -22,6 +23,10 @@ READER_IDLE_SLEEP_S = 0.005
 
 _logger = logging.getLogger(__name__)
 
+# The measurement CSV's columns, one per field _log_packet writes.
+MEASUREMENT_CSV_HEADER = ("timestamp,rx_uid,rx_cmd,cmd_status,mcu_state,bs1,bs2,mcu_time,"
+                          "sv0,sv1,sv2,sv3,sv4,sv5,valves,pump,f1_raw,f2_raw,f0_raw,vol_uL")
+
 
 def to_int16(raw):
     '''Reinterpret an unsigned 16-bit value as signed int16.
@@ -32,11 +37,6 @@ def to_int16(raw):
     set and would hit that path.
     '''
     return raw - 65536 if raw > 32767 else raw
-
-
-def raw_to_psi(raw_pressure):
-    '''Convert a raw SSCX pressure count to psi.'''
-    return (raw_pressure - MCU_CONSTANTS._output_min) * (MCU_CONSTANTS._p_max - MCU_CONSTANTS._p_min) / (MCU_CONSTANTS._output_max - MCU_CONSTANTS._output_min) + MCU_CONSTANTS._p_min
 
 
 def split_byte(byte_in):
@@ -226,7 +226,7 @@ class FluidController(Microcontroller, PacketSubscribers):
 
         if(self.log_measurements):
             self.measurement_file = open(os.path.join(Path.home(),"Downloads","Fluidic Controller Logged Measurement_" + datetime.now().strftime('%Y-%m-%d %H-%M-%S.%f') + ".csv"), "w+")
-            self.measurement_file.write("timestamp,rx_uid,rx_cmd,cmd_status,mcu_state,bs1,bs2,mcu_time,sv0,sv1,sv2,sv3,sv4,valves,pump,p0,p1,p2,p3,f1_raw,f2_raw,vol_uL\n")
+            self.measurement_file.write(MEASUREMENT_CSV_HEADER + "\n")
             self.counter_measurement_file_flush = 1
 
         self.cmd_uid = 0
@@ -339,15 +339,14 @@ class FluidController(Microcontroller, PacketSubscribers):
         byte 3      : status of the command (see _def.py)
         byte 4      : MCU internal program being executed (see _def.py)
         byte 5      : Bubble sensor state (high and low nibble)
-        byte 6-10   : Selector valves status (1,2,3,4,5)
+        byte 6-10   : Selector valves 1-5 position (0 = slot never initialized)
         byte 11-12  : state of valve D1-D16
         byte 13-14  : pump power
-        byte 15-16  : pressure sensor 1 reading
-        byte 17-18  : pressure sensor 2 reading
-        byte 19-20  : pressure sensor 3 reading
-        byte 21-22  : pressure sensor 4 reading
-        byte 23-24  : flow sensor 1 reading
-        byte 25-26  : flow sensor 2 reading
+        byte 15-16  : flow sensor slot 2 reading (index 0 / J20)
+        byte 17     : Selector valve 6 position
+        byte 18-22  : reserved, 0 (were pressure readings no build populated)
+        byte 23-24  : flow sensor slot 0 reading (index 1 / J15)
+        byte 25-26  : flow sensor slot 1 reading (index 2 / J17)
         byte 27     : elapsed time since the start of the last internal program (in seconds)
         byte 28-29  : total volume (ul), range: 0 - 5000
         '''
@@ -358,30 +357,16 @@ class FluidController(Microcontroller, PacketSubscribers):
 
         bubble_sensor_1_state, bubble_sensor_2_state = split_byte(msg[5])
 
-        selector_valve_1_pos = msg[6]
-        selector_valve_2_pos = msg[7]
-        selector_valve_3_pos = msg[8]
-        selector_valve_4_pos = msg[9]
-        selector_valve_5_pos = msg[10]
+        selector_valves_pos = [msg[offset] for offset in VALVE_POS_OFFSETS]
 
         solenoid_valves = to_int16((int(msg[11]) << 8) + msg[12])
 
         measurement_pump_power = MCU_CONSTANTS.TTP_MAX_PW * float((int(msg[13]) << 8) + msg[14]) / np.iinfo(np.uint16).max
 
-        _pressure_1_raw = (int(msg[15]) << 8) + msg[16]
-        _pressure_2_raw = (int(msg[17]) << 8) + msg[18]
-        _pressure_3_raw = (int(msg[19]) << 8) + msg[20]
-        _pressure_4_raw = (int(msg[21]) << 8) + msg[22]
-
-        pressure_1 = raw_to_psi(_pressure_1_raw)
-        pressure_2 = raw_to_psi(_pressure_2_raw)
-        pressure_3 = raw_to_psi(_pressure_3_raw)
-        pressure_4 = raw_to_psi(_pressure_4_raw)
-
         # Raw int16 exactly as received. 32767 is the SLF3X "no reading"
         # sentinel, which the driver compares against before scaling.
-        flow_1_raw = to_int16((int(msg[23]) << 8) + msg[24])
-        flow_2_raw = to_int16((int(msg[25]) << 8) + msg[26])
+        flowrates_raw = [to_int16((int(msg[o]) << 8) + msg[o + 1])
+                         for o in FLOW_SLOT_OFFSETS]
 
         MCU_CMD_time_elapsed = msg[27]
 
@@ -394,15 +379,15 @@ class FluidController(Microcontroller, PacketSubscribers):
             "MCU_interal_program": MCU_interal_program,
             "bubble_sensor_states": [bubble_sensor_1_state, bubble_sensor_2_state],
             "MCU_CMD_time_elapsed": MCU_CMD_time_elapsed,
-            "selector_valves_pos": [selector_valve_1_pos, selector_valve_2_pos, selector_valve_3_pos, selector_valve_4_pos, selector_valve_5_pos],
+            "selector_valves_pos": selector_valves_pos,
             "solenoid_valves": solenoid_valves,
             "measurement_pump_power": measurement_pump_power,
-            "pressures": [pressure_1, pressure_2, pressure_3, pressure_4],
             # Raw counts only. Turning these into uL/min needs the installed
             # sensor's scale factor, which lives with the driver that knows
             # which part it is talking to (flow_sensor.py). Scaling here as
             # well would be a second copy, free to disagree -- and it did.
-            "flowrates_raw": [flow_1_raw, flow_2_raw],
+            # Ordered by slot: index 1, index 2, index 0.
+            "flowrates_raw": flowrates_raw,
             "vol_ul": vol_ul,
         }
 
@@ -464,22 +449,16 @@ class FluidController(Microcontroller, PacketSubscribers):
         if not (self.log_measurements or self.debug):
             return
         b1, b2 = d["bubble_sensor_states"]
-        sv = d["selector_valves_pos"]
-        p = d["pressures"]
-        f = d["flowrates_raw"]
-        line = (f"{datetime.now().strftime('%m/%d %H:%M:%S')},"
-                f"{d['MCU_received_command_UID']},"
-                f"{d['MCU_received_command']},"
-                f"{d['MCU_command_execution_status']},"
-                f"{d['MCU_interal_program']},"
-                f"{b1:>04b},{b2:>04b},"
-                f"{d['MCU_CMD_time_elapsed']},"
-                f"{sv[0]},{sv[1]},{sv[2]},{sv[3]},{sv[4]},"
-                f"{d['solenoid_valves']:>016b},"
-                f"{d['measurement_pump_power']:.2f},"
-                f"{p[0]:.2f},{p[1]:.2f},{p[2]:.2f},{p[3]:.2f},"
-                f"{f[0]},{f[1]},"
-                f"{d['vol_ul']:.2f}\n")
+        fields = [datetime.now().strftime('%m/%d %H:%M:%S'),
+                  d['MCU_received_command_UID'], d['MCU_received_command'],
+                  d['MCU_command_execution_status'], d['MCU_interal_program'],
+                  f"{b1:>04b}", f"{b2:>04b}", d['MCU_CMD_time_elapsed'],
+                  *d["selector_valves_pos"],
+                  f"{d['solenoid_valves']:>016b}",
+                  f"{d['measurement_pump_power']:.2f}",
+                  *d["flowrates_raw"],
+                  f"{d['vol_ul']:.2f}"]
+        line = ",".join(str(f) for f in fields) + "\n"
         if self.log_measurements:
             self.measurement_file.write(line)
             self.counter_measurement_file_flush += 1
@@ -707,8 +686,12 @@ class FluidController(Microcontroller, PacketSubscribers):
             command_array.append(pwr_lo)
             pass
         elif command == CMD_SET.INITIALIZE_ROTARY:
-            # Initialize rotary valve with index and max positions
-            assert len(args) == 2, "Need index and number of positions"
+            # Index and number of positions, plus the valve's I2C address
+            # (8-bit write form) when the config gives one. Without it the
+            # firmware uses its default table -- all that firmware predating
+            # host-set addresses understands.
+            assert len(args) in (2, 3), \
+                "Need index, number of positions, and optionally the I2C address"
             idx = np.uint8(args[0])
             assert idx == args[0], "index is not uint8"
             n_pos = np.uint8(args[1])
@@ -716,7 +699,10 @@ class FluidController(Microcontroller, PacketSubscribers):
 
             command_array.append(idx)
             command_array.append(n_pos)
-            pass
+            if len(args) == 3:
+                addr = np.uint8(args[2])
+                assert addr == args[2], "I2C address is not uint8"
+                command_array.append(addr)
         elif command == CMD_SET.SET_ROTARY_VALVE:
             # Set rotary valve position, we need index and target position
             assert len(args) == 2, "Need index and target position"
@@ -895,6 +881,14 @@ class FluidController(Microcontroller, PacketSubscribers):
             command_array.append(dt_2)
             command_array.append(dt_1)
             command_array.append(dt_0)
+        elif command == CMD_SET.SET_ROTARY_ADDRESS:
+            # Re-address one selector valve (readdress_valve.py): its current
+            # and its new I2C address, 8-bit write form.
+            assert len(args) == 2, "Need the current and the new I2C address"
+            for addr in args:
+                assert np.uint8(addr) == addr, "I2C address is not uint8"
+            command_array.append(np.uint8(args[0]))
+            command_array.append(np.uint8(args[1]))
         else:
             # If we don't recognize the command, raise an error
             raise Exception("Command not recognized")
@@ -913,6 +907,26 @@ class FluidController(Microcontroller, PacketSubscribers):
         with self._status_lock:
             self._seq_at_send = self._status_seq
         pass
+
+    def clear(self, timeout=30):
+        '''Send CLEAR and wait for its own completion.
+
+        The firmware reports UID 0 after every CLEAR and after a reset, so the
+        status packet already on its way when CLEAR is written -- left from an
+        earlier session's CLEAR, or a fresh boot -- looks exactly like this
+        CLEAR's completion, and the publish-sequence check cannot tell: it
+        only excludes packets read before the write. So a harmless command
+        with a random UID goes first. Once the MCU has answered it, the packet
+        in flight at the CLEAR carries that UID, and the only UID-0 packets
+        left are this CLEAR's. STOP_CLOSED_LOOP is that command: every
+        firmware has it, every board accepts it, and CLEAR repeats what it
+        does.
+        '''
+        self.cmd_uid = random.randrange(1, 0xFFFF)   # send_command adds 1
+        self.send_command(CMD_SET.STOP_CLOSED_LOOP)
+        self.wait_for_completion(timeout=timeout)
+        self.send_command(CMD_SET.CLEAR)
+        return self.wait_for_completion(timeout=timeout)
 
     def send_command_blocking(self, command, *args, timeout=30):
         '''Send a command, then write logs while waiting for it to complete.
@@ -936,7 +950,7 @@ class FluidControllerSimulation(PacketSubscribers):
 
     def __init__(self, serial_number, use_cobs = True, log_measurements = False, debug = False):
         self.data = {
-            'selector_valves_pos': {0: 1, 1: 1, 2: 1, 3: 1, 4: 1}
+            'selector_valves_pos': {i: 1 for i in range(len(VALVE_POS_OFFSETS))}
         }
         # Every command asked of it, in order -- the record the time estimate
         # reads valve moves from, the way it reads chains from the pump's
@@ -967,6 +981,14 @@ class FluidControllerSimulation(PacketSubscribers):
 
     def send_command_blocking(self, command, *args, timeout=30):
         self.send_command(command, *args)
+        return self.wait_for_completion(timeout=timeout)
+
+    def clear(self, timeout=30):
+        """The real controller's clear(): its UID probe, then CLEAR, each
+        waited on."""
+        self.send_command(CMD_SET.STOP_CLOSED_LOOP)
+        self.wait_for_completion(timeout=timeout)
+        self.send_command(CMD_SET.CLEAR)
         return self.wait_for_completion(timeout=timeout)
 
     def wait_for_completion(self, timeout=30, run_control=None):

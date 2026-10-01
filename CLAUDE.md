@@ -15,9 +15,11 @@ Fluidics v2 is a microfluidics control system for automated liquid handling expe
 
 ```bash
 cd firmware
-pio run                    # Build firmware
-pio run -t upload          # Build and upload to Teensy 4.1
-pio device monitor         # Serial monitor (2000000 baud)
+pio run                        # Build both targets: teensy41 (V2/V3) and teensy41_v4s
+pio run -e teensy41_v4s -t upload   # Build and upload for a FLUIDICS V4 SIMPLE board
+pio run -e teensy41 -t upload       # ... or for a V2/V3 board
+pio test -e native             # Unit tests of bus_rules.h on this machine
+pio device monitor             # Serial monitor (2000000 baud)
 ```
 
 Source files are in `firmware/` root (not `src/`), configured via `platformio.ini` with `src_dir = .`.
@@ -58,6 +60,8 @@ The firmware and software communicate over serial at 2,000,000 baud using COBS (
 
 These must stay in sync. Same applies to `VALVE_POSITIONS`/`ValvesStates_t` and `COMMAND_STATUS`/`CommandExecution_t`.
 
+The status-packet offsets that are not fixed by position (valve slots 6–10 and 17; flow slots 23, 25, 15 for index 1, 2, 0) and the selector-valve address rules live in `firmware/bus_rules.h`, mirrored in `_def.py` (`VALVE_POS_OFFSETS`, `FLOW_SLOT_OFFSETS`), `fluidics/control/valve_address.py` and `flow_sensor.py` (`PACKET_SLOT_BY_INDEX`). `tests/unit/control/test_firmware_mirror.py` compares both sides — change both together.
+
 ### Software Module Structure
 
 - **`fluidics/control/controller.py`** — Core `FluidController` class wrapping serial communication; `FluidControllerSimulation` for testing without hardware
@@ -65,6 +69,7 @@ These must stay in sync. Same applies to `VALVE_POSITIONS`/`ValvesStates_t` and 
 - **`fluidics/control/selector_valve.py`** — `SelectorValveSystem` manages cascaded multi-port rotary valve routing with port-to-reagent mapping
 - **`fluidics/control/temperature_controller.py`** — TCM temperature controller with CRC32 checksums; has simulation class
 - **`fluidics/control/disc_pump.py`** — Peristaltic disc pump wrapper
+- **`fluidics/control/valve_address.py`** — selector-valve I2C address rules (mirroring `bus_rules.h`), each valve's effective address, and `readdress_valve()`, which `software/readdress_valve.py` runs to move a valve to a new address on the bench (e.g. off 0x10 for a flow sensor on J20)
 - **`fluidics/control/_def.py`** — Shared constants (command IDs, valve positions, sensor params, PID limits)
 - **`fluidics/sequences.py`** — Sequence loading/saving/validation with pydantic discriminated union models
 - **`fluidics/merfish_operations.py`** — MERFISH experiment sequence logic
@@ -81,6 +86,8 @@ These must stay in sync. Same applies to `VALVE_POSITIONS`/`ValvesStates_t` and 
 - **`controller_teensy41.ino`** — Main firmware: serial command dispatch, control loops (bang-bang and PID), state machine
 - **Hardware drivers:** `NXP33996` (solenoid valves), `OPX350` (bubble sensors), `RheoLink` (rotary valves), `SLF3X` (flow sensor, I2C), `SSCX` (pressure sensors, SPI), `TTP` (disc pump, UART), `AutoPID` (PID controller)
 - **`_defs.h`** — Pin assignments, sensor parameters, hardware constants
+- **`bus_rules.h`** — Arduino-free rules shared with the host: valve-address validity (8-bit form, even, 0x0E–0xFE), the 0x10→0x08 flow-sensor collision, flow slot↔bus and the packet offsets. Tested natively (`pio test -e native`)
+- **Build targets** — `teensy41` for V2/V3 boards; `teensy41_v4s` (`BOARD_V4S`) for FLUIDICS V4 SIMPLE, which has only the I2C buses and answers `CMD_INVALID` to pump, solenoid, bubble- and pressure-sensor commands (`board_supports()` in the sketch)
 
 ### Experiment Flow
 

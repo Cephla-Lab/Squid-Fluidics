@@ -235,12 +235,34 @@ class TestFlowSensorConfig:
         assert sensor.tolerance_fraction == 0.1
         assert sensor.max_flow_rate_ul_min == 1500
 
-    @pytest.mark.parametrize("bad_index", [0, 3, -1])
-    def test_index_must_be_1_or_2(self, bad_index):
+    @pytest.mark.parametrize("bad_index", [3, -1])
+    def test_index_must_be_0_1_or_2(self, bad_index):
         with pytest.raises(ValidationError):
             FluidicsConfig(**_make_config_dict(
                 flow_sensors=[{"index": bad_index, "name": "s"}]
             ))
+
+    def test_three_sensors_accepted(self):
+        config = FluidicsConfig(**_make_config_dict(flow_sensors=[
+            {"index": 1, "name": "a"}, {"index": 2, "name": "b"},
+            {"index": 0, "name": "c"},
+        ]))
+        assert [s.index for s in config.flow_sensors] == [1, 2, 0]
+
+    def test_index_0_with_a_valve_on_the_default_0x10_is_rejected(self):
+        with pytest.raises(ValidationError,
+                           match=r"selector valve 1 is at I2C address 0x10.*readdress_valve\.py"):
+            FluidicsConfig(**_make_config_dict(**{
+                "reagent_selection.selector_valves": _valves([0, 1]),
+                "flow_sensors": [{"index": 0, "name": "j20"}],
+            }))
+
+    def test_index_0_with_valve_1_relocated_is_accepted(self):
+        config = FluidicsConfig(**_make_config_dict(**{
+            "reagent_selection.selector_valves": _valves([0, 1], i2c_addresses={1: 0x1A}),
+            "flow_sensors": [{"index": 0, "name": "j20"}],
+        }))
+        assert config.flow_sensors[0].index == 0
 
     def test_unknown_monitor_mode_rejected(self):
         with pytest.raises(ValidationError):
@@ -355,3 +377,44 @@ class TestDefaultConfigPath:
     def test_none_when_the_directory_has_neither(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         assert default_config_path() is None
+
+
+def _valves(ids, **extra):
+    """A selector_valves section for valve ids `ids`, 10 ports each."""
+    return {
+        "valve_ids": ids,
+        "number_of_ports": {i: 10 for i in ids},
+        "tubing_fluid_amount_to_valve_ul": {i: 0 for i in ids},
+        "tubing_fluid_amount_ul": {"port_1": 100},
+        **extra,
+    }
+
+
+class TestValveAddresses:
+    def test_absent_means_the_defaults(self):
+        sv = SelectorValvesConfig(**_valves([0, 1]))
+        assert sv.i2c_addresses is None
+
+    def test_a_relocated_valve_is_accepted(self):
+        sv = SelectorValvesConfig(**_valves([0, 1], i2c_addresses={1: 0x1A}))
+        assert sv.i2c_addresses == {1: 0x1A}
+
+    def test_six_valves_are_accepted(self):
+        assert SelectorValvesConfig(**_valves([0, 1, 2, 3, 4, 5])).valve_ids == [0, 1, 2, 3, 4, 5]
+
+    def test_a_seventh_valve_slot_is_rejected(self):
+        with pytest.raises(ValidationError, match="valve id 6 is out of range"):
+            SelectorValvesConfig(**_valves([0, 6]))
+
+    def test_an_address_for_an_unlisted_valve_is_rejected(self):
+        with pytest.raises(ValidationError, match="not in valve_ids"):
+            SelectorValvesConfig(**_valves([0], i2c_addresses={3: 0x1A}))
+
+    @pytest.mark.parametrize("bad", [0x0C, 0x1B, 0x100])
+    def test_a_non_rheolink_address_is_rejected(self, bad):
+        with pytest.raises(ValidationError, match="not a RheoLink address"):
+            SelectorValvesConfig(**_valves([0], i2c_addresses={0: bad}))
+
+    def test_an_address_equal_to_another_valves_default_is_rejected(self):
+        with pytest.raises(ValidationError, match="valves 1 and 0 would both be at I2C address 0x10"):
+            SelectorValvesConfig(**_valves([0, 1], i2c_addresses={0: 0x10}))

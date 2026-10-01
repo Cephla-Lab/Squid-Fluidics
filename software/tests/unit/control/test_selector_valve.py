@@ -196,3 +196,77 @@ class TestAPausedRunMovesNoValve:
         system = _make_valve_system(fixtures_dir / "flow_cell_config.yaml", control)
         holds_while_paused(control, lambda: system.open_port(1))
         assert system.current_port == 1
+
+
+def _system_with_addresses(fixtures_dir, i2c_addresses):
+    config = load_config(str(fixtures_dir / "flow_cell_config.yaml"))
+    config.reagent_selection.selector_valves.i2c_addresses = i2c_addresses
+    fc = FluidControllerSimulation(serial_number="test")
+    fc.COMMAND_SECONDS = 0
+    return SelectorValveSystem(fc, config), fc
+
+
+class TestValveAddressesReachTheController:
+    def test_a_configured_address_rides_initialize_rotary(self, fixtures_dir):
+        _, fc = _system_with_addresses(fixtures_dir, {1: 0x1A})
+        inits = [s for s in fc.sent if s[0] == CMD_SET.INITIALIZE_ROTARY]
+        assert (CMD_SET.INITIALIZE_ROTARY, 1, 10, 0x1A) in inits
+
+    def test_without_one_the_old_two_argument_form_is_sent(self, fixtures_dir):
+        _, fc = _system_with_addresses(fixtures_dir, None)
+        inits = [s for s in fc.sent if s[0] == CMD_SET.INITIALIZE_ROTARY]
+        assert inits == [(CMD_SET.INITIALIZE_ROTARY, i, 10) for i in (0, 1, 2)]
+
+
+class TestAnUnresponsiveValve:
+    def test_position_0_is_reported_as_not_responding_at_its_address(
+            self, flow_cell_system, monkeypatch):
+        """The firmware reports 0 for a slot whose valve never answered
+        INITIALIZE_ROTARY: unplugged, unpowered, or at another address."""
+        valve = flow_cell_system.valves[1]
+        monkeypatch.setattr(valve, "get_current_position", lambda: 0)
+        with pytest.raises(DeviceError,
+                           match=r"Selector valve 1 is not responding at I2C address 0x10"):
+            valve.open(2)
+
+
+class _InitStatusController(FluidControllerSimulation):
+    """A simulated controller whose INITIALIZE_ROTARY answers `init_status`."""
+
+    def __init__(self, init_status):
+        super().__init__(serial_number="test")
+        self.COMMAND_SECONDS = 0
+        self.init_status = init_status
+
+    def wait_for_completion(self, timeout=30, run_control=None):
+        if self.sent and self.sent[-1][0] == CMD_SET.INITIALIZE_ROTARY:
+            return self.init_status
+        return super().wait_for_completion(timeout, run_control)
+
+
+class TestAValveIsInitializedBeforeItMoves:
+    def _valve(self, fixtures_dir, init_status, i2c_addresses=None):
+        from fluidics.control.selector_valve import SelectorValve
+        config = load_config(str(fixtures_dir / "flow_cell_config.yaml"))
+        config.reagent_selection.selector_valves.i2c_addresses = i2c_addresses
+        fc = _InitStatusController(init_status)
+        return SelectorValve, fc, config
+
+    def test_a_refused_initialization_raises_before_any_move(self, fixtures_dir):
+        """Firmware older than host-set addresses rejects the address byte and
+        keeps whatever the slot held before; a move would drive that valve and
+        its position readback would agree."""
+        from fluidics.control._def import COMMAND_STATUS
+        SelectorValve, fc, config = self._valve(
+            fixtures_dir, COMMAND_STATUS.CMD_INVALID, {0: 0x1A})
+        with pytest.raises(DeviceError, match=r"refused.*0x1A.*reflash"):
+            SelectorValve(fc, config, 0)
+        assert not [s for s in fc.sent if s[0] == CMD_SET.SET_ROTARY_VALVE]
+
+    def test_an_unanswered_initialization_raises_before_any_move(self, fixtures_dir):
+        from fluidics.control._def import COMMAND_STATUS
+        SelectorValve, fc, config = self._valve(
+            fixtures_dir, COMMAND_STATUS.CMD_EXECUTION_ERROR)
+        with pytest.raises(DeviceError, match=r"Selector valve 1 is not responding at I2C address 0x10"):
+            SelectorValve(fc, config, 1)
+        assert not [s for s in fc.sent if s[0] == CMD_SET.SET_ROTARY_VALVE]

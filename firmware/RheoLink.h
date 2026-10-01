@@ -74,6 +74,13 @@ class RheoLink {
     // here would stall control loops, telemetry, and command reception.
     uint8_t send_command(RheoLinkCommand_t cmd, uint8_t data = RheoLink_DUMMY_DATA);
     uint8_t read_register(RheoLinkCommand_t target);
+    // True once begin() got an ACK. A slot whose valve never answered is not
+    // polled, not homed by CLEAR, and reports 0 in the status packet.
+    bool initialized() const { return init_; }
+    // The 8-bit write address begin() was given (address_ holds it >> 1).
+    uint8_t address8() const { return address_ << 1; }
+    // Forget the valve: SET_ROTARY_ADDRESS moved it to another address.
+    void deinit() { init_ = false; }
     uint8_t pos_min;
     uint8_t pos_max;
   private:

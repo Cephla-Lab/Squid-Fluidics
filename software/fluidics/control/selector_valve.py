@@ -1,8 +1,9 @@
 import logging
 
 from ..errors import DeviceError, RunControl
-from ._def import CMD_SET
+from ._def import CMD_SET, COMMAND_STATUS
 from .config import available_port_count
+from .valve_address import effective_address
 
 _logger = logging.getLogger(__name__)
 
@@ -17,7 +18,31 @@ class SelectorValve():
         sv = self.config.reagent_selection.selector_valves
         self.tubing_fluid_amount_ul = sv.tubing_fluid_amount_to_valve_ul[valve_id]
         self.number_of_ports = sv.number_of_ports[valve_id]
-        self.fc.send_command(CMD_SET.INITIALIZE_ROTARY, valve_id, self.number_of_ports)
+        addresses = sv.i2c_addresses or {}
+        self.i2c_address = effective_address(valve_id, addresses)
+        args = (valve_id, self.number_of_ports)
+        if valve_id in addresses:
+            # Only when configured: the two-argument form (the slot's default
+            # address) is the only one firmware predating host-set addresses
+            # knows.
+            args += (addresses[valve_id],)
+        # Waited on and checked before any move. Firmware that refuses the
+        # request keeps whatever this slot held before -- older firmware
+        # rejects the address byte -- and a move would then drive that valve,
+        # with a position readback that agrees.
+        status = self.fc.send_command_blocking(CMD_SET.INITIALIZE_ROTARY, *args)
+        if status == COMMAND_STATUS.CMD_INVALID:
+            raise DeviceError(
+                f"Selector valve {valve_id}: the controller refused it at I2C "
+                f"address 0x{self.i2c_address:02X} -- its firmware may predate "
+                "host-set addresses (reflash), or a flow sensor on J20 holds "
+                "that address; power-cycle the controller if the configuration "
+                "changed")
+        if status != COMMAND_STATUS.COMPLETED_WITHOUT_ERRORS:
+            raise DeviceError(
+                f"Selector valve {valve_id} is not responding at I2C address "
+                f"0x{self.i2c_address:02X} -- check its signal cable, its 24 V "
+                "power, and that the valve is set to that address")
         self.open(self.position)
         _logger.info("Selector valve id = %s initialized.", valve_id)
 
@@ -33,6 +58,14 @@ class SelectorValve():
         self.fc.send_command(CMD_SET.SET_ROTARY_VALVE, self.id, port)
         self.fc.wait_for_completion(run_control=run_control)
         current_position = self.get_current_position()
+        if current_position == 0:
+            # The firmware reports 0 for a slot whose valve never answered
+            # INITIALIZE_ROTARY: unplugged, unpowered, or at another address.
+            self.position = 0
+            raise DeviceError(
+                f"Selector valve {self.id} is not responding at I2C address "
+                f"0x{self.i2c_address:02X} -- check its signal cable, its 24 V "
+                "power, and that the valve is set to that address")
         if current_position != port:
             self.position = current_position    # the truth the readback gave
             raise DeviceError(f"Selector valve {self.id}: at position "

@@ -382,3 +382,27 @@ class TestRunControlInjection:
         devices.run_control.cancel()
         assert devices.close() == []
         assert not devices.run_control.cancelled
+
+
+class TestBringUpWaitsForClear:
+    def test_the_clear_completes_before_any_valve_is_initialized(
+            self, built, flow_cell_config, monkeypatch):
+        """CLEAR homes whatever valves a still-powered controller kept from
+        the last session, and a moving valve does not answer its address
+        (IDEX RheoLink protocol). Initializing a valve during that home
+        failed it as 'not responding' -- so bring-up waits for the CLEAR."""
+        from fluidics.control._def import CMD_SET
+        waits = []
+        real_wait = FluidControllerSimulation.wait_for_completion
+
+        def recording_wait(self, timeout=30, run_control=None):
+            waits.append(len(self.sent))
+            return real_wait(self, timeout=timeout, run_control=run_control)
+
+        monkeypatch.setattr(FluidControllerSimulation, "wait_for_completion", recording_wait)
+        devices = built(flow_cell_config, simulation=True, instant=True)
+        sent = devices.controller.sent
+        clear_at = next(i for i, s in enumerate(sent) if s[0] == CMD_SET.CLEAR)
+        assert clear_at + 1 in waits, "nothing waited on the bring-up CLEAR"
+        first_init = next(i for i, s in enumerate(sent) if s[0] == CMD_SET.INITIALIZE_ROTARY)
+        assert clear_at < first_init

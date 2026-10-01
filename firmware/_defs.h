@@ -27,33 +27,33 @@
 #define FLUIDSENSORBACK_C  31
 
 #define SELECTORVALVE_WIRE Wire
-#define SELECTORVALVE_QTY  2     // Only 2 are actually installed here
-#define SELECTORVALVE_MAX  5     // Support up to 5 valves  
-const uint8_t SELECTORVALVE_ADDRS[] = {0x0E, 0x10, 0x12, 0x00, 0x00}; // 0x00 is dummy address
+// Six slots on every build -- the v4s board has six valve ports, and an
+// unused slot costs one object: a slot talks to its valve only once
+// INITIALIZE_ROTARY got an ACK. Addresses are the 8-bit write form (see
+// bus_rules.h); INITIALIZE_ROTARY may give a slot another one.
+#define SELECTORVALVE_MAX  6
+#define SELECTORVALVE_QTY  SELECTORVALVE_MAX
+const uint8_t SELECTORVALVE_ADDRS[SELECTORVALVE_MAX] = {0x0E, 0x10, 0x12, 0x14, 0x16, 0x18};
 
 #define SLF3X_WIRE0   Wire
 #define SLF3X_WIRE1   Wire1
 #define SLF3X_WIRE2   Wire2
 #define PERFORM_CRC  true
 
-// Flow sensor packet slots. Slot i is transmitted at status bytes 23 + 2*i, so
-// two is the ceiling: a third would have to grow the packet past
-// FROM_MCU_MSG_LENGTH, which every host rejects.
+// Flow-sensor slots. The host names a sensor by its I2C bus (config `index`)
+// and bus_rules.h fixes the rest: FLOW_SLOT_BUS maps slot -> bus (1, 2, 0)
+// and FLOW_SLOT_OFFSET maps slot -> status bytes (23, 25, 15).
 //
-// The host addresses a sensor by BUS, and the bus fixes the slot: bus 1 (Wire1)
-// is slot 0, bus 2 (Wire2) is slot 1. There is no separate slot field, so the
-// INITIALIZE_FLOW_SENSOR payload is unchanged. Bus 0 (Wire) is not a valid flow
-// sensor bus -- it is shared with the selector valves, whose blocking retry and
-// poll loops would stall flow reads for hundreds of ms during a valve move.
-//
-// Slot 0 is the process sensor: it alone feeds global_flowrate_reading, volume
-// integration and the CLEAR_LINES guard. Slot 1 is telemetry.
-#define SLF3X_MAX          2
-#define SLF3X_FIRST_BUS    1   // bus index of slot 0
-// Slot -> bus, in one place. Same shape as PRESSURE_CS above: the mapping is a
-// table rather than a branch, so widening SLF3X_MAX cannot leave a dispatch
-// arm behind.
-TwoWire* const SLF3X_BUS_BY_SLOT[SLF3X_MAX] = {&SLF3X_WIRE1, &SLF3X_WIRE2};
+// Slot 0 (bus 1, J15) is the process sensor: it alone feeds
+// global_flowrate_reading, volume integration and the CLEAR_LINES guard.
+// Slots 1 (bus 2, J17) and 2 (bus 0, J20) are telemetry. Bus 0 is the
+// selector valves' bus: a sensor there is refused while a valve sits at the
+// sensor's address on the wire (0x10 >> 1 == SLF3X_ADDRESS), and the other
+// way round. IDEX valves do not implement general call, so the SLF3X reset
+// at 0x00 leaves them alone.
+#define SLF3X_MAX          3
+// Slot -> Wire object, in FLOW_SLOT_BUS order.
+TwoWire* const SLF3X_BUS_BY_SLOT[SLF3X_MAX] = {&SLF3X_WIRE1, &SLF3X_WIRE2, &SLF3X_WIRE0};
 
 #define SSCX_SPI     SPI
 #define SSCX_QTY      0 // 0 are installed here
@@ -131,5 +131,6 @@ enum SerialCommands_t {
   VOL_INTEGRATE_SETTING        = 20,
   REMOVE_ALL_MEDIUM            = 21,
   DELAY_MS                     = 22,
-  EJECT_MEDIUM                 = 23
+  EJECT_MEDIUM                 = 23,
+  SET_ROTARY_ADDRESS           = 24
 };

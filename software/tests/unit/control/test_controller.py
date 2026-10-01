@@ -59,35 +59,6 @@ class TestUintToBytes:
         assert result == [np.uint8(1), np.uint8(2), np.uint8(3), np.uint8(4)]
 
 
-class TestRawToPsi:
-    """Test the raw_to_psi conversion formula from get_mcu_status.
-
-    Formula: (raw - output_min) * (p_max - p_min) / (output_max - output_min) + p_min
-    With: output_min=0, output_max=16383, p_min=-15, p_max=15
-    """
-
-    @staticmethod
-    def raw_to_psi(raw_pressure):
-        return (
-            (raw_pressure - MCU_CONSTANTS._output_min)
-            * (MCU_CONSTANTS._p_max - MCU_CONSTANTS._p_min)
-            / (MCU_CONSTANTS._output_max - MCU_CONSTANTS._output_min)
-            + MCU_CONSTANTS._p_min
-        )
-
-    def test_min_raw_gives_min_psi(self):
-        result = self.raw_to_psi(0)
-        assert result == pytest.approx(-15.0)
-
-    def test_max_raw_gives_max_psi(self):
-        result = self.raw_to_psi(16383)
-        assert result == pytest.approx(15.0)
-
-    def test_midpoint_gives_zero_psi(self):
-        result = self.raw_to_psi(16383 / 2)
-        assert result == pytest.approx(0.0, abs=0.01)
-
-
 from fluidics.control.controller import FluidController, FluidControllerSimulation
 from fluidics.control._def import COMMAND_STATUS
 
@@ -779,3 +750,152 @@ class TestTheSimulationMatchesTheRealController:
         assert fc.wait_for_completion() == COMMAND_STATUS.COMPLETED_WITHOUT_ERRORS
         assert fc.send_command_blocking(CMD_SET.CLEAR) == \
             COMMAND_STATUS.COMPLETED_WITHOUT_ERRORS
+
+
+import io
+
+
+def _recording_controller():
+    """A bare controller whose outgoing frames land in fc.frames."""
+    fc = _bare_controller()
+    fc._init_status_state()
+    fc.cmd_uid = 0
+    fc.frames = []
+    fc.send_mcu_command = fc.frames.append
+    return fc
+
+
+class TestValveSlotsInThePacket:
+    def test_six_valves_with_the_sixth_at_byte_17(self):
+        msg = _make_packet()
+        for value, byte in enumerate((6, 7, 8, 9, 10, 17), start=1):
+            msg[byte] = value
+        parsed = _bare_controller()._parse_packet(msg)
+        assert parsed["selector_valves_pos"] == [1, 2, 3, 4, 5, 6]
+
+    def test_a_slot_with_no_valve_reads_0(self):
+        parsed = _bare_controller()._parse_packet(_make_packet())
+        assert parsed["selector_valves_pos"] == [0] * 6
+
+    def test_the_dead_pressure_fields_are_gone(self):
+        assert "pressures" not in _bare_controller()._parse_packet(_make_packet())
+
+
+class TestMeasurementLog:
+    def _logged_row(self, msg):
+        fc = _bare_controller()
+        fc.log_measurements = True
+        fc.measurement_file = io.StringIO()
+        fc.counter_measurement_file_flush = 0
+        fc._log_packet(fc._parse_packet(msg))
+        return fc.measurement_file.getvalue().rstrip("\n")
+
+    def test_every_row_has_a_field_for_each_header_column(self):
+        row = self._logged_row(_make_packet())
+        header = controller_module.MEASUREMENT_CSV_HEADER
+        assert len(row.split(",")) == len(header.split(","))
+
+    def test_the_header_names_six_valves_and_no_pressures(self):
+        header = controller_module.MEASUREMENT_CSV_HEADER.split(",")
+        assert [h for h in header if h.startswith("sv")] == [f"sv{i}" for i in range(6)]
+        assert not {"p0", "p1", "p2", "p3"} & set(header)
+
+    def test_the_header_names_three_flow_slots(self):
+        header = controller_module.MEASUREMENT_CSV_HEADER.split(",")
+        assert [h for h in header if h.startswith("f")] == ["f1_raw", "f2_raw", "f0_raw"]
+
+
+class TestInitializeRotaryEncoding:
+    def test_two_arguments_send_the_five_byte_frame(self):
+        fc = _recording_controller()
+        fc.send_command(CMD_SET.INITIALIZE_ROTARY, 1, 10)
+        assert [int(b) for b in fc.frames[0]] == [0, 1, CMD_SET.INITIALIZE_ROTARY, 1, 10]
+
+    def test_an_address_adds_a_sixth_byte(self):
+        fc = _recording_controller()
+        fc.send_command(CMD_SET.INITIALIZE_ROTARY, 1, 10, 0x1A)
+        assert [int(b) for b in fc.frames[0]] == [0, 1, CMD_SET.INITIALIZE_ROTARY, 1, 10, 0x1A]
+
+
+class TestSimulationValveSlots:
+    def test_the_simulation_has_six_valve_slots(self):
+        fc = FluidControllerSimulation(serial_number="test")
+        assert sorted(fc.get_mcu_status()["selector_valves_pos"]) == list(range(6))
+
+
+class TestFlowSlotsInThePacket:
+    def test_three_slots_in_slot_order(self):
+        msg = _make_packet(flow_raw=100, flow_2_raw=200, flow_slot2_raw=-300)
+        assert _bare_controller()._parse_packet(msg)["flowrates_raw"] == [100, 200, -300]
+
+    def test_slot_2_does_not_disturb_valve_6(self):
+        msg = _make_packet(flow_slot2_raw=-1)   # 0xFFFF in bytes 15-16
+        msg[17] = 4
+        parsed = _bare_controller()._parse_packet(msg)
+        assert parsed["flowrates_raw"][2] == -1
+        assert parsed["selector_valves_pos"][5] == 4
+
+
+class TestSetRotaryAddressEncoding:
+    def test_from_and_to_follow_the_command(self):
+        fc = _recording_controller()
+        fc.send_command(CMD_SET.SET_ROTARY_ADDRESS, 0x10, 0x1A)
+        assert [int(b) for b in fc.frames[0]] == [0, 1, 24, 0x10, 0x1A]
+
+
+
+class _InFlightTransport:
+    """The MCU end of the port, with the race that matters at bring-up.
+
+    For each frame written it queues the status packet already on its way --
+    the firmware's previous UID and a terminal status -- and then acts on the
+    frame: it completes the command, except CLEAR when `withhold_clear`, so a
+    wait that returns anyway was fooled by the in-flight packet. Queued
+    packets are published on the next status poll, after send_command has
+    recorded its publish sequence, as the reader thread would publish them.
+    No threads: the suite's fast clock would outrun them.
+    """
+
+    def __init__(self, fc, firmware_uid=0, withhold_clear=True):
+        self.fc = fc
+        self.firmware_uid = firmware_uid   # 0: the last session ended on CLEAR
+        self.withhold_clear = withhold_clear
+        self.queued = []
+        self._peek = fc._peek_status
+        fc._peek_status = self.peek
+
+    def __call__(self, frame):
+        uid = (int(frame[0]) << 8) + int(frame[1])
+        cmd = int(frame[2])
+        self.queued.append((self.firmware_uid, cmd))
+        self.firmware_uid = 0 if cmd == CMD_SET.CLEAR else uid
+        if not (cmd == CMD_SET.CLEAR and self.withhold_clear):
+            self.queued.append((self.firmware_uid, cmd))
+
+    def peek(self):
+        while self.queued:
+            uid, cmd = self.queued.pop(0)
+            self.fc._publish_status(self.fc._parse_packet(_make_packet(uid=uid, cmd=cmd)))
+        return self._peek()
+
+
+def _transport_controller(**kwargs):
+    fc = _bare_controller()
+    fc._init_status_state()
+    fc.cmd_uid = 0
+    fc.send_mcu_command = _InFlightTransport(fc, **kwargs)
+    return fc
+
+
+class TestClearIsCorrelated:
+    def test_a_packet_in_flight_when_clear_is_written_does_not_complete_it(self):
+        """The firmware reports UID 0 after every CLEAR and after a reset, so
+        the packet already on its way when a CLEAR is written looked exactly
+        like that CLEAR's completion."""
+        fc = _transport_controller()
+        with pytest.raises(TimeoutError, match=r"command 0 \(uid 0\)"):
+            fc.clear(timeout=0.3)
+
+    def test_clear_returns_on_its_own_completion(self):
+        fc = _transport_controller(withhold_clear=False)
+        assert fc.clear(timeout=1) == COMMAND_STATUS.COMPLETED_WITHOUT_ERRORS

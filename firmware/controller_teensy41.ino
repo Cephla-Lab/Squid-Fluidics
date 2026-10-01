@@ -11,7 +11,12 @@
 #include "TTP.h"
 #include "SSCX.h"
 #include "_defs.h"
+#include "bus_rules.h"
 #include <PacketSerial.h>
+
+static_assert(sizeof(VALVE_POS_OFFSET) == SELECTORVALVE_MAX,
+              "bus_rules.h needs one status byte per valve slot");
+static_assert(FLOW_SLOTS == SLF3X_MAX, "bus_rules.h and _defs.h disagree on flow slots");
 
 // Class constructors and supporting global variables/definitions for the different modules we want
 void disableControlLoops();
@@ -51,16 +56,44 @@ uint8_t  rotary_retries[SELECTORVALVE_QTY];
 uint32_t rotary_attempt_ms[SELECTORVALVE_QTY];
 #define ROTARY_MAX_RETRIES 3
 
-// SLF3X flowrate sensor
-// Slot 0 is the process sensor (bus 1 / Wire1): it alone drives
-// global_flowrate_reading, volume integration and the CLEAR_LINES guard.
-// Slot 1 (bus 2 / Wire2) is telemetry -- transmitted, but not fed back.
-// Both start with init false, so an unpopulated slot reports INT16_MAX.
+// The slot initialized at 8-bit address `addr`, skipping slot `except`, or -1.
+// Two slots on one address would drive the same valve.
+int8_t valve_slot_at(uint8_t addr, int8_t except) {
+  for (uint8_t i = 0; i < SELECTORVALVE_QTY; i++) {
+    if ((int8_t)i != except && selectorvalves[i].initialized()
+        && selectorvalves[i].address8() == addr) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+// SLF3X flowrate sensors, one per slot (bus_rules.h: slot 0 = bus 1 = J15,
+// slot 1 = bus 2 = J17, slot 2 = bus 0 = J20). Slot 0 is the process sensor:
+// it alone drives global_flowrate_reading, volume integration and the
+// CLEAR_LINES guard; slots 1 and 2 are transmitted, not fed back. All start
+// with init false, so an unpopulated slot reports INT16_MAX.
 SLF3X flowsensors[SLF3X_MAX];
 bool flowsensor_debounce = false;
 uint32_t flow_time;
 bool flowsensor_debounce_neg = false;
 uint32_t flow_time_neg;
+
+// True if any initialized valve puts the flow sensor's address on the wire.
+bool valve_conflicts_with_flow_sensor() {
+  for (uint8_t i = 0; i < SELECTORVALVE_QTY; i++) {
+    if (selectorvalves[i].initialized()
+        && valve_address_conflicts(selectorvalves[i].address8(), SLF3X_ADDRESS)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// True if a flow sensor is running on the selector valves' bus (J20).
+bool flow_sensor_on_valve_bus() {
+  return flowsensors[flow_slot_for_bus(0)].init;
+}
 
 // SSCX pressure sensors
 SSCX pressuresensors[SSCX_QTY];
@@ -447,13 +480,12 @@ void sendStatusPacket() {
         byte 3      : status of the command (see _def.py)
         byte 4      : MCU internal program being executed (see _def.py)
         byte 5      : Bubble sensor state (high and low nibble)
-        byte 6-10   : Selector valves status (1,2,3,4,5)
+        byte 6-10   : Selector valves 1-5 position (0 = slot never initialized)
         byte 11-12  : state of valve D1-D16
         byte 13-14  : pump power
-        byte 15-16  : pressure sensor 1 reading
-        byte 17-18  : pressure sensor 2 reading
-        byte 19-20  : pressure sensor 3 reading
-        byte 21-22  : pressure sensor 4 reading
+        byte 15-16  : flow sensor slot 2 reading (bus 0 / Wire / J20)
+        byte 17     : Selector valve 6 position
+        byte 18-22  : reserved, 0 (were SSCX pressure readings no build populated)
         byte 23-24  : flow sensor slot 0 reading (bus 1 / Wire1)
         byte 25-26  : flow sensor slot 1 reading (bus 2 / Wire2)
                       INT16_MAX (32767) means no sensor or a failed read, and
@@ -462,7 +494,7 @@ void sendStatusPacket() {
         byte 28-29  : total volume (ul), range: 0 - 5000
   */
   double intermediate;
-  byte buffer_tx[FROM_MCU_MSG_LENGTH];
+  byte buffer_tx[FROM_MCU_MSG_LENGTH] = {0};  // reserved bytes go out as 0
   buffer_tx[0] = byte(cmd_uid >> 8);
   buffer_tx[1] = byte(cmd_uid & 0xFF);
 
@@ -470,19 +502,22 @@ void sendStatusPacket() {
   buffer_tx[3] = execution_status;
   buffer_tx[4] = state;
 
+#ifndef BOARD_V4S
+  // v4s has no bubble sensors; their pins float, so byte 5 stays 0.
   uint8_t fs1 = fluidsensor_front.read();
   uint8_t fs2 = fluidsensor_back.read();
   buffer_tx[5] = byte((fs1 << 4) | fs2);
+#endif
 
-  // Read from selector valves
+  // Selector valves. A slot whose valve never answered reports 0 -- not the
+  // driver's 22 ("not initialized") -- which the host reads as "no valve".
   for (uint8_t i = 0; i < SELECTORVALVE_QTY; i++) {
-    buffer_tx[6 + i] =  byte(selectorvalves[i].read_register(RheoLink_STATUS));
-  }
-  // Fill remaining entries of buffer with 0
-  for (uint8_t i = SELECTORVALVE_QTY; i < SELECTORVALVE_MAX; i++) {
-    buffer_tx[6 + i] = 0;
+    buffer_tx[VALVE_POS_OFFSET[i]] = selectorvalves[i].initialized()
+        ? byte(selectorvalves[i].read_register(RheoLink_STATUS)) : 0;
   }
 
+#ifndef BOARD_V4S
+  // v4s has no solenoid driver or disc pump; bytes 11-14 stay 0.
   buffer_tx[11] =  byte(valves.local_state >> 8);
   buffer_tx[12] =  byte(valves.local_state & 0xFF);
 
@@ -490,18 +525,7 @@ void sendStatusPacket() {
   uint16_t normed_power = static_cast<uint16_t>(intermediate);
   buffer_tx[13] = byte(normed_power >> 8);
   buffer_tx[14] = byte(normed_power & 0xFF);
-
-  // Get pressure readings
-  uint16_t press_readings[2];
-  for (uint8_t i = 0; i < SSCX_QTY; i++) {
-    pressuresensors[i].read(press_readings);
-    buffer_tx[15 + (2 * i)] = byte(press_readings[SSCX_PRESS_IDX] >> 8);
-    buffer_tx[16 + (2 * i)] = byte(press_readings[SSCX_PRESS_IDX] & 0xFF);
-  }
-  for (uint8_t i = SSCX_QTY; i < SSCX_MAX; i++) {
-    buffer_tx[15 + (2 * i)] = 0;
-    buffer_tx[16 + (2 * i)] = 0;
-  }
+#endif
 
   // debug: include peak pressure and target pressure
   if (false) {
@@ -531,8 +555,8 @@ void sendStatusPacket() {
   int16_t flow_readings[3];
   for (uint8_t i = 0; i < SLF3X_MAX; i++) {
     flowsensors[i].read(flow_readings);
-    buffer_tx[23 + (2 * i)] = byte(flow_readings[SLF3X_FLOW_IDX] >> 8);
-    buffer_tx[24 + (2 * i)] = byte(flow_readings[SLF3X_FLOW_IDX] & 0xFF);
+    buffer_tx[FLOW_SLOT_OFFSET[i]] = byte(flow_readings[SLF3X_FLOW_IDX] >> 8);
+    buffer_tx[FLOW_SLOT_OFFSET[i] + 1] = byte(flow_readings[SLF3X_FLOW_IDX] & 0xFF);
   }
 
   buffer_tx[27] = byte(time_since_cmd_started / 1000); // byte(time_cmd_operation  / 1000);
@@ -560,6 +584,33 @@ void disableControlLoops() {
 }
 
 
+// What this build's board can carry out. FLUIDICS V4 SIMPLE (BOARD_V4S) has
+// only the I2C buses: no solenoid driver, bubble sensors, pressure sensors or
+// disc pump -- their pins are unconnected. A whitelist, so a command added
+// later is refused on v4s until someone decides it belongs there.
+bool board_supports(SerialCommands_t cmd) {
+#ifdef BOARD_V4S
+  switch (cmd) {
+    case CLEAR:
+    case INITIALIZE_FLOW_SENSOR:
+    case INITIALIZE_ROTARY:
+    case INITIALIZE_BANG_BANG_PARAMS:   // stores parameters only
+    case INITIALIZE_PID_PARAMS:         // stores parameters only
+    case SET_ROTARY_VALVE:
+    case STOP_CLOSED_LOOP:
+    case VOL_INTEGRATE_SETTING:
+    case DELAY_MS:
+    case SET_ROTARY_ADDRESS:
+      return true;
+    default:
+      return false;
+  }
+#else
+  (void)cmd;
+  return true;
+#endif
+}
+
 // We process the incoming command here
 void onPacketReceived(const uint8_t* buffer, size_t size) {
   // If we don't have enough bytes, return out before having a buffer overflow
@@ -572,11 +623,18 @@ void onPacketReceived(const uint8_t* buffer, size_t size) {
   cmd_uid = (buffer[0] << 8) + buffer[1];
   // we got a new command!
   time_since_cmd_started = 0;
+  if (!board_supports(cmd_rxed)) {
+    state = INTERNAL_STATE_IDLE;
+    execution_status = CMD_INVALID;
+    return;
+  }
   switch (cmd_rxed) {
     case CLEAR: {
         // Stop all operations
         disableControlLoops();
-        valves.clear_all();
+#ifndef BOARD_V4S
+        valves.clear_all();   // v4s has no solenoid driver behind pins 2/3/10
+#endif
         // Home every selector valve at once: the sends are quick I2C
         // writes, and the waiting happens in the state machine, in
         // parallel -- not one blocking (up to 8 s) wait per valve inside
@@ -589,6 +647,12 @@ void onPacketReceived(const uint8_t* buffer, size_t size) {
         bool homing = false;
         for (uint8_t i = 0; i < SELECTORVALVE_QTY; i++) {
           rotary_target[i] = 0;
+          // A slot whose valve never answered is not a failure to home:
+          // with six slots and two valves fitted, counting it made every
+          // CLEAR fail.
+          if (!selectorvalves[i].initialized()) {
+            continue;
+          }
           uint8_t send_err = selectorvalves[i].send_command(RheoLink_POS, 1);
           err |= send_err;
           if (send_err == 0) {
@@ -699,15 +763,21 @@ void onPacketReceived(const uint8_t* buffer, size_t size) {
         bool do_crc = buffer[5];
         bool result;
 
-        // The bus fixes the slot: bus 1 -> slot 0 -> packet bytes 23-24,
-        // bus 2 -> slot 1 -> bytes 25-26. Bus 0 (Wire) is rejected; it carries
-        // the selector valves, whose transactions would stall flow reads.
-        if (bus < SLF3X_FIRST_BUS || bus >= SLF3X_FIRST_BUS + SLF3X_MAX) {
+        // The bus fixes the slot and the slot fixes the packet bytes
+        // (bus_rules.h): bus 1 -> 23-24, bus 2 -> 25-26, bus 0 (J20) -> 15-16.
+        int8_t slot = flow_slot_for_bus(bus);
+        if (slot < 0) {
           state = INTERNAL_STATE_IDLE;
           execution_status = CMD_INVALID;
           return;
         }
-        uint8_t slot = bus - SLF3X_FIRST_BUS;
+        // Bus 0 is the valves' bus: a valve at 0x10 answers at the sensor's
+        // 0x08 on the wire.
+        if (bus == 0 && valve_conflicts_with_flow_sensor()) {
+          state = INTERNAL_STATE_IDLE;
+          execution_status = CMD_INVALID;
+          return;
+        }
         result = flowsensors[slot].begin(*SLF3X_BUS_BY_SLOT[slot], medium, do_crc);
 
         if (result) {
@@ -756,23 +826,43 @@ void onPacketReceived(const uint8_t* buffer, size_t size) {
       break;
 
     case INITIALIZE_ROTARY: {
-        // Ensure the correct amount of data was sent
-        // If we don't see exactly 5 bytes, don't do anything
-        // 3 bytes for cmd and UID, 2 for I2C address and max
+        // [uid, uid, cmd, idx, max_pos] takes the slot's address from
+        // SELECTORVALVE_ADDRS; [uid, uid, cmd, idx, max_pos, addr] gives it
+        // (8-bit write form). The slot is initialized only if its valve ACKs.
         state = INTERNAL_STATE_IDLE;
-        if (size != 5) {
+        if (size != 5 && size != 6) {
           execution_status = CMD_INVALID;
           return;
         }
-        // Ensure we are trying to initialize a pump that exists
         uint8_t idx = buffer[3];
         if (idx >= SELECTORVALVE_QTY) {
           execution_status = CMD_INVALID;
           return;
         }
-        // Begin initialization
-        uint8_t addr = SELECTORVALVE_ADDRS[idx];
         uint8_t max_pos = buffer[4];
+        uint8_t addr = (size == 6) ? buffer[5] : SELECTORVALVE_ADDRS[idx];
+        // The controller keeps its slots across host sessions. Drop this
+        // slot's old state first, so a refused request never leaves an earlier
+        // session's address and pos_max live behind a host that moves on.
+        selectorvalves[idx].deinit();
+        if (!valve_address_valid(addr)) {
+          execution_status = CMD_INVALID;
+          return;
+        }
+        // A flow sensor on J20 already answers at 0x08 on this bus.
+        if (flow_sensor_on_valve_bus() && valve_address_conflicts(addr, SLF3X_ADDRESS)) {
+          execution_status = CMD_INVALID;
+          return;
+        }
+        // Another slot holding this address holds it from an earlier
+        // configuration -- the host's config admits no duplicates -- so the
+        // newest INITIALIZE_ROTARY wins. Refusing it instead left the stale
+        // slot driving this valve when two valves swapped addresses. The
+        // dropped slot reports 0 until the host initializes it again.
+        int8_t holder = valve_slot_at(addr, idx);
+        if (holder >= 0) {
+          selectorvalves[holder].deinit();
+        }
         uint8_t result = selectorvalves[idx].begin(SELECTORVALVE_WIRE, addr, 1, max_pos);
         if (result == 0) {
           execution_status = COMPLETED_WITHOUT_ERRORS;
@@ -780,7 +870,6 @@ void onPacketReceived(const uint8_t* buffer, size_t size) {
         else {
           execution_status = CMD_EXECUTION_ERROR;
         }
-
       }
       break;
 
@@ -1405,6 +1494,49 @@ void onPacketReceived(const uint8_t* buffer, size_t size) {
         execution_status = IN_PROGRESS;
         state = INTERNAL_STATE_DELAYING;
         time_cmd_operation = 0;
+      }
+      break;
+    case SET_ROTARY_ADDRESS: {
+        // [uid, uid, cmd, from_addr, to_addr], 8-bit write form. A bench
+        // operation (software/readdress_valve.py) with one valve on the bus:
+        // sends RheoLink 'N'. IDEX applies the new address only after the
+        // valve's driver board resets (protocol 2321383F), so this neither
+        // waits nor verifies -- the tool does, after a power cycle.
+        if (size != 5) {
+          state = INTERNAL_STATE_IDLE;
+          execution_status = CMD_INVALID;
+          return;
+        }
+        if (state != INTERNAL_STATE_IDLE) {
+          // Busy: refuse without disturbing the operation in progress.
+          execution_status = CMD_INVALID;
+          return;
+        }
+        uint8_t from_addr = buffer[3];
+        uint8_t to_addr = buffer[4];
+        if (!valve_address_valid(from_addr) || !valve_address_valid(to_addr)
+            || from_addr == to_addr
+            || valve_address_conflicts(to_addr, SLF3X_ADDRESS)
+            || valve_slot_at(to_addr, -1) >= 0) {
+          execution_status = CMD_INVALID;
+          return;
+        }
+        RheoLink target;
+        uint8_t err = target.begin(SELECTORVALVE_WIRE, from_addr, 1, 1);
+        if (err == 0) {
+          err = target.send_command(RheoLink_NEW_ADDR, to_addr);
+        }
+        if (err != 0) {
+          execution_status = CMD_EXECUTION_ERROR;
+          return;
+        }
+        // The valve stops answering at from_addr once it resets; a slot still
+        // pointed there would only poll silence.
+        int8_t stale = valve_slot_at(from_addr, -1);
+        if (stale >= 0) {
+          selectorvalves[stale].deinit();
+        }
+        execution_status = COMPLETED_WITHOUT_ERRORS;
       }
       break;
     default:
