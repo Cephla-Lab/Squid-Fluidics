@@ -18,3 +18,15 @@ class TestValveAddressRules:
         assert len(DEFAULT_VALVE_ADDRESSES) == MAX_VALVES == 6
         assert all(is_valid_valve_address(a) for a in DEFAULT_VALVE_ADDRESSES)
         assert len(set(DEFAULT_VALVE_ADDRESSES)) == MAX_VALVES
+
+
+from fluidics.control.valve_address import conflicts_with_flow_sensor
+
+
+class TestFlowSensorCollision:
+    def test_0x10_is_the_flow_sensor_on_the_wire(self):
+        assert conflicts_with_flow_sensor(0x10)
+
+    @pytest.mark.parametrize("addr", [0x0E, 0x12, 0x14, 0x16, 0x18, 0x1A])
+    def test_other_addresses_are_clear(self, addr):
+        assert not conflicts_with_flow_sensor(addr)

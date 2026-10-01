@@ -20,3 +20,14 @@ VALVE_ADDR_MAX = 0xFE
 def is_valid_valve_address(addr):
     """Even and within IDEX's range -- what the 'N' command accepts."""
     return VALVE_ADDR_MIN <= addr <= VALVE_ADDR_MAX and addr % 2 == 0
+
+
+# Mirrors SLF3X_ADDRESS (firmware/SLF3X.h): the flow sensor's fixed 7-bit
+# address. A sensor on J20 shares the valves' bus.
+FLOW_SENSOR_ADDRESS = 0x08
+
+
+def conflicts_with_flow_sensor(addr):
+    """True when a valve at `addr` puts the flow sensor's address on the wire
+    (0x10 >> 1 == 0x08)."""
+    return (addr >> 1) == FLOW_SENSOR_ADDRESS

@@ -800,6 +800,10 @@ class TestMeasurementLog:
         assert [h for h in header if h.startswith("sv")] == [f"sv{i}" for i in range(6)]
         assert not {"p0", "p1", "p2", "p3"} & set(header)
 
+    def test_the_header_names_three_flow_slots(self):
+        header = controller_module.MEASUREMENT_CSV_HEADER.split(",")
+        assert [h for h in header if h.startswith("f")] == ["f1_raw", "f2_raw", "f0_raw"]
+
 
 class TestInitializeRotaryEncoding:
     def test_two_arguments_send_the_five_byte_frame(self):
@@ -817,3 +821,16 @@ class TestSimulationValveSlots:
     def test_the_simulation_has_six_valve_slots(self):
         fc = FluidControllerSimulation(serial_number="test")
         assert sorted(fc.get_mcu_status()["selector_valves_pos"]) == list(range(6))
+
+
+class TestFlowSlotsInThePacket:
+    def test_three_slots_in_slot_order(self):
+        msg = _make_packet(flow_raw=100, flow_2_raw=200, flow_slot2_raw=-300)
+        assert _bare_controller()._parse_packet(msg)["flowrates_raw"] == [100, 200, -300]
+
+    def test_slot_2_does_not_disturb_valve_6(self):
+        msg = _make_packet(flow_slot2_raw=-1)   # 0xFFFF in bytes 15-16
+        msg[17] = 4
+        parsed = _bare_controller()._parse_packet(msg)
+        assert parsed["flowrates_raw"][2] == -1
+        assert parsed["selector_valves_pos"][5] == 4

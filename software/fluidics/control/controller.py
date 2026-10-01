@@ -24,7 +24,7 @@ _logger = logging.getLogger(__name__)
 
 # The measurement CSV's columns, one per field _log_packet writes.
 MEASUREMENT_CSV_HEADER = ("timestamp,rx_uid,rx_cmd,cmd_status,mcu_state,bs1,bs2,mcu_time,"
-                          "sv0,sv1,sv2,sv3,sv4,sv5,valves,pump,f1_raw,f2_raw,vol_uL")
+                          "sv0,sv1,sv2,sv3,sv4,sv5,valves,pump,f1_raw,f2_raw,f0_raw,vol_uL")
 
 
 def to_int16(raw):
@@ -341,11 +341,11 @@ class FluidController(Microcontroller, PacketSubscribers):
         byte 6-10   : Selector valves 1-5 position (0 = slot never initialized)
         byte 11-12  : state of valve D1-D16
         byte 13-14  : pump power
-        byte 15-16  : reserved, 0
+        byte 15-16  : flow sensor slot 2 reading (index 0 / J20)
         byte 17     : Selector valve 6 position
         byte 18-22  : reserved, 0 (were pressure readings no build populated)
-        byte 23-24  : flow sensor 1 reading
-        byte 25-26  : flow sensor 2 reading
+        byte 23-24  : flow sensor slot 0 reading (index 1 / J15)
+        byte 25-26  : flow sensor slot 1 reading (index 2 / J17)
         byte 27     : elapsed time since the start of the last internal program (in seconds)
         byte 28-29  : total volume (ul), range: 0 - 5000
         '''
@@ -364,8 +364,8 @@ class FluidController(Microcontroller, PacketSubscribers):
 
         # Raw int16 exactly as received. 32767 is the SLF3X "no reading"
         # sentinel, which the driver compares against before scaling.
-        flow_1_raw = to_int16((int(msg[23]) << 8) + msg[24])
-        flow_2_raw = to_int16((int(msg[25]) << 8) + msg[26])
+        flowrates_raw = [to_int16((int(msg[o]) << 8) + msg[o + 1])
+                         for o in FLOW_SLOT_OFFSETS]
 
         MCU_CMD_time_elapsed = msg[27]
 
@@ -385,7 +385,8 @@ class FluidController(Microcontroller, PacketSubscribers):
             # sensor's scale factor, which lives with the driver that knows
             # which part it is talking to (flow_sensor.py). Scaling here as
             # well would be a second copy, free to disagree -- and it did.
-            "flowrates_raw": [flow_1_raw, flow_2_raw],
+            # Ordered by slot: index 1, index 2, index 0.
+            "flowrates_raw": flowrates_raw,
             "vol_ul": vol_ul,
         }
 

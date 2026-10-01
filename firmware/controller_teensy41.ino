@@ -16,6 +16,7 @@
 
 static_assert(sizeof(VALVE_POS_OFFSET) == SELECTORVALVE_MAX,
               "bus_rules.h needs one status byte per valve slot");
+static_assert(FLOW_SLOTS == SLF3X_MAX, "bus_rules.h and _defs.h disagree on flow slots");
 
 // Class constructors and supporting global variables/definitions for the different modules we want
 void disableControlLoops();
@@ -67,16 +68,32 @@ int8_t valve_slot_at(uint8_t addr, int8_t except) {
   return -1;
 }
 
-// SLF3X flowrate sensor
-// Slot 0 is the process sensor (bus 1 / Wire1): it alone drives
-// global_flowrate_reading, volume integration and the CLEAR_LINES guard.
-// Slot 1 (bus 2 / Wire2) is telemetry -- transmitted, but not fed back.
-// Both start with init false, so an unpopulated slot reports INT16_MAX.
+// SLF3X flowrate sensors, one per slot (bus_rules.h: slot 0 = bus 1 = J15,
+// slot 1 = bus 2 = J17, slot 2 = bus 0 = J20). Slot 0 is the process sensor:
+// it alone drives global_flowrate_reading, volume integration and the
+// CLEAR_LINES guard; slots 1 and 2 are transmitted, not fed back. All start
+// with init false, so an unpopulated slot reports INT16_MAX.
 SLF3X flowsensors[SLF3X_MAX];
 bool flowsensor_debounce = false;
 uint32_t flow_time;
 bool flowsensor_debounce_neg = false;
 uint32_t flow_time_neg;
+
+// True if any initialized valve puts the flow sensor's address on the wire.
+bool valve_conflicts_with_flow_sensor() {
+  for (uint8_t i = 0; i < SELECTORVALVE_QTY; i++) {
+    if (selectorvalves[i].initialized()
+        && valve_address_conflicts(selectorvalves[i].address8(), SLF3X_ADDRESS)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// True if a flow sensor is running on the selector valves' bus (J20).
+bool flow_sensor_on_valve_bus() {
+  return flowsensors[flow_slot_for_bus(0)].init;
+}
 
 // SSCX pressure sensors
 SSCX pressuresensors[SSCX_QTY];
@@ -466,7 +483,7 @@ void sendStatusPacket() {
         byte 6-10   : Selector valves 1-5 position (0 = slot never initialized)
         byte 11-12  : state of valve D1-D16
         byte 13-14  : pump power
-        byte 15-16  : reserved, 0
+        byte 15-16  : flow sensor slot 2 reading (bus 0 / Wire / J20)
         byte 17     : Selector valve 6 position
         byte 18-22  : reserved, 0 (were SSCX pressure readings no build populated)
         byte 23-24  : flow sensor slot 0 reading (bus 1 / Wire1)
@@ -532,8 +549,8 @@ void sendStatusPacket() {
   int16_t flow_readings[3];
   for (uint8_t i = 0; i < SLF3X_MAX; i++) {
     flowsensors[i].read(flow_readings);
-    buffer_tx[23 + (2 * i)] = byte(flow_readings[SLF3X_FLOW_IDX] >> 8);
-    buffer_tx[24 + (2 * i)] = byte(flow_readings[SLF3X_FLOW_IDX] & 0xFF);
+    buffer_tx[FLOW_SLOT_OFFSET[i]] = byte(flow_readings[SLF3X_FLOW_IDX] >> 8);
+    buffer_tx[FLOW_SLOT_OFFSET[i] + 1] = byte(flow_readings[SLF3X_FLOW_IDX] & 0xFF);
   }
 
   buffer_tx[27] = byte(time_since_cmd_started / 1000); // byte(time_cmd_operation  / 1000);
@@ -706,15 +723,21 @@ void onPacketReceived(const uint8_t* buffer, size_t size) {
         bool do_crc = buffer[5];
         bool result;
 
-        // The bus fixes the slot: bus 1 -> slot 0 -> packet bytes 23-24,
-        // bus 2 -> slot 1 -> bytes 25-26. Bus 0 (Wire) is rejected; it carries
-        // the selector valves, whose transactions would stall flow reads.
-        if (bus < SLF3X_FIRST_BUS || bus >= SLF3X_FIRST_BUS + SLF3X_MAX) {
+        // The bus fixes the slot and the slot fixes the packet bytes
+        // (bus_rules.h): bus 1 -> 23-24, bus 2 -> 25-26, bus 0 (J20) -> 15-16.
+        int8_t slot = flow_slot_for_bus(bus);
+        if (slot < 0) {
           state = INTERNAL_STATE_IDLE;
           execution_status = CMD_INVALID;
           return;
         }
-        uint8_t slot = bus - SLF3X_FIRST_BUS;
+        // Bus 0 is the valves' bus: a valve at 0x10 answers at the sensor's
+        // 0x08 on the wire.
+        if (bus == 0 && valve_conflicts_with_flow_sensor()) {
+          state = INTERNAL_STATE_IDLE;
+          execution_status = CMD_INVALID;
+          return;
+        }
         result = flowsensors[slot].begin(*SLF3X_BUS_BY_SLOT[slot], medium, do_crc);
 
         if (result) {
@@ -779,6 +802,11 @@ void onPacketReceived(const uint8_t* buffer, size_t size) {
         uint8_t max_pos = buffer[4];
         uint8_t addr = (size == 6) ? buffer[5] : SELECTORVALVE_ADDRS[idx];
         if (!valve_address_valid(addr) || valve_slot_at(addr, idx) >= 0) {
+          execution_status = CMD_INVALID;
+          return;
+        }
+        // A flow sensor on J20 already answers at 0x08 on this bus.
+        if (flow_sensor_on_valve_bus() && valve_address_conflicts(addr, SLF3X_ADDRESS)) {
           execution_status = CMD_INVALID;
           return;
         }

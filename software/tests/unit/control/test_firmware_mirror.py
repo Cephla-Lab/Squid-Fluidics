@@ -145,7 +145,8 @@ class TestScalarMirrors:
 
 
 from fluidics.control.valve_address import (
-    DEFAULT_VALVE_ADDRESSES, MAX_VALVES, VALVE_ADDR_MAX, VALVE_ADDR_MIN)
+    DEFAULT_VALVE_ADDRESSES, FLOW_SENSOR_ADDRESS, MAX_VALVES, VALVE_ADDR_MAX,
+    VALVE_ADDR_MIN)
 
 
 class TestPacketAndAddressMirrors:
@@ -165,3 +166,12 @@ class TestPacketAndAddressMirrors:
     def test_valve_address_range(self):
         assert VALVE_ADDR_MIN == parse_define("bus_rules.h", "VALVE_ADDR_MIN")
         assert VALVE_ADDR_MAX == parse_define("bus_rules.h", "VALVE_ADDR_MAX")
+
+    def test_flow_slot_bytes(self):
+        assert list(_def.FLOW_SLOT_OFFSETS) == parse_array("bus_rules.h", "FLOW_SLOT_OFFSET")
+
+    def test_flow_slot_count(self):
+        assert parse_define("_defs.h", "SLF3X_MAX") == len(_def.FLOW_SLOT_OFFSETS)
+
+    def test_flow_sensor_address(self):
+        assert FLOW_SENSOR_ADDRESS == parse_define("SLF3X.h", "SLF3X_ADDRESS")
