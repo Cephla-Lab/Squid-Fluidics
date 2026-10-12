@@ -57,6 +57,44 @@ class OperationError(FluidicsError):
     """A step failed; something is wrong with the step."""
 
 
+class ReservoirError(FluidicsError):
+    """A reagent source cannot supply a draw. Typed, and let through the
+    operations' wrappers like Cancelled, so the reservoir gate's replay and
+    the run's reporting see which reservoir and by how much."""
+
+
+class ReservoirOverdraw(ReservoirError):
+    def __init__(self, key, needed_ul, remaining_ul):
+        super().__init__(f"{key}: {needed_ul:.0f} uL needed, {remaining_ul:.0f} uL left")
+        self.key, self.needed_ul, self.remaining_ul = key, needed_ul, remaining_ul
+
+
+class ReservoirDrawTooLarge(ReservoirError):
+    def __init__(self, key, volume_ul, usable_ul):
+        super().__init__(f"{key}: a draw of {volume_ul:.0f} uL exceeds a full well's "
+                         f"{usable_ul:.0f} uL; split the step")
+        self.key, self.volume_ul, self.usable_ul = key, volume_ul, usable_ul
+
+
+class ReservoirUndeclared(ReservoirError):
+    """The ledger could not restore an entry and will not guess: the
+    operator declares its refill first."""
+
+
+class ReservoirNoWell(ReservoirError):
+    """A draw through the sipper's port with the tip in no well: refused at
+    the pump, the last line of the no-air rule."""
+
+
+class ReservoirWriteError(ReservoirError):
+    """The ledger could not be written, so the draw it would have recorded
+    was not started."""
+
+
+class ReservoirInUse(ReservoirError):
+    """Another process holds this rig's ledger."""
+
+
 class Cancelled(FluidicsError):
     """The run stopped early, on purpose."""
 
