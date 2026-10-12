@@ -18,7 +18,7 @@ class TestReferences:
     def test_a_key_round_trips(self):
         assert well_key(WellRef("ssct", "A3")) == "ssct/A3"
 
-    @pytest.mark.parametrize("text", ["", "A", "3", "I1", "A13", "a1", "ssct/", "/A1", "a/b/A1", "A1 "])
+    @pytest.mark.parametrize("text", ["", "A", "3", "I1", "A13", "a1", "ssct/", "/A1", "a/b/A1", "A1 ", "A1\n"])
     def test_bad_spellings_are_refused_with_the_rule(self, text):
         with pytest.raises(ValueError, match="well"):
             parse_ref(text, "probes")
@@ -43,6 +43,13 @@ class TestGeometry:
     def test_a_range_expands_column_major_and_mixes_with_singles(self):
         assert expand_wells(["A1:C1", "H12"], G96) == ["A1", "B1", "C1", "H12"]
         assert expand_wells(["G12:H12"], G96) == ["G12", "H12"]
+
+    def test_a_trailing_newline_is_not_a_well(self):
+        assert not G96.is_well("A1\n")
+        with pytest.raises(ValueError, match="not a well name"):
+            expand_wells(["A1\n"], G96)
+        with pytest.raises(ValueError, match="not a well name"):
+            expand_wells(["A1:B1\n"], G96)
 
     def test_a_backwards_or_unknown_range_is_refused(self):
         with pytest.raises(ValueError):

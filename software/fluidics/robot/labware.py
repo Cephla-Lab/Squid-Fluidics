@@ -39,7 +39,7 @@ class PlateGeometry:
 
     def index(self, well):
         """(row, column), zero-based; ValueError for a well this plate lacks."""
-        match = _WELL.match(well or "")
+        match = _WELL.fullmatch(well or "")
         if not match:
             raise ValueError(f"{well!r} is not a well name")
         letter, number = match.group(1), int(match.group(2))
@@ -73,7 +73,7 @@ def parse_ref(text, default_reservoir, geometry=G96):
     """`A3` on the default reservoir, or `ssct/A3`. Anything else is refused
     with the rule spelled out, so a typo fails at time zero; the well must
     exist on `geometry` (I1 and A13 are not wells)."""
-    match = _REF.match(text or "")
+    match = _REF.fullmatch(text or "")
     if not match:
         raise ValueError(
             f"{text!r} is not a well: write A1..H12, or reservoir/A1 "
