@@ -111,13 +111,15 @@ class XYZStage:
             self._end_early([axis], cause)
             raise
 
-    def close(self, quiescent=True):
+    def close(self, quiescent=True, retract=True):
         """Quiescent: retract, brake, disable, disconnect. Under a job that
         did not stop in time: no moves at all, a halt instead. Returns the
-        exceptions the steps raised, each shielded."""
+        exceptions the steps raised, each shielded.
+        retract=False: a quiescent close makes no move (the sipper parked)."""
         steps = []
         if quiescent and self._homed:
-            steps.append(self.retract)
+            if retract:
+                steps.append(self.retract)
         else:
             steps.append(self.halt)
         steps.append(lambda: self._service.engage_brake(self._z))
@@ -134,6 +136,10 @@ class XYZStage:
         return errors
 
     # --- where the axes are ---
+
+    @property
+    def is_homed(self):
+        return self._homed
 
     @property
     def is_retracted(self):

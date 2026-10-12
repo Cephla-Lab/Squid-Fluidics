@@ -122,3 +122,39 @@ def test_teaching_replaces_the_live_placement_and_clears_the_witness(sipper):
     assert robot.current_well is None
     robot.go_to_well(WellRef("probes", "A1"))
     assert robot.position() == (13.0, 2.0, 51.0)
+
+
+def test_a_quiescent_close_leaves_the_tip_wet_in_the_park_well_and_no_witness(sipper):
+    """The park is the last move: the stage's close must not retract it out
+    of the park well, and a closed robot vouches for no well."""
+    robot, service = sipper
+    robot.go_to_well(WellRef("probes", "A1"))
+    assert robot.close(quiescent=True) == []
+    x, y = SSCT.xy_mm("H11")
+    assert service.position_of("X1") == pytest.approx(x)
+    assert service.position_of("Y2") == pytest.approx(y)
+    assert service.position_of("Z3") == pytest.approx(SSCT.dip_z_mm)
+    assert robot.current_well is None
+    assert not service.connected
+
+
+def test_a_close_under_a_live_job_halts_where_it_is_and_leaves_no_witness(sipper):
+    robot, service = sipper
+    robot.go_to_well(WellRef("probes", "A1"))
+    before = len(service.log)
+    robot.close(quiescent=False)
+    tail = service.log[before:]
+    assert "move_to" not in [verb for verb, _ in tail]
+    assert all(("stop", axis) in tail for axis in AXES.values())
+    assert robot.current_well is None
+
+
+def test_a_quiescent_close_on_an_unhomed_stage_makes_no_move_and_reports_nothing():
+    control = RunControl()
+    service = SimulatedService(AXES.values(), STROKES, instant=True)
+    stage = XYZStage(service, AXES, 0.0, 50.0, 20.0, control)
+    stage.connect()
+    robot = RobotSipper(stage, {"probes": PROBES, "ssct": SSCT}, "probes",
+                        agitate_amplitude_mm=5.0, park_well=WellRef("ssct", "H11"))
+    assert robot.close(quiescent=True) == []
+    assert "move_to" not in [verb for verb, _ in service.log]

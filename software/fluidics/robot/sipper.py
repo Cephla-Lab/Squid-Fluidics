@@ -99,13 +99,20 @@ class RobotSipper:
         self._stage.halt()
 
     def close(self, quiescent=True):
-        """Park (when quiescent), then the stage's close. Returns the
-        exceptions the steps raised."""
+        """Quiescent on a homed stage: park, then the stage's close without
+        its retract, so the tip stays wet in the park well (a park that
+        failed still ends retracted). Otherwise the stage's close alone,
+        which makes no move here. A closed robot vouches for no well.
+        Returns the exceptions the steps raised."""
+        self.current_well = None
         errors = []
-        if quiescent:
+        parked = False
+        if quiescent and self._stage.is_homed:
             try:
                 self.park()
+                parked = True
             except Exception as e:
                 errors.append(e)
-        errors.extend(self._stage.close(quiescent=quiescent))
+        errors.extend(self._stage.close(quiescent=quiescent, retract=not parked))
+        self.current_well = None
         return errors
