@@ -3,7 +3,7 @@ from tests.conftest import in_a_fresh_interpreter
 
 CODE = """
 import sys
-import fluidics.robot.labware, fluidics.robot.simulation, fluidics.robot.stage
+import fluidics.robot.labware, fluidics.robot.simulation, fluidics.robot.sipper, fluidics.robot.stage
 bad = [m for m in sys.modules if m.startswith("fluidics.control") or m.startswith("servo_service")
        or m.startswith("PyQt5") or m.startswith("qtpy")]
 print(",".join(sorted(bad)))
