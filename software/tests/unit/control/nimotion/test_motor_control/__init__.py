@@ -1,0 +1,1 @@
+"""Motor control module tests"""
