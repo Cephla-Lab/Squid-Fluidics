@@ -328,3 +328,36 @@ def _fast_clock(monkeypatch):
 
     # Patch threading.Event.wait (used by DiscPump.aspirate)
     monkeypatch.setattr(threading.Event, "wait", fake_event_wait)
+
+
+# --- the plate sipper (spec D3, Task A2/B2) ---
+
+def driver_or_skip(require_axes=("X1", "Y2", "Z3")):
+    """importorskip for the servo driver -- a hard failure under the robot
+    CI job, where a skip would hide a broken import behind a green run.
+    A driver that imports but lacks an axis this rig maps (nm-servo before
+    PR #8 had no X1) skips the same way."""
+    import os
+    try:
+        import fluidics.robot._driver as driver
+    except ImportError:
+        driver = None
+    missing = None
+    if driver is None or not driver.DRIVER_AVAILABLE:
+        missing = "the servo driver did not import"
+    else:
+        names = {axis.value for axis in driver.AxisName}
+        absent = [axis for axis in require_axes if axis not in names]
+        if absent:
+            missing = f"the servo driver has no axis {', '.join(absent)}"
+    if missing:
+        if os.environ.get("ROBOT_DRIVER_REQUIRED") == "1":
+            pytest.fail(f"ROBOT_DRIVER_REQUIRED=1 but {missing}")
+        pytest.skip(missing)
+    return driver
+
+
+@pytest.fixture
+def plate_sipper_config():
+    from fluidics.control.config import load_config
+    return load_config(str(FIXTURES_DIR / "plate_sipper_config.yaml"))

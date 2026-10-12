@@ -47,6 +47,12 @@ class DeviceNotFoundError(DeviceError):
     """
 
 
+class StageError(DeviceError):
+    """The robot stage refused a move: XY commanded below travel height, a
+    target outside an axis stroke, or a position it no longer knows.
+    Nothing moved."""
+
+
 class OperationError(FluidicsError):
     """A step failed; something is wrong with the step."""
 
