@@ -4,8 +4,10 @@ The driver is nm-servo's `servo_service`, vendored as `fluidics.control.nimotion
 (see its VENDORED.md for the source commit and the maintenance rule; open
 question 4 of the design, decided 2026-10-12). Nothing else is tried: the
 driver a rig runs is the one in the repository, never an installed package.
-The stage above sees the service protocol in stage.py; a tree whose copy is
-missing or broken fails at bring-up with the line below, never at import.
+The stage above sees the service protocol in stage.py. A copy that is
+missing, or that raises ImportError (a dependency it needs is absent), fails
+at bring-up with the line below, which names the import error; a copy that
+is present but broken otherwise (a SyntaxError, say) fails at import.
 DriverService is the adapter: it turns every driver or port exception into
 DeviceError naming the axis, so the stage's early-end path (halt, re-read,
 raise) runs for all of them.
@@ -20,13 +22,23 @@ try:
     from ..control.nimotion.high_level_api.axis_config import DEFAULT_AXIS_CONFIGS
     from ..control.nimotion.motor_control import MotionInterruptedError
     DRIVER_AVAILABLE = True
-except ImportError:
+    _IMPORT_ERROR = None
+except ImportError as e:
     AxisName = ServoService = DEFAULT_AXIS_CONFIGS = MotionInterruptedError = simulation = None
     DRIVER_AVAILABLE = False
+    _IMPORT_ERROR = e                               # kept for the bring-up error to name
 
 INSTALL_LINE = ("the robot driver did not import: fluidics/control/nimotion is the vendored "
                 "copy of nm-servo's servo_service (see its VENDORED.md); restore it from the "
                 "recorded commit")
+
+
+def _install_line():
+    """INSTALL_LINE, naming the import error behind it when there is one."""
+    if _IMPORT_ERROR is None:
+        return INSTALL_LINE
+    return f"{INSTALL_LINE} (import failed: {_IMPORT_ERROR})"
+
 
 # CiA402 statusword bits and the homing mode number (NiMotion manual B06;
 # nm-servo's StatusWordBits and OperationMode carry the same values).
@@ -38,7 +50,7 @@ _HOMING_MODE = 6
 
 def default_axis_table():
     if not DRIVER_AVAILABLE:
-        raise DeviceError(INSTALL_LINE)
+        raise DeviceError(_install_line()) from _IMPORT_ERROR
     return DEFAULT_AXIS_CONFIGS
 
 
@@ -129,7 +141,7 @@ def open_service(port, baudrate, axis_names):
     install line when no driver is present, or naming an axis the driver
     does not know."""
     if not DRIVER_AVAILABLE:
-        raise DeviceError(INSTALL_LINE)
+        raise DeviceError(_install_line()) from _IMPORT_ERROR
     names = {}
     for key, value in axis_names.items():
         try:

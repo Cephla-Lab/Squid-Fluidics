@@ -175,6 +175,8 @@ class XYZStage:
         self._publish()
 
     def move_z(self, z):
+        if not self._homed:
+            raise StageError("Z move refused: the stage is not homed")
         self._check_stroke(self._z, z)
         known = self._position
         self._leg({self._z: (z, self._vz)})
@@ -185,11 +187,13 @@ class XYZStage:
             self._publish()
 
     def reset_faults(self):
-        """Ask every drive to clear its fault, then re-read the position.
+        """Ask every drive to clear its fault and enable it again (the
+        drive's fault reset leaves it disabled), then re-read the position.
         A fault that persists (encoder fault 7306h needs a power cycle)
         shows on the next move; the stage stays unhomed if it was."""
         for axis in (self._x, self._y, self._z):
             self._service.reset_fault(axis)
+            self._service.enable(axis)
         self._refresh_position()
 
     def halt(self):
@@ -219,6 +223,7 @@ class XYZStage:
             if reading.fault or not reading.enabled:
                 raise DeviceError(self._describe(axis, reading))
             longest = max(longest, abs(target - reading.position_mm) / velocity)
+        self._control.check()          # a cancel that landed during the reads: dispatch nothing
         started = []
         self._position = None          # unknown until the leg ends, one way or the other
         try:

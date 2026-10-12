@@ -44,6 +44,17 @@ class TestRules:
             stage.move_xy(10.0, 10.0)
         assert ("move_to", "X1") not in service.log
 
+    def test_before_homing_z_is_refused_too(self):
+        """Unhomed, Z's frame is unreferenced: even a retract could drive
+        the tip toward the deck."""
+        stage, service, _ = build()
+        stage.connect()
+        with pytest.raises(StageError, match="not homed"):
+            stage.move_z(0.0)
+        with pytest.raises(StageError, match="not homed"):
+            stage.retract()
+        assert "move_to" not in [verb for verb, _ in service.log]
+
     def test_xy_is_refused_while_the_tip_is_down(self, rig):
         stage, service, _ = rig
         stage.move_z(40.0)
@@ -150,6 +161,8 @@ class TestPolling:
         service.on_poll = lambda: seen.append(service.position_of("Z3"))
         stage.move_z(2.0)                         # 2 mm at 20 mm/s: two polls
         assert stage.position()[2] == 2.0
+        assert service.position_of("Z3") == pytest.approx(2.0)
+        assert len(seen) >= 2
         assert any(0.0 < z < 2.0 for z in seen), "a poll saw the axis in flight"
 
     def test_a_leg_that_never_arrives_times_out_and_halts(self, rig):
@@ -169,18 +182,39 @@ class TestPolling:
             stage.move_z(20.0)                     # still faulted: refused before dispatch
         stage.reset_faults()
         assert ("reset_fault", "Z3") in service.log
+        reset = service.log.index(("reset_fault", "Z3"))
+        assert ("enable", "Z3") in service.log[reset:], "the axis was enabled again"
         stage.move_z(20.0)
         assert stage.position()[2] == 20.0
 
-    def test_a_cancel_during_a_leg_halts_every_started_axis(self, rig):
+    def test_a_cancel_during_a_leg_halts_every_started_axis(self):
         """Review focus 5: the poll raises the cancel on the job thread, the
-        stage halts what it started, nothing is left to resume."""
-        stage, service, control = rig
-        service.on_poll = lambda: control.cancel(AbortRequested("stop"))
+        stage halts what it started, nothing is left to resume. On the real
+        clock, so the leg spans polls (an instant leg ends on its first)."""
+        stage, service, control = build(instant=False)
+        stage.connect()
+        stage.home()
+
+        def cancel_once_moving():
+            if ("move_to", "X1") in service.log:
+                control.cancel(AbortRequested("stop"))
+        service.on_poll = cancel_once_moving
         with pytest.raises(AbortRequested):
             stage.move_xy(30.0, 40.0)
         stopped = [axis for verb, axis in service.log if verb == "stop"]
         assert sorted(stopped) == ["X1", "Y2"]
+
+    def test_a_cancel_latched_before_the_dispatch_sends_nothing(self, rig):
+        """A cancel that lands while the pre-check reads the axes is caught
+        before the dispatch: nothing moves, nothing needs stopping, and the
+        position stays known."""
+        stage, service, control = rig
+        service.on_poll = lambda: control.cancel(AbortRequested("stop"))
+        before = len(service.log)
+        with pytest.raises(AbortRequested):
+            stage.move_xy(30.0, 40.0)
+        assert service.log[before:] == []
+        assert stage.position() == (0.0, 0.0, 0.0)
 
     def test_an_early_end_re_reads_where_the_axes_stopped(self):
         """The witness after a halt is the drive's reading, not the leg's
@@ -212,9 +246,15 @@ class TestPolling:
         stopped = [axis for verb, axis in service.log if verb == "stop"]
         assert sorted(stopped) == ["X1", "Y2"]
 
-    def test_a_stop_that_fails_is_reported_after_every_axis_was_tried(self, rig):
-        stage, service, control = rig
-        service.on_poll = lambda: control.cancel(AbortRequested("stop"))
+    def test_a_stop_that_fails_is_reported_after_every_axis_was_tried(self):
+        stage, service, control = build(instant=False)
+        stage.connect()
+        stage.home()
+
+        def cancel_once_moving():
+            if ("move_to", "X1") in service.log:
+                control.cancel(AbortRequested("stop"))
+        service.on_poll = cancel_once_moving
         service.fail_stop("X1")
         with pytest.raises(DeviceError, match="could not stop axis X1") as info:
             stage.move_xy(30.0, 40.0)

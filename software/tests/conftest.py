@@ -340,11 +340,13 @@ def driver_or_skip(require_axes=("X1", "Y2", "Z3")):
     import os
     try:
         import fluidics.robot._driver as driver
-    except ImportError:
-        driver = None
+    except ImportError as e:
+        driver, error = None, e
+    else:
+        error = driver._IMPORT_ERROR
     missing = None
     if driver is None or not driver.DRIVER_AVAILABLE:
-        missing = "the servo driver did not import"
+        missing = f"the servo driver did not import: {error}"
     else:
         names = {axis.value for axis in driver.AxisName}
         absent = [axis for axis in require_axes if axis not in names]

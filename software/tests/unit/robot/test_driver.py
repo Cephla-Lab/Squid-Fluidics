@@ -13,11 +13,22 @@ def test_the_shim_says_whether_a_driver_is_present():
 
 
 def test_open_service_without_a_driver_raises_a_device_error(monkeypatch):
-    """A tree whose vendored copy is missing or broken fails at bring-up,
-    naming the copy and its VENDORED.md, never at import."""
+    """A tree whose vendored copy is missing or fails to import fails at
+    bring-up, naming the copy and its VENDORED.md."""
     monkeypatch.setattr(_driver, "DRIVER_AVAILABLE", False)
     with pytest.raises(DeviceError, match="fluidics/control/nimotion.*VENDORED.md"):
         _driver.open_service("COM5", 115200, {"x": "X1", "y": "Y2", "z": "Z3"})
+
+
+def test_the_bring_up_error_names_why_the_driver_did_not_import(monkeypatch):
+    """A copy that is present but lacks a dependency fails at bring-up
+    too: the line says what the import tripped on, and chains it."""
+    cause = ImportError("no module named serial")
+    monkeypatch.setattr(_driver, "DRIVER_AVAILABLE", False)
+    monkeypatch.setattr(_driver, "_IMPORT_ERROR", cause)
+    with pytest.raises(DeviceError, match="no module named serial") as info:
+        _driver.open_service("COM5", 115200, {"x": "X1", "y": "Y2", "z": "Z3"})
+    assert info.value.__cause__ is cause
 
 
 pytestmark_driver = pytest.mark.robot_driver
@@ -233,7 +244,7 @@ def test_a_limit_stop_on_the_driver_simulator_ends_the_leg_at_once(real_clock):
     try:
         stage.home()
         start = time.monotonic()
-        with pytest.raises(DeviceError, match="Y2.*limit switch"):
+        with pytest.raises(DeviceError, match=r"Y2.*move to 58\.00 mm stopped by a limit switch at"):
             stage.move_xy(5.0, 58.0)                  # 58 mm is inside the configured 102 mm stroke
         assert time.monotonic() - start < 2.0, "not the leg's timeout (2.2 s)"
         # the drive decelerates past the switch at its quick-stop rate: v^2 / 2a =

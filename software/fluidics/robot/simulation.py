@@ -185,6 +185,7 @@ class SimulatedService:
     def reset_fault(self, axis):
         self.log.append(("reset_fault", axis))
         self._faults.pop(axis, None)
+        self._enabled[axis] = False        # the drive's fault reset ends in Switch On Disabled
 
     def fail_stop(self, axis, exc=None):
         self._stop_failures[axis] = exc or OSError(f"{axis}: no response to stop")
