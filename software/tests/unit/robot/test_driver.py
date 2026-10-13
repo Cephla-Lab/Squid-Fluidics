@@ -184,27 +184,45 @@ def test_a_move_after_a_halt_goes_to_the_new_target_not_the_old_one(real_clock):
     """nm-servo PR #4 found that without PR #1 a move after Stop first
     resumes the halted move (Halt released re-arms the old set-point).
     The stage's halt contract needs the driver to have PR #1: pinned here
-    on the driver's own simulator, which models the drive's handshake."""
+    on the driver's own simulator, which models the drive's handshake, on
+    its real-time bus. The cancel waits for a reading (X past 30 mm), not
+    the clock, and the move back is 5 mm short of where X stopped, so a
+    rise past the stop can only be the old move resuming, however loaded
+    the machine is."""
     import threading
+    import time
     driver = driver_or_skip()
     from fluidics.errors import AbortRequested, RunControl
-    from fluidics.robot.stage import XYZStage
+    from fluidics.robot.stage import TOLERANCE_MM, XYZStage
     control = RunControl()
     service, names = driver.open_service("sim://", 115200, {"x": "X1", "y": "Y2", "z": "Z3"})
     stage = XYZStage(service, names, 1.0, 100.0, 50.0, control)
     stage.connect()
     try:
         stage.home()
-        threading.Timer(0.2, lambda: control.cancel(AbortRequested("stop"))).start()
-        with pytest.raises(AbortRequested):
-            stage.move_xy(150.0, 0.0)             # 1.5 s at 100 mm/s, cancelled early
+        move_over = threading.Event()
+
+        def cancel_past_30_mm():
+            while not move_over.is_set():
+                if service.read(names["x"]).position_mm >= 30.0:
+                    control.cancel(AbortRequested("stop"))
+                    return
+                time.sleep(0.01)
+        canceller = threading.Thread(target=cancel_past_30_mm)
+        canceller.start()
+        try:
+            with pytest.raises(AbortRequested):
+                stage.move_xy(150.0, 0.0)             # 1.5 s at 100 mm/s, cancelled past 30 mm
+        finally:
+            move_over.set()
+            canceller.join()
         stopped_at = stage.position()[0]
-        assert 0.0 < stopped_at < 150.0
+        assert 30.0 <= stopped_at < 150.0
+        back_to = stopped_at - 5.0                    # 25 mm or more: inside the stroke
         seen = []
         stage2 = XYZStage(service, names, 1.0, 100.0, 50.0, RunControl())
         stage2._position = stage.position()
         stage2._homed = True
-        import time
         done = threading.Event()
 
         def sample():
@@ -214,12 +232,12 @@ def test_a_move_after_a_halt_goes_to_the_new_target_not_the_old_one(real_clock):
         sampler = threading.Thread(target=sample)
         sampler.start()
         try:
-            stage2.move_xy(10.0, 0.0)
+            stage2.move_xy(back_to, 0.0)
         finally:
             done.set()
             sampler.join()
         assert max(seen) <= stopped_at + 1.0, "the halted move did not resume toward 150"
-        assert round(stage2.position()[0], 1) == 10.0
+        assert service.read(names["x"]).position_mm == pytest.approx(back_to, abs=TOLERANCE_MM)
     finally:
         stage.close(quiescent=True)
 

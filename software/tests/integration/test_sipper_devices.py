@@ -264,3 +264,34 @@ def test_make_safe_halts_the_robot(plate_sipper_config, built, tmp_path):
     devices.robot.halt = lambda: halted.append(True)
     assert devices.make_safe() == []
     assert halted == [True]
+
+
+def test_the_facades_close_under_a_job_that_will_not_stop_moves_nothing_and_resets_nothing(
+        plate_sipper_config, instant_devices, tmp_path, real_clock):
+    """FluidicsSystem.close: the job ignores the cancel and the wait times
+    out, so the devices close non-quiescently -- the robot halts where it
+    is (no park in the park well), and the abort latch stays set so the
+    job cannot resume on what is left."""
+    import threading
+    from fluidics.system import FluidicsSystem
+    devices = instant_devices(plate_sipper_config)
+    system = FluidicsSystem(plate_sipper_config, devices, report_dir=tmp_path)
+    release = threading.Event()
+    system.run_manual(release.wait)              # nothing gated: a cancel cannot wake it
+    try:
+        quiescent, resets = [], []
+        close = devices.close
+        devices.close = lambda *a, **k: quiescent.append(k.get("quiescent", True)) or close(*a, **k)
+        reset = devices.run_control.reset
+        devices.run_control.reset = lambda: resets.append(True) or reset()
+        log = devices.robot._stage._service.log
+        before = len(log)
+        assert system.close(timeout=0.05) == []
+        assert quiescent == [False], "the devices were closed as if the job had stopped"
+        assert "move_to" not in [verb for verb, _ in log[before:]], "the robot moved under the job"
+        assert {axis for verb, axis in log[before:] if verb == "stop"} == {"X1", "Y2", "Z3"}, "halted"
+        assert resets == [], "the abort latch was cleared under a job still running"
+        assert devices.run_control.cancelled
+    finally:
+        release.set()
+        assert system.session.wait(5), "the job must end before teardown"
