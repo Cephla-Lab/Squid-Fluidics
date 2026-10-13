@@ -57,19 +57,30 @@ class ReservoirLedger:
         """The reservoir the next draw comes from, by where the valve and
         the sipper are now; ReservoirNoWell for the sipper's port with the
         tip in no well."""
+        return self._route()[0]
+
+    def _route(self):
+        """(key, whether it is a well) for the next draw: one read of the
+        valve and the sipper, so the key and its kind cannot disagree."""
         port = self._current_port()
         if port == self._sipper_port:
             well = self._current_well()
             if well is None:
                 raise ReservoirNoWell(f"port {port} is the sipper's and the sipper is not in a well")
-            return well
-        return f"port_{port}"
+            return well, True
+        return f"port_{port}", False
 
     def authorize(self, pump_port, volume_ul):
         """The pump's pre-dispatch call: refuse, or charge and write."""
         if pump_port != self._extract_port:
             return
-        key = self.key_for_draw()
+        key, from_well = self._route()
+        if from_well and key not in self._defs:
+            # Untracked is for bulk bottles. Every well of every plate is
+            # defined, so a well the ledger does not know would be a guess.
+            raise ReservoirUndeclared(
+                f"{key}: the sipper is in a well the reservoir ledger does not define; "
+                "the draw was not started")
         with self._lock:
             self._check(key, volume_ul)
             if key not in self._defs:
@@ -153,17 +164,27 @@ class ReservoirLedger:
 
     def refill(self, key):
         """`all`, a reservoir name (every well of it), or one key: full
-        again, and declared."""
+        again, and declared, once the file says so. Like a draw, a refill
+        that cannot be written changes nothing (ReservoirWriteError)."""
         with self._lock:
             keys = ([k for k in self._defs if key == "all" or k == key
                      or k.startswith(key + "/")])
             if not keys:
                 raise ValueError(f"nothing to refill named {key!r}")
+            balances = {k: self._dispatched[k] for k in keys}
+            undeclared = set(self._undeclared)
             for k in keys:
                 self._dispatched[k] = 0.0
                 self._undeclared.discard(k)
+            try:
+                self._write()
+            except Exception as e:
+                self._dispatched.update(balances)
+                self._undeclared = undeclared
+                raise ReservoirWriteError(
+                    f"the reservoir ledger could not be written ({e}); the refill of {key!r} "
+                    "was not recorded") from e
             _logger.info("Refilled: %s", ", ".join(keys))
-            self._write()
 
     # --- the disk ---
 
@@ -173,45 +194,104 @@ class ReservoirLedger:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with atomic_write(self._path) as f:
             json.dump(self._snapshot(), f, indent=1)
+            # Synced before the draw starts: a power cut after an unsynced
+            # write can bring the old file back, and the ledger would read low.
+            f.flush()
+            os.fsync(f.fileno())
+        _sync_directory(self._path.parent)
 
     @classmethod
     def load(cls, path, definitions):
         """A ledger over `definitions`, holding the lock on `path`: entries
         whose definition matches the file are restored, every other entry
-        is undeclared (a missing, unreadable or corrupt file: all of them)."""
+        is undeclared (a missing, unreadable or corrupt file, one of the
+        wrong shape included: all of them). Anything else that goes wrong
+        releases the lock before it is raised."""
         path = Path(path)
         ledger = cls(definitions, path=path, declared=False)
         ledger._lockfile = _acquire_lock(path)
         try:
-            on_disk = json.loads(path.read_text())
-            if not isinstance(on_disk, dict):
-                raise ValueError("not a ledger")
+            ledger._reconcile(path)
+        except BaseException:
+            ledger.close()
+            raise
+        return ledger
+
+    def _reconcile(self, path):
+        """Restore from the file at `path` every entry it vouches for."""
+        try:
+            balances, declared = self._entries_from(json.loads(path.read_text()))
         except FileNotFoundError:
             _logger.warning("No reservoir ledger at %s: every reservoir is undeclared until "
                             "its refill is declared.", path)
-            return ledger
-        except (OSError, ValueError) as e:
+            return
+        except (OSError, ValueError, TypeError) as e:
             _logger.error("The reservoir ledger at %s cannot be read (%s): every reservoir is "
                           "undeclared until its refill is declared.", path, e)
-            return ledger
+            return
+        self._dispatched.update(balances)
+        self._undeclared -= declared
+        if self._undeclared:
+            _logger.warning("The reservoir ledger at %s does not cover %s: undeclared until "
+                            "their refills are declared.", path, ", ".join(sorted(self._undeclared)))
+
+    def _entries_from(self, on_disk):
+        """(balances, declared) from a parsed ledger file: a balance for
+        every entry whose definition matches, declared too unless the file
+        has it undeclared. A balance no draw could have left (not a number
+        from 0 to the loaded volume) is not restored, so that entry stays
+        undeclared. ValueError for a file of the wrong shape: it is corrupt
+        as a whole, and a corrupt ledger is not read in part."""
+        if not isinstance(on_disk, dict):
+            raise ValueError("not a ledger")
         disk_defs = on_disk.get("definitions", {})
         disk_rows = on_disk.get("reservoirs", {})
-        disk_undeclared = set(on_disk.get("undeclared", []))
-        for key, d in ledger._defs.items():
-            if disk_defs.get(key) == d:
-                ledger._dispatched[key] = float(disk_rows.get(key, {}).get("dispatched_ul", 0))
-                if key not in disk_undeclared:
-                    ledger._undeclared.discard(key)
-        if ledger._undeclared:
-            _logger.warning("The reservoir ledger at %s does not cover %s: undeclared until "
-                            "their refills are declared.", path, ", ".join(sorted(ledger._undeclared)))
-        return ledger
+        disk_undeclared = on_disk.get("undeclared", [])
+        if not (isinstance(disk_defs, dict) and isinstance(disk_rows, dict)
+                and isinstance(disk_undeclared, list)
+                and all(isinstance(k, str) for k in disk_undeclared)):
+            raise ValueError("not a ledger")
+        balances, declared = {}, set()
+        for key, d in self._defs.items():
+            if disk_defs.get(key) != d:
+                continue
+            row = disk_rows.get(key, {})
+            if not isinstance(row, dict):
+                raise ValueError(f"the entry for {key} is not a ledger row")
+            used = row.get("dispatched_ul", 0)
+            if isinstance(used, bool) or not isinstance(used, (int, float)):
+                raise ValueError(f"the balance of {key} is not a number: {used!r}")
+            # NaN fails every comparison, and so does an infinity here.
+            if not 0 <= used <= d["loaded_ul"]:
+                _logger.error("The reservoir ledger's balance for %s (%r uL dispatched) is not "
+                              "one a draw could have left: undeclared until its refill is "
+                              "declared.", key, used)
+                continue
+            balances[key] = float(used)
+            if key not in disk_undeclared:
+                declared.add(key)
+        return balances, declared
 
     def close(self):
         """Release the lock; the ledger may not be used after this."""
         handle, self._lockfile = self._lockfile, None
         if handle is not None:
             _release_lock(handle)
+
+
+def _sync_directory(directory):
+    """Make the rename itself durable (POSIX). Best effort: the file is
+    already synced, and some filesystems refuse to sync a directory."""
+    if os.name != "posix":
+        return
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError as e:
+        _logger.debug("Could not sync the directory %s (%s).", directory, e)
 
 
 def _acquire_lock(path):
