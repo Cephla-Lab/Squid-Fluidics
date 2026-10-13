@@ -758,9 +758,10 @@ class TestMainWindowJobs:
     runs, and asks before closing under a live job (the system then stops it
     before the devices close)."""
 
-    def _tabs(self, kind):
+    def _tabs(self, kind, robot_tab=None):
         enabled = {}
-        stub = SimpleNamespace(RUN_TAB=0, MANUAL_TAB=1, session=FakeSession(kind=kind),
+        stub = SimpleNamespace(RUN_TAB=0, MANUAL_TAB=1, ROBOT_TAB=robot_tab,
+                               session=FakeSession(kind=kind),
                                tabWidget=SimpleNamespace(setTabEnabled=enabled.__setitem__))
         gui.FluidicsControlGUI._renderTabs(stub)
         return enabled
@@ -772,6 +773,13 @@ class TestMainWindowJobs:
         assert self._tabs("run") == {0: True, 1: False}
         assert self._tabs("manual") == {0: False, 1: True}
         assert self._tabs(None) == {0: True, 1: True}
+
+    def test_the_robot_tab_goes_dead_for_a_run_as_the_manual_tab_does(self):
+        """Its own controls freeze on any job (the session's state); the
+        tab itself, like the manual tab, is out of reach during a run."""
+        assert self._tabs("run", robot_tab=2) == {0: True, 1: False, 2: False}
+        assert self._tabs("manual", robot_tab=2) == {0: False, 1: True, 2: True}
+        assert self._tabs(None, robot_tab=2) == {0: True, 1: True, 2: True}
 
     def _closing(self, busy):
         session = FakeSession(kind="run" if busy else None)
@@ -1267,10 +1275,11 @@ class TestDetachOnDestroy:
         to build; the sensor widgets pin the same invariant by behaviour
         in test_gui_flow_widget/test_gui_temperature_widget."""
         import inspect
-        from fluidics.qt import manual_control, sensor_plots, sequence_editor
+        from fluidics.qt import manual_control, robot_control, sensor_plots, sequence_editor
 
         for cls in (sequence_editor.SequencesWidget,
                     manual_control.ManualControlWidget,
+                    robot_control.RobotControlWidget,
                     sensor_plots.FlowSensorWidget,
                     sensor_plots.TemperatureControlWidget):
             src = inspect.getsource(cls.__init__)

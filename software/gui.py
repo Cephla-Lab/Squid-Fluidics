@@ -131,6 +131,13 @@ class FluidicsControlGUI(PostsToQtThread, QMainWindow):
             self.tabWidget.addTab(flowSensorTab, "Flow Sensors")
             self.sensorTabs.append(flowSensorTab)
 
+        # The sipper's tab, when the gantry block is configured (spec §9).
+        self.ROBOT_TAB = None
+        if self.system.devices.robot is not None:
+            from fluidics.qt.robot_control import RobotControlWidget
+            robotTab = RobotControlWidget(self.config, self.system)
+            self.ROBOT_TAB = self.tabWidget.addTab(robotTab, "Robot")
+
         self.setCentralWidget(self.tabWidget)
 
     # What build_devices reports through on_issue is entry-point-neutral; the
@@ -167,6 +174,10 @@ class FluidicsControlGUI(PostsToQtThread, QMainWindow):
         kind = self.session.kind
         self.tabWidget.setTabEnabled(self.RUN_TAB, kind != "manual")
         self.tabWidget.setTabEnabled(self.MANUAL_TAB, kind != "run")
+        # The Robot tab's own controls freeze on any job (the session's
+        # state); the tab itself goes dead for a run, as the manual tab does.
+        if self.ROBOT_TAB is not None:
+            self.tabWidget.setTabEnabled(self.ROBOT_TAB, kind != "run")
 
     def _quiesce(self):
         """A live job must end before the devices close (system.close does

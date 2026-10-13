@@ -1,0 +1,315 @@
+"""The Robot tab: jog, home, teach, go to well, reset a fault, and the
+reservoir table. Every verb is a manual job through the session (one job on
+the rig); the controls freeze while ANY job runs (the session's state, not
+only this tab's); position is painted from the stage's publish; STOP is the
+session's abort -- the ManualControlWidget's contract, applied to the
+sipper (spec §9). Teaching goes through the manual verbs, which change the
+live robot and the config together, or neither; Save writes the config.
+"""
+
+import logging
+
+from qtpy.QtWidgets import (QComboBox, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
+                            QMessageBox, QPushButton, QTableWidget, QTableWidgetItem,
+                            QVBoxLayout, QWidget)
+
+from fluidics.control.config import save_config
+from fluidics.events import RunStarted, SequenceStarted
+from fluidics.vocabulary import sipper_vocabulary
+
+from .support import PostsToQtThread, _ask_yes_no, subscribe_until_detached
+
+_logger = logging.getLogger(__name__)
+
+JOG_STEPS_MM = (0.1, 1.0, 10.0)
+
+
+class WellCombo(QComboBox):
+    """An editable well picker whose value is what the operator sees: the
+    typed text, or the picked item's well. QComboBox.currentData() keeps the
+    last picked item while the text says something else, so it is never
+    read here."""
+
+    def __init__(self):
+        super().__init__()
+        self.setEditable(True)
+        self.setInsertPolicy(QComboBox.NoInsert)
+
+    def fill(self, wells):
+        """`wells`: [(well, label)] as SipperVocabulary.well_names gives them."""
+        self.clear()
+        for well, label in wells:
+            self.addItem(label, well)
+
+    def value(self):
+        text = self.currentText().strip()
+        index = self.findText(text)
+        if index >= 0:
+            return self.itemData(index)
+        return text.split(":")[0].strip()
+
+
+def connect_click(button, slot):
+    """`clicked` carries a `checked` bool; a slot with defaulted arguments
+    would take it as its first one. The wrapper drops it."""
+    button.clicked.connect(lambda _checked=False, slot=slot: slot())
+
+
+class RobotControlWidget(PostsToQtThread, QWidget):
+    def __init__(self, config, system):
+        super().__init__()
+        self.config = config
+        self.system = system
+        self.session = system.session
+        self.manual = system.manual
+        self._vocabulary = sipper_vocabulary(config)
+        self._controls = []
+        self._plan = ()
+        # A move this tab started is in flight: STOP is live for it, and
+        # only for it -- a job from another tab is stopped from that tab.
+        self._ownJob = False
+        detach = subscribe_until_detached(
+            (system.devices.robot.moves, self._onMove),
+            (system.session.state, self._onSessionState),
+            (system.session.events, self._onRunEvent))
+        self.destroyed.connect(detach)
+        self.initUI()
+        self._paintPosition(system.devices.robot.position())
+        self.refreshReservoirs()
+        # Built while a job runs (an embedder's tab), it starts frozen.
+        self.setControlsEnabled(not self.session.busy)
+
+    # --- layout ---
+
+    def initUI(self):
+        layout = QVBoxLayout()
+
+        status = QGroupBox("Stage")
+        row = QHBoxLayout()
+        self.positionLabel = QLabel("")
+        row.addWidget(self.positionLabel)
+        self.primedLabel = QLabel("primed this session: no")
+        row.addWidget(self.primedLabel)
+        self.homeButton = self._button(row, "Home", lambda: self._run(self.manual.home_robot))
+        self.retractButton = self._button(row, "Retract", lambda: self._run(self.manual.retract))
+        self.parkButton = self._button(row, "Park", lambda: self._run(self.manual.park))
+        self.resetFaultButton = self._button(row, "Reset fault", lambda: self._run(self.manual.reset_robot_faults))
+        self.stopButton = QPushButton("STOP")
+        connect_click(self.stopButton, self.stopMove)
+        self.stopButton.setEnabled(False)
+        row.addWidget(self.stopButton)
+        status.setLayout(row)
+        layout.addWidget(status)
+
+        jog = QGroupBox("Jog")
+        grid = QGridLayout()
+        self.jogButtons = {}
+        for r, axis in enumerate("xyz"):
+            grid.addWidget(QLabel(axis.upper()), r, 0)
+            for c, step in enumerate(JOG_STEPS_MM):
+                # Outward from the middle: -10 -1 -0.1 | +0.1 +1 +10.
+                for sign, column in ((-1, 3 - c), (1, 4 + c)):
+                    mm = sign * step
+                    button = self._button(grid, f"{mm:+g}",
+                                          lambda a=axis, m=mm: self._run(lambda: self.manual.jog(a, m)),
+                                          r, column)
+                    self.jogButtons[(axis, mm)] = button
+        jog.setLayout(grid)
+        layout.addWidget(jog)
+
+        wells = QGroupBox("Wells")
+        row = QHBoxLayout()
+        self.reservoirCombo = QComboBox()
+        for name in sorted(self._vocabulary.reservoirs):
+            self.reservoirCombo.addItem(name, name)
+        self.reservoirCombo.currentIndexChanged.connect(self._fillWells)
+        row.addWidget(self.reservoirCombo)
+        self._controls.append(self.reservoirCombo)
+        self.wellCombo = WellCombo()
+        row.addWidget(self.wellCombo)
+        self._controls.append(self.wellCombo)
+        self._fillWells()
+        self.goToWellButton = self._button(row, "Go to well", self.goToWell)
+        wells.setLayout(row)
+        layout.addWidget(wells)
+
+        teach = QGroupBox("Teach (then Save)")
+        row = QHBoxLayout()
+        self.setA1Button = self._button(row, "Set A1 here", self.setA1Here)
+        self.setDipButton = self._button(row, "Set dip depth here", self.setDipHere)
+        self.setTravelButton = self._button(row, "Set travel height here", self.setTravelHere)
+        self.saveButton = self._button(row, "Save", self.saveTeaching)
+        teach.setLayout(row)
+        layout.addWidget(teach)
+
+        ledger = QGroupBox("Reservoirs")
+        column = QVBoxLayout()
+        self.reservoirTable = QTableWidget(0, 3)
+        self.reservoirTable.setHorizontalHeaderLabels(["Reservoir", "Dispatched (µL)", "Remaining (µL)"])
+        self.reservoirTable.verticalHeader().setVisible(False)
+        self.reservoirTable.setEditTriggers(QTableWidget.NoEditTriggers)
+        column.addWidget(self.reservoirTable)
+        row = QHBoxLayout()
+        self.undeclaredLabel = QLabel("")
+        self.undeclaredLabel.setWordWrap(True)
+        row.addWidget(self.undeclaredLabel, 1)
+        self.plateReloadedButton = self._button(row, "Plate reloaded…", self.plateReloaded)
+        column.addLayout(row)
+        ledger.setLayout(column)
+        layout.addWidget(ledger)
+
+        self.setLayout(layout)
+
+    def _button(self, container, text, slot, *grid_pos):
+        button = QPushButton(text)
+        connect_click(button, slot)
+        if grid_pos:
+            container.addWidget(button, *grid_pos)
+        else:
+            container.addWidget(button)
+        self._controls.append(button)
+        return button
+
+    def _fillWells(self):
+        self.wellCombo.fill(self._vocabulary.well_names(self.reservoirCombo.currentData()))
+
+    # --- verbs: every one a manual job ---
+
+    def goToWell(self):
+        reservoir = self.reservoirCombo.currentData()
+        well = self.wellCombo.value()
+        self._run(lambda: self.manual.go_to_well(f"{reservoir}/{well}"))
+
+    def stopMove(self):
+        if self.session.kind == "manual":
+            self.session.abort()
+
+    def _run(self, verb):
+        """Hand one verb to the session, off the GUI thread, as the manual
+        tab's _run does; a press while the rig is busy is refused, not
+        queued."""
+        try:
+            self.system.run_manual(verb, callbacks={
+                "on_stopped": lambda: self._post_event("operationStopped"),
+                "on_error": lambda message: self._post_event("handleError", message),
+                "on_finished": lambda: self._post_event("operationFinished"),
+            })
+        except RuntimeError as e:
+            _logger.info("%s; the robot move was not started.", e)
+            return
+        # Posted reports cannot be handled before this returns.
+        self._ownJob = True
+        self.setControlsEnabled(False)
+
+    def operationStopped(self):
+        pass
+
+    def handleError(self, message):
+        QMessageBox.critical(self, "Robot", message)
+
+    def operationFinished(self):
+        self._ownJob = False
+        self._renderSession()
+
+    # --- the session: any job freezes this tab ---
+
+    def _onSessionState(self, kind):
+        # On the session's thread; the paint crosses to Qt, and reads the
+        # session when it lands rather than trusting `kind` (RunSession.state).
+        self._post_event("_renderSession")
+
+    def _renderSession(self):
+        busy = self.session.busy
+        self.setControlsEnabled(not busy)
+        if not busy:
+            # Whatever ran -- this tab's move, a manual draw, a run -- may
+            # have drawn from a well or declared a refill.
+            self.refreshReservoirs()
+
+    def setControlsEnabled(self, enabled):
+        for control in self._controls:
+            control.setEnabled(enabled)
+        self.stopButton.setEnabled(not enabled and self._ownJob)
+
+    def _onRunEvent(self, event):
+        if isinstance(event, RunStarted):
+            self._plan = event.plan
+        elif isinstance(event, SequenceStarted) and self._plan:
+            if self._plan[event.position].sequence.get("type") == "priming":
+                self._post_event("_markPrimed")
+
+    def _markPrimed(self):
+        self.primedLabel.setText("primed this session: yes")
+
+    # --- position ---
+
+    def _onMove(self, position):
+        self._post_event("_paintPosition", position)
+
+    def _paintPosition(self, position):
+        if position is None:
+            self.positionLabel.setText("x --  y --  z --  (position unknown: home or retract)")
+            return
+        x, y, z = position
+        self.positionLabel.setText(f"x {x:.2f}  y {y:.2f}  z {z:.2f}")
+
+    # --- teach: through the manual verbs; then Save ---
+
+    def _knownPosition(self):
+        """Where the stage is, from its last publish (no I/O), or None with
+        the operator told to home."""
+        position = self.system.devices.robot.position()
+        if position is None:
+            QMessageBox.warning(self, "Robot", "The stage position is unknown: home first.")
+        return position
+
+    def setA1Here(self):
+        position = self._knownPosition()
+        if position is None:
+            return
+        name, (x, y, _) = self.reservoirCombo.currentData(), position
+        self._run(lambda: self.manual.teach_a1(name, (x, y)))
+
+    def setDipHere(self):
+        position = self._knownPosition()
+        if position is None:
+            return
+        name, z = self.reservoirCombo.currentData(), position[2]
+        self._run(lambda: self.manual.teach_dip(name, z))
+
+    def setTravelHere(self):
+        position = self._knownPosition()
+        if position is None:
+            return
+        z = position[2]
+        self._run(lambda: self.manual.teach_travel(z))
+
+    def saveTeaching(self):
+        if self.session.busy:
+            QMessageBox.warning(self, "Rig busy", "Teaching can be saved when the rig is idle.")
+            return
+        try:
+            save_config(self.config)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"The teaching applies for this session, but saving failed: {e}")
+
+    # --- the ledger ---
+
+    def refreshReservoirs(self):
+        ledger = self.system.devices.reservoirs
+        rows = ledger.rows() if ledger is not None else []
+        self.reservoirTable.setRowCount(len(rows))
+        for r, (key, dispatched, remaining) in enumerate(rows):
+            for c, text in enumerate((key, f"{dispatched:.0f}", f"{remaining:.0f}")):
+                self.reservoirTable.setItem(r, c, QTableWidgetItem(text))
+        undeclared = ledger.undeclared if ledger is not None else []
+        self.undeclaredLabel.setText(
+            "" if not undeclared else
+            f"Ledger undeclared for {len(undeclared)} reservoirs ({', '.join(undeclared[:4])}"
+            f"{', …' if len(undeclared) > 4 else ''}): declare refills before running")
+
+    def plateReloaded(self):
+        name = self.reservoirCombo.currentData()
+        if not _ask_yes_no(self, "Plate reloaded?", f"Mark every well of {name} as full?"):
+            return
+        self._run(lambda: self.manual.refill(name))
