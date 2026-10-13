@@ -57,6 +57,10 @@ class Interruptible:
         # carries the held uL whenever the pump takes a reading, so a
         # display never has to poll the serial line for it.
         self.draws = Subscribers("syringe draws")
+        # Called with (port, volume_ul) before an extract is dispatched; one
+        # raising refuses the draw, and nothing has moved (the reservoir
+        # ledger authorizes and records here, spec D6).
+        self.draw_authorizers = []
         self.held_volume = Subscribers("syringe held volume")
 
     def _publish_reading(self):
@@ -152,6 +156,9 @@ class Interruptible:
     def _run_op(self, op):
         """Run one op to the end, however many pauses that takes."""
         self.run_control.checkpoint()   # a cancel here dispatched nothing
+        if op[0] == "extract":
+            for authorize in list(self.draw_authorizers):
+                authorize(op[1], op[2])     # raises: the draw is refused, undispatched
         estimate = self._start(op)
         # A dispatched extract is charged in full, here, once: a failed
         # dispatch (raised from _start) was never charged, and whatever

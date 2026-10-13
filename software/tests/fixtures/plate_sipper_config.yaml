@@ -1,0 +1,88 @@
+config_version: '2.0'
+microcontroller:
+  serial_number: '15579610'
+syringe_pump:
+  serial_number: A9TLZRF2
+  volume_ul: 5000
+  ports_allowed:
+  - 1
+  - 2
+  - 3
+  waste_port: 3
+  extract_port: 2
+  dispense_port: null
+  speed_code_limit: 10
+reagent_selection:
+  selector_valves:
+    valve_ids:
+    - 0
+    - 1
+    - 2
+    number_of_ports:
+      0: 10
+      1: 10
+      2: 10
+    tubing_fluid_amount_to_valve_ul:
+      0: 0
+      1: 200
+      2: 340
+    name_mapping:
+      port_1: sipper
+      port_24: 12.5% wash
+      port_25: 4x SSC
+      port_26: DAPI
+      port_27: anti-bleach
+      port_28: 55% wash
+    tubing_fluid_amount_ul:
+      port_1: 250
+      port_24: 450
+      port_25: 700
+      port_26: 700
+      port_27: 900
+      port_28: 900
+    loaded_volume_ul:
+      port_25: 500000
+    residual_volume_ul:
+      port_25: 20000
+  common_tubing_fluid_amount_ul: 240
+  nimotion_gantry_system:
+    selector_valve_port: 1
+    serial_number: FTXXXXXX
+    baudrate: 115200
+    axes: {x: X1, y: Y2, z: Z3}
+    travel_z_mm: 1.0   # Z: 0 at the top; homing parks 0.1-0.5 mm past 0, so the travel height sits below that
+    xy_velocity_mm_s: 50
+    z_velocity_mm_s: 20
+    default_reservoir: probes
+    reservoirs:
+      1:
+        name: probes
+        type: plate
+        number_of_wells: 96
+        well_spacing: 1
+        a1_xy_mm: [12.0, 1.5]
+        dip_z_mm: 50.0
+        column_axis: "+y"
+        row_axis: "+x"
+        loaded_ul: 110
+        residual_ul: 5
+        well_names: {A1: hyb R01}
+      2:
+        name: ssct
+        type: plate
+        number_of_wells: 96
+        well_spacing: 1
+        a1_xy_mm: [102.5, 1.5]
+        dip_z_mm: 52.0
+        column_axis: "+y"
+        row_axis: "+x"
+        loaded_ul: 1800
+        residual_ul: 50
+    priming_well: ssct/H11
+    clean_up_well: ssct/H12
+    agitate_amplitude_mm: 5.0
+flow_sensors:
+  - index: 1
+    name: syringe_draw
+    monitor: "off"
+application: Flow Cell

@@ -199,3 +199,40 @@ def test_the_model_needs_no_qt():
         "'fluidic_port': 1, 'flow_rate': 1, 'volume': 1}]).validated(); "
         "print([n for n in sys.modules if 'qt' in n.lower()])")
     assert loaded == "[]", f"Qt was imported: {loaded}"
+
+
+def test_a_sipper_row_is_titled_by_its_well_and_validated_with_the_sipper(plate_sipper_config):
+    from fluidics.control.config import available_ports
+    from fluidics.vocabulary import sipper_vocabulary
+    rows = SequenceList("Flow Cell", available_ports(plate_sipper_config),
+                        [{"type": "flow_reagent", "fluidic_port": 1, "well": "A1",
+                          "flow_rate": 2000, "volume": 100, "name": "hyb"},
+                         {"type": "flow_reagent", "fluidic_port": 1,
+                          "flow_rate": 2000, "volume": 100}],
+                        sipper=sipper_vocabulary(plate_sipper_config))
+    assert rows.title(0) == "hyb: A1"
+    assert rows.problem(0) is None
+    assert rows.problem(1) == "fluidic_port=1 is the sipper: name a well"
+
+
+def test_a_well_rows_title_typed_back_leaves_its_name_alone(plate_sipper_config):
+    """The editor hands set_name the item's text -- the title, well and
+    all -- on every change to a top-level item: the well must not pile up
+    on the name, and an unnamed row stays unnamed."""
+    from fluidics.control.config import available_ports
+    from fluidics.vocabulary import sipper_vocabulary
+    rows = SequenceList("Flow Cell", available_ports(plate_sipper_config),
+                        [{"type": "flow_reagent", "fluidic_port": 1, "well": "A1",
+                          "flow_rate": 2000, "volume": 100, "name": "hyb"},
+                         {"type": "flow_reagent", "fluidic_port": 1, "well": "ssct/A1",
+                          "flow_rate": 2000, "volume": 100}],
+                        sipper=sipper_vocabulary(plate_sipper_config))
+    for _ in range(2):
+        rows.set_name(0, rows.title(0))
+        rows.set_name(1, rows.title(1))
+    assert rows[0]["name"] == "hyb" and rows.title(0) == "hyb: A1"
+    assert rows[1].get("name") is None and rows.title(1) == "Flow Reagent: ssct/A1"
+    rows.set_name(0, "hyb2")
+    assert rows[0]["name"] == "hyb2" and rows.title(0) == "hyb2: A1"
+    rows.set_name(1, "wash: ssct/A1")
+    assert rows[1]["name"] == "wash"

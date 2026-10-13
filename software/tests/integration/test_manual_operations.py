@@ -142,3 +142,130 @@ class TestTheRunsControl:
         devices.run_control.reset()
         manual.extract(2, 300, 500)
         assert len(devices.syringe_pump.executed) == 1
+
+
+# --- the sipper's manual verbs (spec §9, Task B7) ---
+
+def test_a_manual_extract_through_the_sipper_needs_a_well(plate_sipper_config, built, tmp_path):
+    """Review focus 4: the manual tab cannot pull air through the sipper."""
+    devices = built(plate_sipper_config, simulation=True, instant=True,
+                    ledger_path=tmp_path / "ledger.json")
+    devices.reservoirs.refill("all")
+    manual = ManualOperations(devices)
+    manual.open_port(1)
+    with pytest.raises(RuntimeError, match="not in a well"):
+        manual.extract(2, 100, 1000)
+    manual.go_to_well("ssct/A1")
+    manual.extract(2, 100, 1000)            # fine with the tip in a well
+    manual.retract()
+    with pytest.raises(RuntimeError, match="not in a well"):
+        manual.extract(2, 100, 1000)
+
+
+def test_robot_verbs_refuse_on_a_rig_without_a_robot(flow_cell_config, built):
+    manual = ManualOperations(built(flow_cell_config, simulation=True, instant=True))
+    with pytest.raises(RuntimeError, match="no robot"):
+        manual.retract()
+
+
+def test_teaching_changes_the_live_placement_and_the_config_together(plate_sipper_config, built):
+    """Codex finding 11: a taught A1 is where the next go-to-well goes,
+    and what save_config will write."""
+    from fluidics.control.config import gantry
+    from fluidics.errors import StageError
+    devices = built(plate_sipper_config, simulation=True, instant=True)
+    manual = ManualOperations(devices)
+    manual.teach_a1("probes", (13.0, 2.0))
+    manual.teach_dip("probes", 49.0)
+    manual.go_to_well("probes/A1")
+    assert devices.robot.position() == (13.0, 2.0, 49.0)
+    assert tuple(gantry(plate_sipper_config).reservoirs[1].a1_xy_mm) == (13.0, 2.0)
+    with pytest.raises(StageError, match="out of reach"):
+        manual.teach_a1("probes", (150.0, 2.0))          # row H would sit at x = 213
+    assert tuple(gantry(plate_sipper_config).reservoirs[1].a1_xy_mm) == (13.0, 2.0), "refused: nothing changed"
+    with pytest.raises(ValueError, match="agitation"):
+        manual.teach_dip("probes", 4.0)
+    manual.teach_travel(2.0)
+    assert devices.robot._stage.travel_z_mm == 2.0
+    assert gantry(plate_sipper_config).travel_z_mm == 2.0
+
+
+def test_jog_refuses_xy_below_travel_height(plate_sipper_config, built):
+    from fluidics.errors import StageError
+    devices = built(plate_sipper_config, simulation=True, instant=True)
+    manual = ManualOperations(devices)
+    manual.jog("z", 10.0)
+    with pytest.raises(StageError, match="travel height"):
+        manual.jog("x", 1.0)
+
+
+def test_teach_travel_refuses_a_height_homing_may_park_below(plate_sipper_config, built):
+    """Home, then "Set travel height here", would teach the 0.1 to 0.5 mm
+    the drives park at, and the next launch's homing refuses any Z that
+    parks below it. Refused before the robot or the config changes."""
+    from fluidics.control.config import gantry
+    from fluidics.robot.stage import MIN_TRAVEL_Z_MM
+    devices = built(plate_sipper_config, simulation=True, instant=True)
+    manual = ManualOperations(devices)
+    with pytest.raises(ValueError, match=r"homing.*1 mm or more"):
+        manual.teach_travel(0.2)
+    assert devices.robot._stage.travel_z_mm == 1.0
+    assert gantry(plate_sipper_config).travel_z_mm == 1.0
+    manual.teach_travel(MIN_TRAVEL_Z_MM)          # the floor itself is a travel height
+
+
+def test_teach_travel_refuses_a_height_a_plates_agitation_would_reach_and_changes_nothing(
+        plate_sipper_config, built):
+    """The config's rule (travel above every dip less the amplitude), with
+    the robot in a well: refused, the robot, its witness and the config
+    as they were."""
+    from fluidics.control.config import gantry
+    devices = built(plate_sipper_config, simulation=True, instant=True)
+    manual = ManualOperations(devices)
+    manual.go_to_well("ssct/A1")
+    with pytest.raises(ValueError, match="probes's agitation stroke"):
+        manual.teach_travel(45.0)                 # probes: dip 50 less 5
+    assert devices.robot._stage.travel_z_mm == 1.0
+    assert gantry(plate_sipper_config).travel_z_mm == 1.0
+    assert devices.robot.current_well is not None
+
+
+def test_teach_travel_rechecks_the_sippers_installed_placements(plate_sipper_config, built):
+    """The live placements are what go_to_well and agitate use: a plate
+    installed on the sipper shallower than the config has it (a library
+    caller's set_placement) is checked against the new travel height too,
+    before anything changes."""
+    from fluidics.control.config import gantry
+    from fluidics.errors import StageError
+    devices = built(plate_sipper_config, simulation=True, instant=True)
+    manual = ManualOperations(devices)
+    shallow = manual._vocabulary.placement("probes")
+    shallow.dip_z_mm = 20.0                       # agitates up to 15 mm
+    devices.robot.set_placement("probes", shallow)
+    with pytest.raises(StageError, match="plate 'probes'.*agitation"):
+        manual.teach_travel(16.0)                 # fine by the config (dip 50), not by the sipper
+    assert devices.robot._stage.travel_z_mm == 1.0
+    assert gantry(plate_sipper_config).travel_z_mm == 1.0
+
+
+def test_a_reload_of_the_plate_the_tip_is_in_is_refused_until_retract(plate_sipper_config, built, tmp_path):
+    """With no park well the tip rests in a well between steps: lifting that
+    plate with the tip in it bends the tip. A refill of that plate, or of
+    everything, is refused naming the well and the remedy; the other plate's
+    goes through; after Retract so does this one's."""
+    devices = built(plate_sipper_config, simulation=True, instant=True,
+                    ledger_path=tmp_path / "ledger.json")
+    manual = ManualOperations(devices)
+    manual.go_to_well("ssct/A2")
+    with pytest.raises(RuntimeError, match="tip is in ssct/A2.*Retract"):
+        manual.refill("ssct")
+    with pytest.raises(RuntimeError, match="tip is in ssct/A2.*Retract"):
+        manual.refill("all")
+    with pytest.raises(RuntimeError, match="tip is in ssct/A2.*Retract"):
+        manual.refill("ssct/A1")                  # another well of that plate: it was lifted too
+    assert "ssct/A2" in devices.reservoirs.undeclared, "nothing was declared"
+    manual.refill("probes")
+    assert "probes/A1" not in devices.reservoirs.undeclared
+    manual.retract()
+    manual.refill("ssct")
+    assert devices.reservoirs.remaining("ssct/A2") == 1750

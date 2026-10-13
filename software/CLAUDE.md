@@ -15,6 +15,9 @@ python gui.py    # --config <yaml|json>; defaults to ./config.yaml then ./config
 # CLI experiment runner
 python run_sequences.py --path sample_sequences/merfish-experiment.yaml --config sample_config/flow_cell_config.yaml
 python run_sequences.py --path sample_sequences/merfish-experiment.yaml --config sample_config/flow_cell_config.yaml --simulation
+# Plate sipper rig. Only after reloading a plate or refilling a bottle, add --refilled <port_25 | plate name | all>
+# (repeatable) to declare that reservoir full; on every other run the ledger's own count stands
+python run_sequences.py --path sample_sequences/seqfish-plate-sipper.yaml --config sample_config/plate_sipper_config.yaml
 
 # Config conversion (legacy JSON → YAML v2.0)
 python convert_config.py path/to/legacy_config.json
@@ -31,9 +34,11 @@ python -m pytest -v                    # Verbose
 # Hardware smoke: bring a rig up from its config and run each manual verb once
 python -m tests.hardware.manual_check --config ../config.yaml
 python -m tests.hardware.diagnose_temperature_controller --sn <serial>
+# Robot bench check: home, jog, teach A1 and the dip on each plate, visit the corners, agitate, retract
+python -m tests.hardware.robot_check --config ../config.yaml
 ```
 
-Uses pytest. Hardware scripts in `tests/hardware/` are excluded from the default test run and need a connected rig (`manual_check --simulation` checks the script itself). Run them with `python -m` from `software/` so `fluidics` imports without the package installed. Use `--simulation` for software-only CLI testing.
+Uses pytest. Hardware scripts in `tests/hardware/` are excluded from the default test run and need a connected rig (`manual_check --simulation` and `robot_check --simulation` check the scripts themselves). Run them with `python -m` from `software/` so `fluidics` imports without the package installed. Use `--simulation` for software-only CLI testing.
 
 The old `tests/hardware/startup.py` and `demo.py` (MCU-level exercises from before the syringe-pump architecture) are gone; git history has them.
 
@@ -133,6 +138,20 @@ Not guarded: the dispense-to-waste inside `_empty_syringe_pump_on_full`, and `Pr
 - `Wash with Constant Flow` — simultaneous syringe dispense + disc pump aspiration
 - `Set Temperature <N>` — set temperature controller target and wait for stabilization
 
+### Plate Sipper
+
+A Flow Cell rig may carry an XYZ robot that moves a sipper on one selector-valve port over two 96-well plates, so a row can draw from a well instead of a bottle. The config block is `reagent_selection.nimotion_gantry_system`, keyed as You Yan wrote it; a rig without it runs exactly as before. `sample_config/plate_sipper_config.yaml` and `sample_sequences/seqfish-plate-sipper.yaml` are the documented pair.
+
+- **`fluidics/robot/`** — `labware.py` (plate geometry, `PlatePlacement`, `parse_ref` for `A3` or `ssct/A3`), `stage.py` (`XYZStage`, the three axes as one), `sipper.py` (`RobotSipper`, the verbs the operations call), `simulation.py` (`SimulatedService`: the driver's shape, motion modelled), `_driver.py` (`DriverService`, turning every driver or port error into a `DeviceError` naming the axis). The subpackage imports only the stdlib, `fluidics.errors`, `fluidics.subscribers`, and -- in `_driver.py` alone -- the driver; a fresh-interpreter test enforces it. `fluidics/vocabulary.py` is the one owner of how a well reference is spelled, for the validators, the editor and the operations.
+- **Z and the deck.** Z is 0 at the retracted top and increases toward the deck; retracted means `z <= travel_z_mm`, and only while the stage is homed and its position known. XY moves only while retracted. Homing goes Z first; the drives park 0.1 to 0.5 mm past 0, so a travel height below 1 mm (`MIN_TRAVEL_Z_MM`) is refused at load and when taught. The driver's strokes start 0.5 mm clear of the origin switches, below where homing parks, so `home()` ends by clearing each axis into its stroke (Z first, then X and Y together); without that the first single-axis jog after homing would be refused for the other axes' targets. The plates sit side by side along X, long sides along Y, so each plate's columns run along +y and its rows along +x: `column_axis` and `row_axis` are required, since this deck is not the SBS default. Every plate's corners are checked against the strokes at bring-up and whenever a placement is taught.
+- **The stage polls; it never uses the driver's blocking wait.** A leg dispatches every axis, then polls through `run_control.sleep` until each reports target reached within `TOLERANCE_MM`, reading every axis of the leg on every poll until the leg ends, so an axis that arrived first cannot fault unseen while the other still travels. It reads the drive's limit-switch alarm (8614h) itself, since a move a switch stops never reports target reached. Anything that ends a leg early halts every axis that may have started and re-reads the position before the error goes on.
+- **The ledger** (`fluidics/reservoirs.py`): what every tracked bottle (`port_25`) and every well (`ssct/A1`) has left, on disk. The pump asks it before every extract it dispatches (`SyringePump.draw_authorizers`); it refuses, or charges and writes the file, before the plunger moves, so the file can only read high, never low. One process holds a rig's ledger (a lock file), and `build_devices` takes the lock before it constructs any device (the real pump's constructor talks to the pump), clears the MCU or homes the robot or the valves, so a second launch on a rig in use stops before anything moves. Restored at bring-up entry by entry: an entry whose definition changed, is new, or has no file is undeclared, and nothing tracked is drawn until its refill is declared (Plate reloaded on the Robot tab, Bottle refilled on the manual tab, `--refilled`). A ledger never guesses.
+- **The gate in `run()`.** `FluidicsSystem.check_reservoirs` replays the plan on an instant simulated twin restored from the live ledger's snapshot (only read) and refuses, naming the step, a run that would overdraw a well or a bottle -- at time zero, not at the pump hours in.
+- **No air through the sipper.** `RobotSipper.current_well` is set only while the tip sits at dip depth in a well; retract, home, a halt and an agitation in progress clear it. A row with `well` moves the sipper in before the valve opens its port, `dip_cycles` dips run before the draw, and the ledger refuses a draw through the sipper's port with no well under the tip (`ReservoirNoWell`). Between steps and sessions the tip rests wet in the last step's well: a close makes no move (the lead screw holds Z, the next launch homes upward first); Retract lifts it before a plate swap, and a refill of the plate the tip is in (or of `all`) is refused until then, by the manual verb and, before the question, by the Robot tab. The Robot tab's "Do not lower tip" box makes Go to well stop retracted over the well (no witness, so no draw) and `FluidicsSystem.run` refuse at time zero, for checking taught positions over empty plates.
+- **Sequences.** `well`, `dip_cycles` and `sipper_well` are optional fields on the existing types, not new types; `validate_sequences` checks them against the rig's vocabulary. On a sipper rig a priming or clean-up row's `use_ports` must include the sipper's port; the gate and the operation both refuse one that leaves it out (D7).
+- **The Robot tab** (`fluidics/qt/robot_control.py`, on a rig with a robot only) is the run-time view: home, retract, reset a fault, STOP, "Do not lower tip", the deck map, go to a well, and the reservoir table. Teaching, with the jog it needs, is a tool window opened from the Stage row ("Teach…"): jog per axis, a plate picker, Set A1 / dip depth / travel height here, and Save, which writes the taught values through `save_config`; its controls freeze like the tab's, the button that opens it does not. One job on the rig greys every other tab: the session records a manual job's `source`, so the main window tells the Robot tab's jobs from the manual tab's. The deck map (`fluidics/qt/deck_map.py`, pure Qt over labware values) draws both plates where they are taught and the tip where the stage last published it, colored retracted or lowered with the current well ringed and the priming and clean-up wells marked; a click on a well is Go to well for that well and nothing between wells; it is fed by the tab and never polls.
+- **Commands.** `run_sequences.py --refilled KEY` is for the run after a reload or a refill: it declares that reservoir full before the run, so passing it routinely would erase what the ledger knows. `--ledger PATH` places the ledger file (default: beside the run reports, named after the config). `tests/hardware/robot_check.py` is the bench check: it teaches each plate at the console and reports every axis's settle error against `TOLERANCE_MM`.
+
 ### GUI Structure
 
 `gui.py` is the standalone application: it builds the `FluidicsSystem`, lays the tabs out, and owns the window's lifecycle. The widgets themselves live in `fluidics/qt/`, so an embedding application (Squid's fluidics-protocol GUI) can import them without the standalone app:
@@ -140,6 +159,7 @@ Not guarded: the dispense-to-waste inside `_empty_syringe_pump_on_full`, and `Pr
 - **`fluidics/qt/support.py`** — `PostsToQtThread` (the one cross-thread idiom: `_post_event(name, *args)` runs a method on the Qt thread), `GuiLogHandler` (feeds the run tab's log pane), `subscribe_until_detached`, and the small dialog/format helpers
 - **`fluidics/qt/sequence_editor.py`** — `SequencesWidget` (renders the sequence list, the run controls, the log pane) and `AddSequenceDialog`
 - **`fluidics/qt/manual_control.py`** — `ManualControlWidget`
+- **`fluidics/qt/robot_control.py`** — `RobotControlWidget`, the Robot tab (see Plate Sipper)
 - **`fluidics/qt/sensor_plots.py`** — the live temperature and flow plots, their rolling windows and per-plot CSV recording; each temperature channel also shows the TEC's output voltage and current, live and unrecorded. `MplCanvas` stays legible when embedded short: constrained layout plus a `minimumSizeHint` measured from its own labels
 
 Qt is reached through `qtpy` everywhere, `gui.py` included — two bindings in one process is a crash, and qtpy resolves it once (`QT_API`). PyQt5 and matplotlib are the `[gui]` extra, so the core package (sequences, control, worker, CLI) installs headless.
@@ -149,6 +169,7 @@ Qt is reached through `qtpy` everywhere, `gui.py` included — two bindings in o
 ## Key Conventions
 
 - `fluidics/control/tecancavro/` is a vendored library for Tecan Cavro syringe pump protocol — avoid modifying
+- `fluidics/control/nimotion/` is a vendored copy of nm-servo's `servo_service` (see its `VENDORED.md`): fix upstream, re-copy, never edit in place
 - Config files in `sample_config/` (YAML), sequence files in `sample_sequences/` (YAML preferred, CSV supported for legacy)
 - Cancellation: `RunSession.abort()` cancels the run's `RunControl` (no device I/O on the calling thread); every waiting device raises the cause on its own thread, so operations unwind by the raise -- there is no `is_aborted` polling. `DeviceSet.make_safe()` quiets the rig after any early end, and the worker's `_end_early` lifts any pending pause first (`RunControl.release()`), so nothing on the failure path can park.
 - One job on the rig: `RunSession` (`fluidics/run_session.py`) owns whichever is running -- a run or a manual move -- refuses a second, exposes its state (`busy`, `kind`, `paused`, `at_rest`, `cancelled`), and resets the signal when the job ends, atomically and before the caller's `on_finished`. Both GUI tabs and the CLI go through it (via `FluidicsSystem`); nothing else owns a thread. `Interruptible.execute()` refuses re-entry at driver depth as well. GUI wiring (the greyed tab, Stop, the close question, `PostsToQtThread`) is documented on the classes in `gui.py`.

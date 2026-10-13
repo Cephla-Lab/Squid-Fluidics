@@ -32,11 +32,13 @@ class FluidicSequence(SequenceBase):
     fluidic_port: int = Field(ge=1)
     flow_rate: int = Field(gt=0)
     volume: int = Field(gt=0)
+    well: Optional[str] = None      # a well on a sipper rig; implies the sipper's port
 
 
 class FlowReagentSequence(FluidicSequence):
     type: Literal["flow_reagent"]
     fill_tubing_with: Optional[int] = None
+    dip_cycles: int = Field(default=0, ge=0)   # dips before the draw, sipper rows only
 
 
 class AddReagentSequence(FluidicSequence):
@@ -56,10 +58,12 @@ class WashConstantFlowSequence(FluidicSequence):
 
 class PrimingSequence(FluidicSequence):
     type: Literal["priming"]
+    sipper_well: Optional[str] = None          # where the sipper sits while its port is primed
 
 
 class CleanUpSequence(FluidicSequence):
     type: Literal["clean_up"]
+    sipper_well: Optional[str] = None
 
 
 class SetTemperatureSequence(SequenceBase):
@@ -237,6 +241,94 @@ def save_sequences_yaml(sequences: list[dict], path: str) -> None:
 # validation, and the Add dialog, which offers a port combo for each.
 PORT_FIELDS = {"fluidic_port": False, "fill_tubing_with": True}
 
+# The well-valued fields, like PORT_FIELDS: the one copy, read by the gate,
+# the live paint and the Add dialog. True = a falsy value means unset.
+WELL_FIELDS = {"well": False, "sipper_well": True}
+
+
+def use_ports_problem(use_ports, sipper_port) -> Optional[str]:
+    """The refusal for a priming or clean-up row's use_ports on a rig whose
+    sipper is on `sipper_port`, or None. The sipper's port is never skipped
+    (D7): its line would hold air at the first draw, so a row that leaves it
+    out is refused rather than given a draw it did not list. With no sipper
+    (None) there is nothing to skip and selective priming stands. The
+    models do not know the field, so the time-zero gate and the operation
+    each ask this, and refuse in its words."""
+    if sipper_port is None or use_ports is None:
+        return None
+    if not isinstance(use_ports, (list, tuple)):
+        return f"use_ports={use_ports!r}: a list of ports"
+    if sipper_port not in use_ports:
+        return (f"use_ports leaves out port {sipper_port} (the sipper): "
+                "priming and clean-up never skip the sipper")
+    return None
+
+
+def sequence_well_problems(seq: dict, vocabulary) -> list[str]:
+    """The well complaints for one sequence under `vocabulary` (None on a
+    rig without a sipper), as messages, a priming or clean-up row's
+    `use_ports` refusal among them (D7); empty when there are none. Reads
+    the raw dict, so a value the models would refuse is named here too."""
+    problems = []
+    # The model forbids a field its type lacks; the raw row is not run
+    # through the model here, so a stray one would be silently ignored at
+    # run time (a priming row's dips never happen). Named first.
+    model = SEQUENCE_TYPES.get(seq.get("type"))
+    if model is not None:
+        problems.extend(f"{f} is not a field of {seq['type']} rows"
+                        for f in (*WELL_FIELDS, "dip_cycles")
+                        if f in seq and f not in model.model_fields)
+    set_fields = [f for f, falsy_unset in WELL_FIELDS.items()
+                  if seq.get(f) is not None and not (falsy_unset and not seq.get(f))]
+    dips = seq.get("dip_cycles") or 0
+    if not isinstance(dips, int) or isinstance(dips, bool) or dips < 0:
+        problems.append(f"dip_cycles={dips!r}: a whole number of dips, 0 or more")
+        dips = 0
+    if vocabulary is None:
+        if set_fields or dips:
+            problems.append("this rig has no sipper")
+        return problems
+    port, well = seq.get("fluidic_port"), seq.get("well")
+    for field in set_fields:
+        if not isinstance(seq[field], str):
+            problems.append(f"{field}={seq[field]}: must be a well reference such as A1 or ssct/A1")
+            continue
+        try:
+            vocabulary.resolve(seq[field])
+        except ValueError as e:
+            problems.append(f"{field}={seq[field]}: {e}")
+    if well is not None and port != vocabulary.sipper_port:
+        problems.append(f"well={well} needs fluidic_port={vocabulary.sipper_port} (the sipper)")
+    if well is None and port == vocabulary.sipper_port:
+        problems.append(f"fluidic_port={port} is the sipper: name a well")
+    if well is not None and seq.get("fill_tubing_with"):
+        problems.append("a sipper row cannot fill tubing: add a flow_reagent row from the paired well")
+    if seq.get("fill_tubing_with") == vocabulary.sipper_port:
+        problems.append(f"fill_tubing_with={vocabulary.sipper_port} is the sipper: the sipper cannot fill tubing")
+    if dips and well is None:
+        problems.append("dip_cycles needs a well")
+    if seq.get("type") in ("priming", "clean_up"):
+        problem = use_ports_problem(seq.get("use_ports"), vocabulary.sipper_port)
+        if problem is not None:
+            problems.append(problem)
+    return problems
+
+
+def check_wells_against_config(sequences: list[dict], config) -> None:
+    """Raise ValueError if a sequence's well fields do not fit this rig:
+    a well without the sipper's port, the sipper's port without a well, a
+    well on a rig with no sipper (spec §6), a priming or clean-up row whose
+    use_ports skips the sipper (D7). Reached through validate_sequences,
+    like the port and type checks."""
+    from .vocabulary import sipper_vocabulary
+    vocabulary = sipper_vocabulary(config)
+    problems = []
+    for index, seq in enumerate(sequences):
+        problems.extend(f"sequence {index} ({sequence_label(seq)}): {problem}"
+                        for problem in sequence_well_problems(seq, vocabulary))
+    if problems:
+        raise ValueError("; ".join(problems))
+
 
 def sequence_port_problems(seq: dict, ports) -> list[str]:
     """The port fields of one sequence this rig does not offer, as
@@ -325,9 +417,10 @@ def validate_sequences(sequences: list[dict], config) -> None:
     brought up."""
     check_ports_against_config(sequences, config)
     check_types_against_application(sequences, config)
+    check_wells_against_config(sequences, config)
 
 
-def sequence_problem(seq: dict, application: str, ports) -> Optional[str]:
+def sequence_problem(seq: dict, application: str, ports, sipper=None) -> Optional[str]:
     """The verdict on one sequence, as a message or None -- the order the
     complaints are asked in, in one place.
 
@@ -348,6 +441,9 @@ def sequence_problem(seq: dict, application: str, ports) -> Optional[str]:
     problems = sequence_port_problems(validated[0].model_dump(), ports)
     if problems:
         return "; ".join(problems) + f": {port_range_note(ports)}"
+    well_problems = sequence_well_problems(validated[0].model_dump(), sipper)
+    if well_problems:
+        return "; ".join(well_problems)
     return None
 
 

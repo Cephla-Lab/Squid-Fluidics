@@ -38,6 +38,7 @@ from fluidics.qt.support import (WorkerEvent, PostsToQtThread, GuiLogHandler,  #
                                  _ask_yes_no, _hms)
 from fluidics.qt.sequence_editor import AddSequenceDialog, SequencesWidget  # noqa: E402,F401
 from fluidics.qt.manual_control import PortNamesDialog, ManualControlWidget  # noqa: E402,F401
+from fluidics.qt.robot_control import ROBOT_JOB_SOURCE, RobotControlWidget  # noqa: E402,F401
 from fluidics.qt.sensor_plots import (_safe_filename_part, TimeSeriesPlotWidget,  # noqa: E402,F401
                                       TemperatureControlWidget, FlowSensorWidget,
                                       FlowSensorControlWidget)
@@ -131,6 +132,12 @@ class FluidicsControlGUI(PostsToQtThread, QMainWindow):
             self.tabWidget.addTab(flowSensorTab, "Flow Sensors")
             self.sensorTabs.append(flowSensorTab)
 
+        # The sipper's tab, when the gantry block is configured (spec §9).
+        self.ROBOT_TAB = None
+        if self.system.devices.robot is not None:
+            robotTab = RobotControlWidget(self.config, self.system)
+            self.ROBOT_TAB = self.tabWidget.addTab(robotTab, "Robot")
+
         self.setCentralWidget(self.tabWidget)
 
     # What build_devices reports through on_issue is entry-point-neutral; the
@@ -157,16 +164,22 @@ class FluidicsControlGUI(PostsToQtThread, QMainWindow):
     RUN_TAB, MANUAL_TAB = 0, 1
 
     def _renderTabs(self):
-        """The tab that did not start the job goes dead while it runs: a run
-        must not start under a manual move (the operations' valve turn would
-        pass its gate and change the reagent under a live draw), nor a manual
-        move under a run.
+        """The tabs that did not start the job go dead while it runs -- one
+        job on the rig: a run must not start under a manual move (the
+        operations' valve turn would pass its gate and change the reagent
+        under a live draw), nor a manual move under a run, nor a move from
+        one of the manual and Robot tabs under the other's. Both start
+        manual jobs; the session's source says which (the Robot tab labels
+        its own).
 
         Reads the session rather than the announcement it was posted
         with -- the rule for deferred subscribers, on RunSession.state."""
         kind = self.session.kind
+        robot_job = kind == "manual" and self.session.source == ROBOT_JOB_SOURCE
         self.tabWidget.setTabEnabled(self.RUN_TAB, kind != "manual")
-        self.tabWidget.setTabEnabled(self.MANUAL_TAB, kind != "run")
+        self.tabWidget.setTabEnabled(self.MANUAL_TAB, kind != "run" and not robot_job)
+        if self.ROBOT_TAB is not None:
+            self.tabWidget.setTabEnabled(self.ROBOT_TAB, kind is None or robot_job)
 
     def _quiesce(self):
         """A live job must end before the devices close (system.close does

@@ -1,0 +1,1 @@
+"""Modbus RTU module tests"""

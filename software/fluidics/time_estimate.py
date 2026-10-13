@@ -125,6 +125,10 @@ def _replay(config, sequences):
         fixed = 0.0
         previous = 0.0
         durations = []
+        # The robot's travel, counted by its simulated service (XY legs
+        # concurrent, each leg's longest axis), from the build onward.
+        robot = devices.robot
+        robot_counted = robot._stage._service.travel_seconds if robot is not None else 0.0
         for seq in sequences:
             for _ in range(seq.get("repeat", 1)):
                 if seq["type"] == "set_temperature":
@@ -143,10 +147,64 @@ def _replay(config, sequences):
                                    for command, *_ in sent[commands_counted:])
                 commands_counted = len(sent)
 
+                robot_seconds = (robot._stage._service.travel_seconds - robot_counted
+                                 if robot is not None else 0.0)
                 total = (fixed + control.metered + chain_seconds
-                         + valve_moves * VALVE_MOVE_SECONDS)
+                         + valve_moves * VALVE_MOVE_SECONDS + robot_seconds)
                 durations.append(total - previous)
                 previous = total
         return durations
     finally:
         devices.close()
+
+
+def check_reservoirs(entries, config, snapshot):
+    """Replay `entries` (PlanEntry, each once) on an instant simulated twin
+    whose ledger starts from `snapshot`; the per-reservoir report when every
+    draw fits. Otherwise it raises, naming the step: ReservoirShortfall for
+    a draw a refill would make fit; the reservoir's own error, its type and
+    remedy kept, for any other refusal (a draw no full well can give, no
+    well under the tip); OperationError for a step the twin cannot replay;
+    ReservoirUndeclared, before any replay, when anything tracked is
+    undeclared. Separate from plan_run, which prices on a full ledger and
+    never raises (spec §7)."""
+    from .errors import (OperationError, ReservoirError, ReservoirOverdraw, ReservoirShortfall,
+                         ReservoirUndeclared)
+    from .reservoirs import undeclared_message
+    if snapshot.get("undeclared"):
+        raise ReservoirUndeclared(undeclared_message(snapshot["undeclared"],
+                                                     snapshot.get("definitions", {})))
+    config = config.model_copy(update={"flow_sensors": None})
+    devices = build_devices(config, simulation=True, run_control=_MeteredRunControl(),
+                            instant=True)
+    try:
+        devices.reservoirs.restore(snapshot)
+        ops = build_operations(config, devices)
+        for entry in entries:
+            if entry.sequence["type"] == "set_temperature":
+                continue
+            try:
+                ops.process_sequence(entry.sequence)
+            except ReservoirOverdraw as e:
+                d = snapshot["definitions"][e.key]
+                raise ReservoirShortfall(e.key, e.needed_ul, e.remaining_ul,
+                                         d["loaded_ul"] - d["residual_ul"], entry.label) from e
+            except ReservoirError as e:
+                # A refill would not help: its own words and remedy, and
+                # the step that met it.
+                _at_step(e, entry.label)
+                raise
+            except Exception as e:
+                raise OperationError(f"{entry.label}: the reservoir check could not replay "
+                                     f"this step ({e})") from e
+        return devices.reservoirs.rows()
+    finally:
+        devices.close()
+
+
+def _at_step(error, label):
+    """Put the step's label before `error`'s message and on it as
+    `step_label`, its type and figures kept. In place: it is the twin's,
+    raised once, so nothing else holds it."""
+    error.args = (f"{label}: {error}",)
+    error.step_label = label

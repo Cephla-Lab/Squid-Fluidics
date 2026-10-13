@@ -11,12 +11,13 @@ once.
 import logging
 
 from .devices import build_devices, build_operations
+from .errors import OperationError
 from .manual_operations import ManualOperations
 from .reports import RunReports
 from .run_session import RunSession
 from .sequences import validate_sequences
 from .subscribers import Subscribers
-from .time_estimate import plan_run
+from .time_estimate import check_reservoirs, plan_run
 from .usage import ReagentUsage
 
 _logger = logging.getLogger(__name__)
@@ -44,14 +45,18 @@ class FluidicsSystem:
         # rolling log; built before any widget subscribes (RunSession.events
         # states the order rule).
         self.reports = RunReports(self.session.events, self.usage,
-                                  self.warnings, directory=report_dir)
+                                  self.warnings, directory=report_dir,
+                                  reservoirs=devices.reservoirs)
 
     @classmethod
-    def build(cls, config, simulation=False, on_issue=None, report_dir=None):
+    def build(cls, config, simulation=False, on_issue=None, report_dir=None, ledger_path=None):
         """Bring the rig up for `config` and assemble it. What build_devices
         reports through on_issue (a degraded bring-up) passes straight
-        through; what it raises (no controller, no pump) raises."""
-        return cls(config, build_devices(config, simulation, on_issue=on_issue),
+        through; what it raises (no controller, no pump) raises.
+        ledger_path: where the reservoir ledger lives (None: beside the run
+        reports, named after the config)."""
+        return cls(config, build_devices(config, simulation, on_issue=on_issue,
+                                         ledger_path=ledger_path),
                    report_dir=report_dir)
 
     # --- the one job ---
@@ -67,7 +72,8 @@ class FluidicsSystem:
         through session.events; `plan` from plan() rides along so the run
         is not priced twice, and is what gets checked when it is there --
         it is what the session executes. Gated by validate_sequences,
-        which says who else checks and why.
+        which says who else checks and why, and then by the reservoir gate
+        (check_reservoirs), before the session starts.
         """
         if plan is None:
             if not sequences:
@@ -78,11 +84,40 @@ class FluidicsSystem:
             # A list, not a generator: validate_sequences walks it twice.
             validate_sequences([entry.sequence for entry in plan],
                                self.devices.config)
+        # "Do not lower tip" (the Robot tab's switch for checking taught
+        # positions over empty plates): the sipper would never dip, so no
+        # well row could draw. Refused here, before the replay and before
+        # anything moves, as a FluidicsError the start slot shows.
+        robot = self.devices.robot
+        if robot is not None and not robot.lower_tip:
+            raise OperationError("Do not lower tip is on: the sipper would travel to its wells "
+                                 "without dipping, so nothing could be drawn; switch it off to run")
+        # The reservoir gate (spec §7): the plan replayed on a simulated
+        # twin restored from the live ledger's snapshot (the live ledger is
+        # only read), so a run that would draw from an emptied well or
+        # bottle -- a fresh list or a resumed tail alike -- is refused
+        # here, not at the pump hours in.
+        self.check_reservoirs(plan)
         self.session.start(sequences, self.operations, plan=plan)
 
-    def run_manual(self, verb, callbacks=None):
+    def check_reservoirs(self, plan):
+        """The per-reservoir report for `plan`, replayed on a twin restored
+        from the live ledger's snapshot, which is only read; or the refusal
+        time_estimate.check_reservoirs raises. Empty on a rig with no
+        ledger."""
+        ledger = self.devices.reservoirs
+        if ledger is None:
+            return []
+        return check_reservoirs(plan, self.devices.config, ledger.snapshot())
+
+    def refill(self, key):
+        """Declare a reservoir full: `all`, a plate name, or one key. Through
+        the manual verb, which refuses a plate the sipper's tip is in."""
+        self.manual.refill(key)
+
+    def run_manual(self, verb, callbacks=None, source=None):
         """Start one manual verb; see RunSession.run_manual."""
-        self.session.run_manual(verb, callbacks)
+        self.session.run_manual(verb, callbacks, source=source)
 
     def wait(self, timeout=None):
         """Block until the current job has ended; see RunSession.wait."""
@@ -117,6 +152,7 @@ class FluidicsSystem:
         thread still driving them. Returns the exceptions the close raised,
         as DeviceSet.close does; safe to call twice.
         """
+        quiescent = True
         try:
             if self.session.busy:
                 what = self.session.kind
@@ -125,10 +161,12 @@ class FluidicsSystem:
                 if not self.session.wait(timeout):
                     _logger.error("The %s did not stop within %s s; closing the devices under it.",
                                   what, timeout)
+                    quiescent = False
         finally:
             # Unconditional: a second Ctrl+C lands in the wait above, and the
             # ports must still be released -- the exception goes on afterwards.
-            errors = self.devices.close()
+            # Under a job that did not stop, the devices make no moves.
+            errors = self.devices.close(quiescent=quiescent and not self.session.busy)
         return errors
 
     def __enter__(self):

@@ -34,13 +34,16 @@ from qtpy.QtWidgets import (
 )
 
 from fluidics.control.config import available_ports
+from fluidics.errors import FluidicsError
 from fluidics.events import RunEnded, RunStarted, SequenceCompleted, SequenceStarted, plan_seconds, repeat_suffix
 from fluidics.files import atomic_write
+from fluidics.qt.robot_control import WellCombo
 from fluidics.qt.support import GuiLogHandler, PostsToQtThread, _ask_yes_no, _hms, subscribe_until_detached
 from fluidics.run_log import LOGGER_NAME
 from fluidics.sequence_list import SequenceList
 from fluidics.sequences import (
     PORT_FIELDS,
+    WELL_FIELDS,
     get_fields_for_type,
     is_included,
     label_for_type,
@@ -49,20 +52,34 @@ from fluidics.sequences import (
     types_for_application,
     validate_sequences,
 )
+from fluidics.vocabulary import sipper_vocabulary
 
 _logger = logging.getLogger("fluidics.gui")
 
+# The fields only a sipper rig has (spec §6): the well-valued ones and the
+# dips. A rig without the sipper is offered none of them (D8).
+SIPPER_FIELDS = (*WELL_FIELDS, "dip_cycles")
+
 
 class AddSequenceDialog(QDialog):
-    """Dialog for adding a new sequence to the tree."""
+    """Dialog for adding a new sequence to the tree.
 
-    def __init__(self, parent, application, port_names):
+    sipper: the rig's SipperVocabulary, or None on a rig without one. With
+    it, a fluidic row offers its well -- picked or typed, on the reservoir
+    beside it -- live only while the port is the sipper's, where the fill
+    combo hides (a sipper row cannot fill tubing); priming and clean-up
+    offer where the sipper sits; flow_reagent offers its dips (spec §9).
+    Without it, none of those fields is offered (D8)."""
+
+    def __init__(self, parent, application, port_names, sipper=None):
         super().__init__(parent)
         self.setWindowTitle("Add Sequence")
         self.application = application
         self.port_names = port_names
+        self.sipper = sipper
         self.result_dict = None
         self._field_widgets = {}
+        self._well_reservoirs = {}      # well field -> the reservoir combo beside it
 
         self.initUI()
 
@@ -98,6 +115,7 @@ class AddSequenceDialog(QDialog):
         while self.formLayout.rowCount() > 0:
             self.formLayout.removeRow(0)
         self._field_widgets.clear()
+        self._well_reservoirs.clear()
 
         seq_type = self.typeCombo.currentData()
         fields = get_fields_for_type(seq_type)
@@ -105,6 +123,8 @@ class AddSequenceDialog(QDialog):
         for field_name, field_info in fields.items():
             if field_name == 'include':
                 continue  # handled by tree checkbox
+            if field_name in SIPPER_FIELDS and self.sipper is None:
+                continue  # no sipper on this rig: nothing to offer (D8)
 
             # A required field has no default, and pydantic spells that
             # PydanticUndefined -- which is not None, so it used to reach
@@ -117,12 +137,18 @@ class AddSequenceDialog(QDialog):
                 widget = QLineEdit()
                 if default is not None:
                     widget.setText(str(default))
+            elif field_name in WELL_FIELDS:
+                self._addWellRow(field_name)
+                continue
             elif field_name in PORT_FIELDS:
                 # fill_tubing_with is a port too, and sequences.py checks it
                 # as one -- offering it as a free-typed number was the same
                 # bug this change exists to fix, one field over.
                 widget = QComboBox()
                 for port, label in self.port_names:
+                    if (field_name == 'fill_tubing_with' and self.sipper is not None
+                            and port == self.sipper.sipper_port):
+                        continue  # the sipper cannot fill tubing (spec §6)
                     widget.addItem(label, port)
                 if default is not None:
                     # An unmatched port selects nothing rather than silently
@@ -134,6 +160,10 @@ class AddSequenceDialog(QDialog):
                 widget.setRange(0, 100000)
                 if default is not None:
                     widget.setValue(float(default))
+            elif field_name == 'dip_cycles':
+                widget = QSpinBox()
+                widget.setRange(0, 20)
+                widget.setValue(int(default or 0))
             else:
                 # int fields: flow_rate, volume, repeat
                 widget = QSpinBox()
@@ -144,6 +174,69 @@ class AddSequenceDialog(QDialog):
             self._field_widgets[field_name] = widget
             self.formLayout.addRow(field_name, widget)
 
+        port = self._field_widgets.get('fluidic_port')
+        if self.sipper is not None and port is not None:
+            port.currentIndexChanged.connect(self._followPort)
+            self._followPort()
+
+    def _addWellRow(self, field_name):
+        """A well field: the reservoir, then the well -- an editable combo
+        of that reservoir's wells, labelled with their names. Starts blank:
+        `well` must be chosen, and a blank `sipper_well` means the config's
+        own priming or clean-up well."""
+        reservoirs = QComboBox()
+        for name in sorted(self.sipper.reservoirs):
+            reservoirs.addItem(name, name)
+        reservoirs.setCurrentIndex(reservoirs.findData(self.sipper.default_reservoir))
+        well = WellCombo()
+        self._fillWells(well, reservoirs)
+        reservoirs.currentIndexChanged.connect(
+            lambda _index, well=well, reservoirs=reservoirs: self._fillWells(well, reservoirs))
+        row = QHBoxLayout()
+        row.addWidget(reservoirs)
+        row.addWidget(well, 1)
+        self._field_widgets[field_name] = well
+        self._well_reservoirs[field_name] = reservoirs
+        self.formLayout.addRow(field_name, row)
+
+    def _fillWells(self, well, reservoirs):
+        well.fill(self.sipper.well_names(reservoirs.currentData()))
+        self._clearWell(well)
+
+    @staticmethod
+    def _clearWell(well):
+        well.setCurrentIndex(-1)
+        well.clearEditText()
+
+    def _onSipperPort(self):
+        port = self._field_widgets.get('fluidic_port')
+        return (self.sipper is not None and port is not None
+                and port.currentData() == self.sipper.sipper_port)
+
+    def _followPort(self):
+        """The well (and its dips) is live only while the port is the
+        sipper's, and cleared otherwise; the fill combo is hidden while it
+        is, since a sipper row cannot fill tubing. `sipper_well` is not
+        tied to the port: it is where the sipper sits while priming."""
+        on_sipper = self._onSipperPort()
+        well = self._field_widgets.get('well')
+        if well is not None:
+            well.setEnabled(on_sipper)
+            self._well_reservoirs['well'].setEnabled(on_sipper)
+            if not on_sipper:
+                self._clearWell(well)
+        dips = self._field_widgets.get('dip_cycles')
+        if dips is not None:
+            dips.setEnabled(on_sipper)
+            if not on_sipper:
+                dips.setValue(0)
+        fill = self._field_widgets.get('fill_tubing_with')
+        if fill is not None:
+            fill.setVisible(not on_sipper)
+            label = self.formLayout.labelForField(fill)
+            if label is not None:
+                label.setVisible(not on_sipper)
+
     def accept(self):
         seq_type = self.typeCombo.currentData()
         d = {'type': seq_type}
@@ -152,7 +245,19 @@ class AddSequenceDialog(QDialog):
                 val = widget.text().strip()
                 if val:
                     d[field_name] = val
+            elif isinstance(widget, WellCombo):
+                # Its value, never currentData(): the text the operator
+                # sees, typed or picked. On another reservoir it is written
+                # reservoir/well; one typed that way already stays as typed.
+                value = widget.value()
+                if widget.isEnabled() and value:
+                    reservoir = self._well_reservoirs[field_name].currentData()
+                    d[field_name] = (value if "/" in value
+                                     or reservoir == self.sipper.default_reservoir
+                                     else f"{reservoir}/{value}")
             elif isinstance(widget, QComboBox):
+                if field_name == 'fill_tubing_with' and self._onSipperPort():
+                    continue  # hidden: a sipper row carries no fill
                 d[field_name] = widget.currentData()
             elif isinstance(widget, QDoubleSpinBox):
                 d[field_name] = widget.value()
@@ -182,11 +287,15 @@ class SequencesWidget(PostsToQtThread, QWidget):
         self.session = system.session
         self.selectorValveSystem = system.devices.selector_valves
 
+        # The rig's well vocabulary, or None without a sipper: the list
+        # judges wells by it, the tree and the Add dialog offer them by it.
+        self._sipper = sipper_vocabulary(config)
         # THE sequence list (fluidics.sequence_list, Qt-free): it holds the
         # dicts, validates them and performs the structural verbs; this
         # widget renders it and turns clicks into its calls.
         self._model = SequenceList(config.application,
-                                   available_ports(config))
+                                   available_ports(config),
+                                   sipper=self._sipper)
         self._plan = ()          # the running run's plan, rows = model rows
         # Which sequences the operator has open, by identity: a move swaps
         # the dicts themselves, so an open row follows its sequence rather
@@ -353,6 +462,9 @@ class SequencesWidget(PostsToQtThread, QWidget):
         'repeat': 'Repeat',
         'temperature': 'Temperature (\u00b0C)',
         'round': 'Round',
+        'well': 'Well',
+        'dip_cycles': 'Dip Cycles',
+        'sipper_well': 'Sipper Well',
     }
 
     def _onItemDoubleClicked(self, item, column):
@@ -403,7 +515,9 @@ class SequencesWidget(PostsToQtThread, QWidget):
     def _renderSequenceRow(self, row, seq):
         """One top-level item per sequence; one child per field of its type
         -- every field, defaults included, so a value at its default can
-        still be edited."""
+        still be edited. On a rig without the sipper, its fields are left
+        out (D8) unless the row carries one, which shows so it can be
+        cleared: the row is red for it."""
         seq_type = seq.get('type', '')
         item = QTreeWidgetItem([self._model.title(row),
                                 f"Type: {label_for_type(seq_type)}"])
@@ -416,6 +530,9 @@ class SequencesWidget(PostsToQtThread, QWidget):
             type_fields = {}
         for fname, finfo in type_fields.items():
             if fname in ('include', 'name'):
+                continue
+            if (fname in SIPPER_FIELDS and self._sipper is None
+                    and seq.get(fname, finfo.default) in (None, finfo.default)):
                 continue
             value = seq.get(fname, finfo.default)
             child = QTreeWidgetItem([self.FIELD_LABELS.get(fname, fname),
@@ -487,6 +604,11 @@ class SequencesWidget(PostsToQtThread, QWidget):
         else:
             self._model.set_field(row, item.data(0, Qt.UserRole),
                                   item.text(1).strip())
+            # The title carries the well: repaint it, or the next
+            # top-level change hands set_name the stale title, whose old
+            # suffix it cannot strip, and the stale text becomes the name.
+            with QSignalBlocker(self.tree):
+                top.setText(0, self._model.title(row))
         self._renderValidation()
         self._renderRunControls()
 
@@ -549,7 +671,8 @@ class SequencesWidget(PostsToQtThread, QWidget):
 
     def addSequence(self):
         port_names = self.selectorValveSystem.get_port_names()
-        dialog = AddSequenceDialog(self, self.config.application, port_names)
+        dialog = AddSequenceDialog(self, self.config.application, port_names,
+                                   sipper=self._sipper)
         if dialog.exec_() == QDialog.Accepted and dialog.result_dict:
             self._refresh(select=self._model.add(dialog.result_dict))
 
@@ -663,11 +786,16 @@ class SequencesWidget(PostsToQtThread, QWidget):
         ending shared by the Run button and the resume offer, so the two
         start sites cannot drift. The tabs (and, for the offer, the modal
         chain) make a busy rig unreachable in practice; the dialog beats a
-        traceback if it ever is not."""
+        traceback if it ever is not. A refusal at time zero -- the
+        reservoir gate's shortfall or undeclared ledger, or a step it
+        could not replay -- is a FluidicsError, said the same way."""
         try:
             self.system.run(sequences, plan=plan)
         except RuntimeError as e:
             QMessageBox.warning(self, "Rig busy", str(e))
+            return
+        except FluidicsError as e:
+            QMessageBox.warning(self, "Cannot start the run", str(e))
             return
         self._beginRunDisplay(len(plan))
 

@@ -232,6 +232,21 @@ class TestAManualMove:
         assert session.wait(5)
         assert reports == ["stopped", "finished", "finished"]
 
+    def test_a_move_carries_its_source_for_as_long_as_it_runs(self, session, real_clock):
+        """Who started a manual job (the GUI's Robot tab labels its own):
+        set with the kind, cleared with it, None when no label is given."""
+        release = threading.Event()
+        seen = []
+        session.state.subscribe(lambda kind: seen.append((kind, session.source)))
+        session.run_manual(release.wait, source="robot")
+        assert (session.kind, session.source) == ("manual", "robot")
+        release.set()
+        assert session.wait()
+        assert session.source is None
+        session.run_manual(lambda: None)
+        assert session.wait()
+        assert seen == [("manual", "robot"), (None, None), ("manual", None), (None, None)]
+
     def test_a_run_while_a_move_is_going_is_refused(self, session, ops, real_clock):
         release = threading.Event()
         session.run_manual(release.wait)

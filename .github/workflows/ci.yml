@@ -47,8 +47,12 @@ jobs:
 
       # No QT_QPA_PLATFORM here: tests/conftest.py forces Qt's offscreen
       # platform itself, so CI proves the same setup a headless dev box uses.
+      # The vendored driver is part of the tree: a skipped driver test would
+      # hide a broken copy behind a green run.
       - name: Run tests
         run: python -m pytest -q
+        env:
+          ROBOT_DRIVER_REQUIRED: "1"
 
   firmware-build:
     runs-on: ubuntu-latest
