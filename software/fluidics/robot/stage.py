@@ -42,6 +42,12 @@ MIN_TRAVEL_Z_MM = 1.0
 LIMIT_SWITCH_ALARM = 0x8614   # 603Fh while a limit switch holds the axis (NiMotion B06 table 8-1)
 
 
+def _label(axis):
+    """How a message names an axis: the driver's AxisName is a plain Enum,
+    whose str() is 'AxisName.X1'; its value is the drive's own label."""
+    return getattr(axis, "value", axis)
+
+
 class XYZStage:
     def __init__(self, service, axes, travel_z_mm, xy_velocity_mm_s,
                  z_velocity_mm_s, run_control, poll_seconds=POLL_SECONDS):
@@ -74,7 +80,7 @@ class XYZStage:
         self._home_axis(self._z)
         z = self._service.read(self._z).position_mm
         if z > self.travel_z_mm + TOLERANCE_MM:
-            raise DeviceError(f"axis {self._z} homed to {z:.2f} mm, below travel height "
+            raise DeviceError(f"axis {_label(self._z)} homed to {z:.2f} mm, below travel height "
                               f"{self.travel_z_mm:.2f} mm: either the homing seeks the deck end "
                               "(check the homing method) or the travel height is above where "
                               "homing parks (the drives park 0.1 to 0.5 mm past 0: set "
@@ -99,16 +105,16 @@ class XYZStage:
                 self._control.sleep(self._poll)
                 reading = self._service.homing_state(axis)
                 if reading.fault:
-                    raise DeviceError(f"axis {axis}: drive fault during homing")
+                    raise DeviceError(f"axis {_label(axis)}: drive fault during homing")
                 if not started:
                     if not reading.attained:
                         started = True
                 elif reading.error:
-                    raise DeviceError(f"axis {axis}: homing error")
+                    raise DeviceError(f"axis {_label(axis)}: homing error")
                 elif reading.attained and reading.homing_mode:
                     return
                 if time.monotonic() > deadline:
-                    raise DeviceError(f"axis {axis}: homing did not complete in "
+                    raise DeviceError(f"axis {_label(axis)}: homing did not complete in "
                                       f"{self._service.homing_timeout_s(axis):.0f} s")
         except BaseException as cause:
             self._end_early([axis], cause)
@@ -118,7 +124,13 @@ class XYZStage:
         """Quiescent: retract, brake, disable, disconnect. Under a job that
         did not stop in time: no moves at all, a halt instead. Returns the
         exceptions the steps raised, each shielded.
-        retract=False: a quiescent close makes no move (the sipper parked)."""
+        retract=False: a quiescent close makes no move (the sipper parked).
+        Threading: that halt runs on the closer's thread while the stuck job
+        may still poll this service; the vendored driver serializes each
+        Modbus request with its response (the client's RLock in
+        control/nimotion/modbus_rtu/client.py, over serial_comm/serial_port.py's
+        per read/write RLock), and the interleaving on the drives is a bench
+        item."""
         steps = []
         if quiescent and self._homed:
             if retract:
@@ -218,7 +230,7 @@ class XYZStage:
     def _check_stroke(self, axis, target):
         low, high = self._service.stroke(axis)
         if not low <= target <= high:
-            raise StageError(f"axis {axis}: {target:.2f} mm is outside the stroke "
+            raise StageError(f"axis {_label(axis)}: {target:.2f} mm is outside the stroke "
                              f"{low:.2f}..{high:.2f} mm")
 
     def _leg(self, targets):
@@ -250,18 +262,18 @@ class XYZStage:
                         raise DeviceError(self._describe(axis, reading))
                     target = pending[axis][0]
                     if reading.error_code == LIMIT_SWITCH_ALARM:
-                        raise DeviceError(f"axis {axis}: move to {target:.2f} mm stopped by a "
+                        raise DeviceError(f"axis {_label(axis)}: move to {target:.2f} mm stopped by a "
                                           f"limit switch at {reading.position_mm:.2f} mm")
                     if not reading.target_reached:
                         in_flight.add(axis)
                     elif abs(reading.position_mm - target) <= TOLERANCE_MM:
                         del pending[axis]
                     elif axis in in_flight:
-                        raise DeviceError(f"axis {axis}: move to {target:.2f} mm ended at "
+                        raise DeviceError(f"axis {_label(axis)}: move to {target:.2f} mm ended at "
                                           f"{reading.position_mm:.2f} mm (a limit switch?)")
                 if pending and time.monotonic() > deadline:
                     axis = next(iter(pending))
-                    raise DeviceError(f"axis {axis}: move to {pending[axis][0]:.2f} mm "
+                    raise DeviceError(f"axis {_label(axis)}: move to {pending[axis][0]:.2f} mm "
                                       "did not complete in time")
         except BaseException as cause:
             self._end_early(started, cause)
@@ -283,12 +295,12 @@ class XYZStage:
                 self._service.stop(axis)
             except Exception as e:
                 failures.append((axis, e))
-                _logger.error("axis %s: stop failed: %s", axis, e)
+                _logger.error("axis %s: stop failed: %s", _label(axis), e)
         return failures
 
     @staticmethod
     def _stop_failure_message(failures):
-        return "could not stop " + "; ".join(f"axis {axis}: {e}" for axis, e in failures)
+        return "could not stop " + "; ".join(f"axis {_label(axis)}: {e}" for axis, e in failures)
 
     def _refresh_position(self, shielded=False):
         """Read all three axes into the cache and publish; with `shielded`,
@@ -306,8 +318,8 @@ class XYZStage:
     @staticmethod
     def _describe(axis, reading):
         if reading.fault:
-            return f"axis {axis}: drive fault, error code 0x{reading.error_code:04X}"
-        return f"axis {axis}: drive is not enabled"
+            return f"axis {_label(axis)}: drive fault, error code 0x{reading.error_code:04X}"
+        return f"axis {_label(axis)}: drive is not enabled"
 
     def _publish(self):
         self.moves.notify(self._position)

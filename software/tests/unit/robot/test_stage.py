@@ -340,3 +340,34 @@ class TestClose:
         errors = stage.close(quiescent=False)
         assert len(errors) == 1 and "Y2" in str(errors[0])
         assert service.log[-1] == ("disconnect", None)
+
+
+class TestMessages:
+    def test_an_enum_axis_is_named_by_its_value(self):
+        """The driver's AxisName is a plain Enum, whose str() is
+        'AxisName.X1': every message names the axis as the drive label
+        says it, 'axis X1'."""
+        from enum import Enum
+
+        class AxisName(Enum):
+            X1 = "X1"
+            Y2 = "Y2"
+            Z3 = "Z3"
+
+        axes = {"x": AxisName.X1, "y": AxisName.Y2, "z": AxisName.Z3}
+        service = SimulatedService(axes.values(), {AxisName(name): stroke
+                                                   for name, stroke in STROKES.items()},
+                                   instant=True)
+        stage = XYZStage(service, axes, 0.0, 50.0, 20.0, RunControl())
+        stage.connect()
+        stage.home()
+        with pytest.raises(StageError) as refused:
+            stage.move_xy(250.0, 10.0)
+        assert str(refused.value) == "axis X1: 250.00 mm is outside the stroke 0.00..200.00 mm"
+        service.fault(AxisName.Z3, after_polls=2, error_code=0x7331)    # in flight
+        service.fail_stop(AxisName.Z3, OSError("no response"))
+        with pytest.raises(DeviceError) as failed:
+            stage.move_z(20.0)
+        assert str(failed.value) == "could not stop axis Z3: no response"
+        assert str(failed.value.__cause__) == "axis Z3: drive fault, error code 0x7331"
+        assert "AxisName" not in str(refused.value) + str(failed.value) + str(failed.value.__cause__)

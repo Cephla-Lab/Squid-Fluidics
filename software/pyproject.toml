@@ -33,5 +33,5 @@ test = ["pytest", "squid-fluidics[gui]"]
 include = ["fluidics*"]
 
 [tool.pytest.ini_options]
-markers = ["robot_driver: needs the servo driver; skipped unless installed, failed if ROBOT_DRIVER_REQUIRED=1"]
+markers = ["robot_driver: needs the servo driver; skipped if the vendored driver does not import; failed if ROBOT_DRIVER_REQUIRED=1"]
 testpaths = ["tests/unit", "tests/integration"]

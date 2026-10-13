@@ -79,10 +79,11 @@ class DeviceSet:
     Attributes are what the entry points already call them: controller,
     syringe_pump, selector_valves, disc_pump (None outside Open Chamber),
     temperature_controller (None when absent or failed), flow_sensors (possibly
-    empty), and run_control -- the one cancellation signal every waiting
-    device shares; RunSession drives it (cancel, pause, reset), so an abort
-    from anywhere reaches every device. Built by build_devices(); nothing
-    else should construct one.
+    empty), robot (the RobotSipper, None without a gantry), reservoirs (the
+    ReservoirLedger, None when the config tracks no volume), and run_control
+    -- the one cancellation signal every waiting device shares; RunSession
+    drives it (cancel, pause, reset), so an abort from anywhere reaches every
+    device. Built by build_devices(); nothing else should construct one.
     """
 
     def __init__(self, config, controller, syringe_pump, selector_valves,
@@ -141,7 +142,16 @@ class DeviceSet:
         quiescent: False when a job is still running on these devices (the
         facade's close after its wait timed out). Then nothing moves: the
         abort latch stays set so the job cannot resume, the syringe is not
-        parked, the robot halts instead of retracting.
+        parked, and the robot halts where it is and makes no move. A
+        quiescent close parks the robot instead, the tip in the park well.
+
+        Threading: a non-quiescent close halts the robot from this, the
+        closer's, thread while the stuck job may still poll the same RS-485
+        service. The vendored driver serializes each Modbus request and its
+        response (the client's RLock in control/nimotion/modbus_rtu/client.py,
+        over the RLock serial_comm/serial_port.py takes per read and write);
+        how a halt interleaves with the job's polls on the drives is a bench
+        item.
         """
         if self._closed:
             return []
@@ -162,8 +172,10 @@ class DeviceSet:
             steps.append(self.run_control.reset)
         if self.robot is not None:
             # After the reset (a quiescent robot's park passes the gates),
-            # before the syringe parks (the sipper leaves its well dry-free
-            # first); the robot's own shielded steps are folded into this one.
+            # before the syringe parks. Quiescent, the sipper parks with its
+            # tip in the park well (wet between runs); otherwise it halts and
+            # makes no move. The robot's own shielded steps are folded into
+            # this one.
             steps.append(lambda: _raise_first(self.robot.close(quiescent=quiescent)))
         steps.append(lambda: self.syringe_pump.close(empty_syringe if quiescent else False))
         steps.append(self.controller.close)
@@ -228,18 +240,27 @@ def build_devices(config, simulation=False, on_issue=None, run_control=None,
     """Construct and start the full stack for `config`. Returns a DeviceSet.
 
     Mirrors what the two entry points did, once: construct controller, syringe
-    pump, and (optionally) temperature controller; begin() the controller and
-    CLEAR the MCU; start the flow sensors; build the selector valves (which
-    homes them, today a constructor side effect); attach the disc pump for
-    Open Chamber.
+    pump, and (optionally) temperature controller; take the reservoir
+    ledger's lock (before any device is touched, so a second launch on a
+    rig in use stops there); begin() the controller and CLEAR the MCU; start
+    the flow sensors; build the robot when the config has a gantry
+    (connected, homed, retracted: after the sensors, before the valves);
+    build the selector valves (which homes them, today a constructor side
+    effect); attach the disc pump for Open Chamber; attach the ledger to
+    the pump's draws.
 
     Degradation policy is the GUI's: a temperature controller that fails to
     come up on hardware, or flow sensors that fail in either mode, are
     reported through on_issue and left out rather than failing the launch.
     So is draw protection configured where nothing will act on it
     (draw_protection_available): reported, and switched off.
-    The controller, pump, and valves are not survivable -- those raise, after
-    closing whatever had already started.
+    The controller, pump, valves, robot and ledger are not survivable --
+    those raise, after closing whatever had already started (the robot
+    without a move, the ledger's lock last).
+
+    ledger_path: where the reservoir ledger lives. None: beside the run
+    reports, named after the config; on a simulated rig, a fresh ledger in
+    memory, every reservoir declared full.
 
     instant: switch the simulated rig's pacing off -- the controller's
     one-second commands and the pump's five-second moves take no time. For
