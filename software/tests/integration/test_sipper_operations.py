@@ -24,9 +24,10 @@ def test_a_well_row_moves_the_sipper_then_opens_its_port_then_draws(rig):
     devices.selector_valves.open_port = lambda port: order.append(("port", port)) or open_port(port)
     ops.process_sequence({"type": "flow_reagent", "fluidic_port": 1, "well": "A1",
                           "flow_rate": 2000, "volume": 100})
-    kinds = [k for k, _ in order]
-    assert kinds.index("port") > kinds.index("move")
-    assert ("port", 1) in order
+    port_at = order.index(("port", 1))
+    last_move = max(i for i, (kind, _) in enumerate(order) if kind == "move")
+    assert port_at > last_move, "the port opens only after the selection's last move"
+    assert order[port_at - 1] == ("move", (12.0, 1.5, 50.0)), "that move ends at dip depth in A1"
     assert devices.robot.current_well == WellRef("probes", "A1")
     assert devices.reservoirs.remaining("probes/A1") == 110 - 5 - 100
 
@@ -51,7 +52,8 @@ def test_dips_run_before_the_draw_while_the_well_is_full(rig):
                           "flow_rate": 5000, "volume": 1000, "dip_cycles": 2})
     zs = [z for kind, z in events if kind == "z"]
     assert zs[-5:] == [52.0, 47.0, 52.0, 47.0, 52.0]      # dip depth, up 5 mm, back, twice
-    assert events.index(("draw", 1000)) > events.index(("z", 47.0))
+    last_z = max(i for i, (kind, _) in enumerate(events) if kind == "z")
+    assert events.index(("draw", 1000)) > last_z, "the draw starts only after the last dip ends"
     assert devices.robot.current_well == WellRef("ssct", "A1")
 
 

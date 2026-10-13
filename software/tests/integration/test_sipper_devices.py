@@ -42,10 +42,65 @@ def test_the_robot_comes_up_before_the_valves_and_is_not_survivable(plate_sipper
     assert order == ["robot"], "the valves were not homed after a dead robot"
 
 
-def test_a_ledger_that_cannot_be_held_fails_the_launch_and_releases_the_robot(plate_sipper_config, built, tmp_path, monkeypatch):
-    """The ledger is built inside the protected block: its failure tears
-    down the stage, the sensors and the controller like any other."""
+def test_a_second_launch_on_a_held_ledger_touches_no_device(plate_sipper_config, built, tmp_path, monkeypatch):
+    """The ledger's lock comes before any device is touched: a second
+    launch on a rig already in use stops there, before it clears the MCU,
+    homes the robot (lifting the first session's tip out of its well) or
+    homes the valves. What it had constructed is still released."""
     import fluidics.devices as devices_module
+    from fluidics.control.controller import FluidControllerSimulation
+    from fluidics.robot import simulation as robot_simulation
+    controllers, services, valves = [], [], []
+
+    class RecordingController(FluidControllerSimulation):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            controllers.append(self)
+            self.begun = False
+            self.closes = 0
+
+        def begin(self):
+            self.begun = True
+            return super().begin()
+
+        def close(self):
+            self.closes += 1
+            return super().close()
+
+    class RecordingService(robot_simulation.SimulatedService):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            services.append(self)
+
+    real_valves = devices_module.SelectorValveSystem
+
+    def recording_valves(*args, **kwargs):
+        valves.append(True)
+        return real_valves(*args, **kwargs)
+
+    monkeypatch.setattr(devices_module, "FluidControllerSimulation", RecordingController)
+    monkeypatch.setattr(robot_simulation, "SimulatedService", RecordingService)
+    monkeypatch.setattr(devices_module, "SelectorValveSystem", recording_valves)
+    path = tmp_path / "ledger.json"
+    first = built(plate_sipper_config, simulation=True, instant=True, ledger_path=path)
+    assert len(controllers) == len(services) == len(valves) == 1
+    with pytest.raises(ReservoirInUse):
+        build_devices(plate_sipper_config, simulation=True, instant=True, ledger_path=path)
+    second = controllers[1]
+    assert not second.begun and second.sent == [], "the MCU was neither begun nor cleared"
+    assert len(services) == 1, "no stage service was opened: nothing connected, homed or moved"
+    assert len(valves) == 1, "the valves were not homed"
+    assert second.closes == 1, "what the failed launch had constructed is released"
+    assert first.close() == []
+    built(plate_sipper_config, simulation=True, instant=True, ledger_path=path)   # the lock was the first set's
+
+
+def test_a_failure_after_the_robot_is_up_closes_it_without_moves_and_frees_the_ledger(plate_sipper_config, tmp_path, monkeypatch):
+    """A stuck valve after the robot has homed: the robot is closed
+    non-quiescently with the rest, and the ledger's lock, taken first, is
+    released, so the next launch can take it."""
+    import fluidics.devices as devices_module
+    from fluidics.reservoirs import ReservoirLedger, reservoir_definitions
     closed = []
     real = devices_module._build_robot
 
@@ -55,12 +110,67 @@ def test_a_ledger_that_cannot_be_held_fails_the_launch_and_releases_the_robot(pl
         robot.close = lambda quiescent=True: closed.append(quiescent) or robot_close(quiescent)
         return robot
 
+    def stuck(*args, **kwargs):
+        raise RuntimeError("current position is 3; expected 1")
+
     monkeypatch.setattr(devices_module, "_build_robot", tracking)
-    first = built(plate_sipper_config, simulation=True, instant=True, ledger_path=tmp_path / "ledger.json")
-    with pytest.raises(ReservoirInUse):
-        build_devices(plate_sipper_config, simulation=True, instant=True, ledger_path=tmp_path / "ledger.json")
-    assert closed == [False], "the second launch's robot was closed, without moves"
-    assert first.reservoirs is not None
+    monkeypatch.setattr(devices_module, "SelectorValveSystem", stuck)
+    path = tmp_path / "ledger.json"
+    with pytest.raises(RuntimeError, match="expected 1") as failed:
+        build_devices(plate_sipper_config, simulation=True, instant=True, ledger_path=path)
+    assert closed == [False], "the robot was closed, without moves"
+    # The failed launch's frames live on in `failed`, so the lock is free
+    # here only if the launch released it, not the garbage collector.
+    ReservoirLedger.load(path, reservoir_definitions(plate_sipper_config)).close()
+    assert failed.value is not None
+
+
+def test_a_robot_that_cannot_home_fails_the_launch_closed_without_moves(plate_sipper_config, monkeypatch):
+    """_build_robot's own failure path: a Z fault during homing raises out
+    of build_devices naming the axis; the builder closes its stage without
+    a move (halt, brake, disable, disconnect), and the controller and the
+    sensors started before it are released."""
+    import fluidics.devices as devices_module
+    from fluidics.control.controller import FluidControllerSimulation
+    from fluidics.robot import simulation as robot_simulation
+    services, controllers, started = [], [], []
+
+    class FaultingService(robot_simulation.SimulatedService):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.fault("Z3", after_polls=1, error_code=0x2310)
+            services.append(self)
+
+    class RecordingController(FluidControllerSimulation):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            controllers.append(self)
+            self.closes = 0
+
+        def close(self):
+            self.closes += 1
+            return super().close()
+
+    original = devices_module.start_flow_sensors
+
+    def spying_start(controller, config, simulation):
+        sensors = original(controller, config, simulation)
+        started.extend(sensors)
+        return sensors
+
+    monkeypatch.setattr(robot_simulation, "SimulatedService", FaultingService)
+    monkeypatch.setattr(devices_module, "FluidControllerSimulation", RecordingController)
+    monkeypatch.setattr(devices_module, "start_flow_sensors", spying_start)
+    with pytest.raises(DeviceError, match="axis Z3: drive fault during homing"):
+        build_devices(plate_sipper_config, simulation=True, instant=True)
+    (service,) = services
+    assert "move_to" not in [verb for verb, _ in service.log], "nothing moved"
+    assert {axis for verb, axis in service.log if verb == "stop"} == {"X1", "Y2", "Z3"}, "halted"
+    assert service.log[-5:] == [("engage_brake", "Z3"), ("disable", "X1"), ("disable", "Y2"),
+                                ("disable", "Z3"), ("disconnect", None)]
+    assert not service.connected
+    assert len(started) == 1 and all(s._stop_reading.is_set() for s in started)
+    assert [c.closes for c in controllers] == [1]
 
 
 def test_close_runs_the_robot_after_the_reset_and_before_the_syringe(plate_sipper_config, built, tmp_path):

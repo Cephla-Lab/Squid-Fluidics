@@ -16,6 +16,7 @@ way it stops a run.
 import logging
 
 from .control.config import gantry
+from .robot.stage import MIN_TRAVEL_Z_MM
 from .vocabulary import sipper_vocabulary
 
 _logger = logging.getLogger(__name__)
@@ -181,6 +182,12 @@ class ManualOperations:
     def teach_travel(self, z_mm):
         self._need_robot()
         z = float(z_mm)
+        if z < MIN_TRAVEL_Z_MM:
+            # Home, then "Set travel height here", would teach where homing
+            # parked Z; the next homing that parks Z lower refuses it.
+            raise ValueError(f"a travel height of {z:.2f} mm is above where homing may leave Z "
+                             f"(the drives park 0.1 to 0.5 mm past 0, and homing refuses a travel "
+                             f"height Z parks below): give {MIN_TRAVEL_Z_MM:g} mm or more")
         for r in self._gantry.reservoirs.values():
             if z >= r.dip_z_mm - self._gantry.agitate_amplitude_mm:
                 raise ValueError(f"a travel height of {z:.2f} mm is not above {r.name}'s "

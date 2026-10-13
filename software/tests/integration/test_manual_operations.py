@@ -197,3 +197,18 @@ def test_jog_refuses_xy_below_travel_height(plate_sipper_config, built):
     manual.jog("z", 10.0)
     with pytest.raises(StageError, match="travel height"):
         manual.jog("x", 1.0)
+
+
+def test_teach_travel_refuses_a_height_homing_may_park_below(plate_sipper_config, built):
+    """Home, then "Set travel height here", would teach the 0.1 to 0.5 mm
+    the drives park at, and the next launch's homing refuses any Z that
+    parks below it. Refused before the robot or the config changes."""
+    from fluidics.control.config import gantry
+    from fluidics.robot.stage import MIN_TRAVEL_Z_MM
+    devices = built(plate_sipper_config, simulation=True, instant=True)
+    manual = ManualOperations(devices)
+    with pytest.raises(ValueError, match=r"homing.*1 mm or more"):
+        manual.teach_travel(0.2)
+    assert devices.robot._stage.travel_z_mm == 1.0
+    assert gantry(plate_sipper_config).travel_z_mm == 1.0
+    manual.teach_travel(MIN_TRAVEL_Z_MM)          # the floor itself is a travel height

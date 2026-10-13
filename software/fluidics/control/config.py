@@ -11,6 +11,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 from ..files import atomic_write
+from ..robot.stage import MIN_TRAVEL_Z_MM
 
 
 DEFAULT_CONFIG_PATHS = ("./config.yaml", "./config.json")
@@ -187,7 +188,7 @@ class GantryConfig(_StrictModel):
     port: Optional[str] = None
     baudrate: int = 115200
     axes: Dict[Literal["x", "y", "z"], str]
-    travel_z_mm: float
+    travel_z_mm: float = Field(ge=MIN_TRAVEL_Z_MM)      # homing parks Z up to 0.5 mm past 0
     xy_velocity_mm_s: float = Field(gt=0)
     z_velocity_mm_s: float = Field(gt=0)
     park_xy_mm: Optional[Tuple[float, float]] = None

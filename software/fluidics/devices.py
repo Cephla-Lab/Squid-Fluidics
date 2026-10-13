@@ -293,6 +293,13 @@ def build_devices(config, simulation=False, on_issue=None, run_control=None,
     robot = None
     reservoirs = None
     try:
+        # The ledger's lock first, before any device is touched: a second
+        # launch on a rig already in use stops here, before it clears the
+        # MCU, homes the robot (lifting the first session's tip out of its
+        # well) or homes the valves. A file it cannot read or lock fails the
+        # launch with what was constructed above released.
+        reservoirs = _build_ledger(config, simulation, ledger_path)
+
         controller.begin()
         controller.send_command(CMD_SET.CLEAR)
 
@@ -316,9 +323,8 @@ def build_devices(config, simulation=False, on_issue=None, run_control=None,
         disc_pump = (DiscPump(controller, run_control)
                      if config.application == "Open Chamber" else None)
 
-        # The ledger last, inside the protected block: a file it cannot
-        # read or lock fails the launch with everything above released.
-        reservoirs = _build_ledger(config, simulation, ledger_path)
+        # Attached once the draws it authorizes can be routed: it reads the
+        # valves' port and the sipper's well.
         if reservoirs is not None:
             reservoirs.attach(
                 syringe_pump, None if robot is None else gantry(config).selector_valve_port,
@@ -340,9 +346,11 @@ def build_devices(config, simulation=False, on_issue=None, run_control=None,
             cleanups.append(temperature_controller.close)
         if robot is not None:
             cleanups.append(lambda: robot.close(quiescent=False))
-        if reservoirs is not None:
-            cleanups.append(reservoirs.close)
         cleanups.append(controller.close)
+        if reservoirs is not None:
+            # The lock last, as DeviceSet.close releases it: the rig stays
+            # held until every port this launch opened is released.
+            cleanups.append(reservoirs.close)
         _run_shielded(cleanups)
         raise
 

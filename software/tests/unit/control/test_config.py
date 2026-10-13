@@ -537,6 +537,10 @@ class TestGantryConfig:
         (lambda d: d["reagent_selection"]["nimotion_gantry_system"]["reservoirs"][1]["well_names"].__setitem__("Z9", "x"), "Z9"),
         (lambda d: d["reagent_selection"]["nimotion_gantry_system"].__setitem__("port", "COM5"), "exactly one"),
         (lambda d: d["reagent_selection"]["nimotion_gantry_system"]["axes"].__setitem__("y", "X1"), "distinct"),
+        # Homing parks Z 0.1 to 0.5 mm past 0, and home() refuses a travel
+        # height Z parks below: 1 mm is the floor (B7 review).
+        (lambda d: d["reagent_selection"]["nimotion_gantry_system"].__setitem__("travel_z_mm", 0.0),
+         r"travel_z_mm\n\s+Input should be greater than or equal to 1\b"),
         (lambda d: d["reagent_selection"]["selector_valves"]["loaded_volume_ul"].__setitem__("port_99", 1),
          "loaded_volume_ul has keys that name no port on this cascade: port_99"),
         (lambda d: d["reagent_selection"]["selector_valves"]["loaded_volume_ul"].__setitem__("port_2", 1000), "plumbed"),

@@ -36,6 +36,9 @@ _logger = logging.getLogger(__name__)
 
 POLL_SECONDS = 0.05
 TOLERANCE_MM = 0.05
+# Homing parks Z 0.1 to 0.5 mm past 0, and home() refuses a travel height
+# Z parks below: the lowest travel height a config or a teach may give.
+MIN_TRAVEL_Z_MM = 1.0
 LIMIT_SWITCH_ALARM = 0x8614   # 603Fh while a limit switch holds the axis (NiMotion B06 table 8-1)
 
 
@@ -75,7 +78,7 @@ class XYZStage:
                               f"{self.travel_z_mm:.2f} mm: either the homing seeks the deck end "
                               "(check the homing method) or the travel height is above where "
                               "homing parks (the drives park 0.1 to 0.5 mm past 0: set "
-                              "travel_z_mm to 1 mm or more)")
+                              f"travel_z_mm to {MIN_TRAVEL_Z_MM:g} mm or more)")
         for axis in (self._x, self._y):
             self._home_axis(axis)
         self._refresh_position()
