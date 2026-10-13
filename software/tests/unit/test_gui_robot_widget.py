@@ -75,20 +75,72 @@ def test_controls_freeze_while_any_job_runs(widget, real_clock):
     assert w.goToWellButton.isEnabled()
 
 
-def test_stop_is_live_for_this_tab_s_own_job(widget, real_clock):
-    """The one STOP: live while this tab's own move runs, the session's
-    abort when pressed."""
+def test_stop_is_live_for_this_tab_s_own_job_and_stops_it(widget, monkeypatch, real_clock):
+    """The one STOP: live while this tab's own move runs, and pressing it
+    is the session's abort -- the move, waiting on the run's control as
+    every device does, ends as a stop, not an error, and promptly."""
+    import time
     w, system = widget
-    import threading
-    gate = threading.Event()
-    w._run(lambda: gate.wait(5))
-    try:
-        QApplication.processEvents()
-        assert w.stopButton.isEnabled() and not w.goToWellButton.isEnabled()
-    finally:
-        gate.set()
+    stopped, errors = [], []
+    monkeypatch.setattr(w, "operationStopped", lambda: stopped.append(True))
+    monkeypatch.setattr(w, "handleError", errors.append)
+    w._run(lambda: system.session.control.sleep(5))
+    QApplication.processEvents()
+    assert w.stopButton.isEnabled() and not w.goToWellButton.isEnabled()
+    pressed = time.monotonic()
+    w.stopButton.click()
     _settle(system)
+    assert time.monotonic() - pressed < 2, "STOP did not stop the move"
+    assert stopped == [True] and errors == []
     assert not w.stopButton.isEnabled() and w.goToWellButton.isEnabled()
+
+
+PRIMING = {"type": "priming", "fluidic_port": 25, "flow_rate": 5000, "volume": 800}
+
+
+def test_a_completed_priming_row_reads_primed(widget):
+    w, system = widget
+    system.run([PRIMING])
+    _settle(system)
+    assert w.primedLabel.text() == "primed this session: yes"
+
+
+def test_an_aborted_priming_row_primes_nothing(widget, monkeypatch, real_clock):
+    """Started is not done: a priming the operator aborted mid-way must not
+    read as primed."""
+    import threading
+    w, system = widget
+    started = threading.Event()
+
+    def held_priming(sequence):
+        started.set()
+        system.session.control.sleep(5)          # aborted here
+
+    monkeypatch.setattr(system.operations, "process_sequence", held_priming)
+    system.run([PRIMING])
+    assert started.wait(5)
+    system.abort()
+    _settle(system)
+    assert w.primedLabel.text() == "primed this session: no"
+
+
+@pytest.mark.parametrize("reservoir, typed, reference", [
+    ("ssct", "A3", "ssct/A3"),          # bare: on the reservoir picked beside it
+    ("probes", "ssct/A2", "ssct/A2"),   # qualified: as typed, whatever is picked
+])
+def test_go_to_well_takes_a_bare_or_a_qualified_well(widget, monkeypatch, reservoir, typed, reference):
+    w, system = widget
+    asked, said = [], []
+    monkeypatch.setattr(w, "handleError", said.append)     # a refusal is a dialog: record it, never block
+    go_to_well = system.manual.go_to_well
+    monkeypatch.setattr(system.manual, "go_to_well", lambda text: asked.append(text) or go_to_well(text))
+    w.reservoirCombo.setCurrentIndex(w.reservoirCombo.findData(reservoir))
+    w.wellCombo.setCurrentText(typed)
+    w.goToWell()
+    _settle(system)
+    assert said == [] and asked == [reference]
+    well = system.devices.robot.current_well
+    assert f"{well.reservoir}/{well.well}" == reference
 
 
 def test_a_click_asks_before_reloading_a_plate(widget, monkeypatch):
@@ -162,6 +214,43 @@ def test_an_unknown_position_is_painted_as_such(widget):
     w, _ = widget
     w._paintPosition(None)
     assert "unknown" in w.positionLabel.text()
+
+
+def test_one_job_on_the_rig_greys_the_other_tabs(qapp, plate_sipper_config, tmp_path, monkeypatch,
+                                                  real_clock):
+    """The real window: a Robot-tab move greys the run and manual tabs; a
+    manual-tab move greys the run and Robot tabs; all come back after."""
+    import threading
+    import gui
+    from fluidics.devices import build_devices
+    devices = build_devices(plate_sipper_config, simulation=True, instant=True)
+    for sensor in devices.flow_sensors:
+        sensor.close()
+    system = FluidicsSystem(plate_sipper_config, devices, report_dir=tmp_path)
+    monkeypatch.setattr(gui.FluidicsSystem, "build", lambda *args, **kwargs: system)
+    window = gui.FluidicsControlGUI(plate_sipper_config, True)
+    tabs = window.tabWidget
+
+    def enabled():
+        return {name: tabs.isTabEnabled(index) for name, index in
+                (("run", window.RUN_TAB), ("manual", window.MANUAL_TAB), ("robot", window.ROBOT_TAB))}
+
+    try:
+        for tab, expected in ((window.ROBOT_TAB, {"run": False, "manual": False, "robot": True}),
+                              (window.MANUAL_TAB, {"run": False, "manual": True, "robot": False})):
+            gate = threading.Event()
+            tabs.widget(tab)._run(lambda: gate.wait(5))
+            try:
+                QApplication.processEvents()
+                assert enabled() == expected
+            finally:
+                gate.set()
+            _settle(system)
+            assert enabled() == {"run": True, "manual": True, "robot": True}
+    finally:
+        window.deleteLater()
+        QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+        assert system.close() == []
 
 
 @pytest.mark.parametrize("config_name, has_robot", [("plate_sipper_config", True),

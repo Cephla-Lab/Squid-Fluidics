@@ -627,6 +627,44 @@ class TestTheTreeShowsWellsOnlyOnASipperRig:
             QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 
 
+@pytest.fixture
+def sipper_widget(qapp, plate_sipper_config):
+    system = SimpleNamespace(
+        devices=SimpleNamespace(selector_valves=SimpleNamespace(
+            get_port_names=lambda: [(1, "Port 1: sipper"), (25, "Port 25: 4x SSC")])),
+        session=FakeSession(), warnings=Subscribers("test warnings"))
+    w = gui.SequencesWidget(plate_sipper_config, system)
+    yield w
+    w.deleteLater()
+    QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+
+
+class TestTheTitleFollowsTheWell:
+    """The row's title carries its well (SequenceList.title); a well edit
+    must repaint it, or the next top-level change (a checkbox, a rename)
+    hands the stale title to set_name, which strips only the current well's
+    suffix -- and the stale text becomes the row's name."""
+
+    def test_an_unnamed_row_stays_unnamed_through_a_well_edit_and_a_toggle(self, sipper_widget):
+        w = sipper_widget
+        w.setSequences([dict(FLOW, well="A1")])
+        field_item(w, 0, "well").setText(1, "A3")
+        top = w.tree.topLevelItem(0)
+        assert top.text(0) == "Flow Reagent: A3"
+        top.setCheckState(0, Qt.Unchecked)
+        assert w._model[0]["name"] is None
+        assert top.text(0) == "Flow Reagent: A3"
+
+    def test_a_named_row_keeps_its_name_through_a_well_edit_and_a_toggle(self, sipper_widget):
+        w = sipper_widget
+        w.setSequences([dict(FLOW, well="A1", name="hyb")])
+        field_item(w, 0, "well").setText(1, "A3")
+        top = w.tree.topLevelItem(0)
+        top.setCheckState(0, Qt.Unchecked)
+        assert w._model[0]["name"] == "hyb"
+        assert top.text(0) == "hyb: A3"
+
+
 class TestARefusedStartIsADialog:
     def test_a_reservoir_shortfall_at_time_zero_is_shown(self, widget, monkeypatch):
         """B8's review: the reservoir gate refuses inside system.run with a

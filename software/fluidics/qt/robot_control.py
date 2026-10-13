@@ -14,7 +14,7 @@ from qtpy.QtWidgets import (QComboBox, QGridLayout, QGroupBox, QHBoxLayout, QLab
                             QVBoxLayout, QWidget)
 
 from fluidics.control.config import save_config
-from fluidics.events import RunStarted, SequenceStarted
+from fluidics.events import RunStarted, SequenceCompleted
 from fluidics.vocabulary import sipper_vocabulary
 
 from .support import PostsToQtThread, _ask_yes_no, subscribe_until_detached
@@ -22,6 +22,10 @@ from .support import PostsToQtThread, _ask_yes_no, subscribe_until_detached
 _logger = logging.getLogger(__name__)
 
 JOG_STEPS_MM = (0.1, 1.0, 10.0)
+
+# The session's `source` for a manual job this tab started: STOP is live
+# for it alone, and the main window greys every other tab while it runs.
+ROBOT_JOB_SOURCE = "robot"
 
 
 class WellCombo(QComboBox):
@@ -65,9 +69,6 @@ class RobotControlWidget(PostsToQtThread, QWidget):
         self._vocabulary = sipper_vocabulary(config)
         self._controls = []
         self._plan = ()
-        # A move this tab started is in flight: STOP is live for it, and
-        # only for it -- a job from another tab is stopped from that tab.
-        self._ownJob = False
         detach = subscribe_until_detached(
             (system.devices.robot.moves, self._onMove),
             (system.session.state, self._onSessionState),
@@ -176,13 +177,23 @@ class RobotControlWidget(PostsToQtThread, QWidget):
     # --- verbs: every one a manual job ---
 
     def goToWell(self):
+        """The well on the reservoir picked beside it -- or, typed as
+        reservoir/well, as typed."""
         reservoir = self.reservoirCombo.currentData()
         well = self.wellCombo.value()
-        self._run(lambda: self.manual.go_to_well(f"{reservoir}/{well}"))
+        reference = well if "/" in well else f"{reservoir}/{well}"
+        self._run(lambda: self.manual.go_to_well(reference))
 
     def stopMove(self):
-        if self.session.kind == "manual":
+        """The session's abort, for this tab's own move: a job from another
+        tab is stopped from that tab."""
+        if self._ownsJob():
             self.session.abort()
+
+    def _ownsJob(self):
+        """Whether the job in flight is a move this tab started: read from
+        the session, which sets and clears its source with its kind."""
+        return self.session.kind == "manual" and self.session.source == ROBOT_JOB_SOURCE
 
     def _run(self, verb):
         """Hand one verb to the session, off the GUI thread, as the manual
@@ -193,12 +204,11 @@ class RobotControlWidget(PostsToQtThread, QWidget):
                 "on_stopped": lambda: self._post_event("operationStopped"),
                 "on_error": lambda message: self._post_event("handleError", message),
                 "on_finished": lambda: self._post_event("operationFinished"),
-            })
+            }, source=ROBOT_JOB_SOURCE)
         except RuntimeError as e:
             _logger.info("%s; the robot move was not started.", e)
             return
         # Posted reports cannot be handled before this returns.
-        self._ownJob = True
         self.setControlsEnabled(False)
 
     def operationStopped(self):
@@ -208,7 +218,6 @@ class RobotControlWidget(PostsToQtThread, QWidget):
         QMessageBox.critical(self, "Robot", message)
 
     def operationFinished(self):
-        self._ownJob = False
         self._renderSession()
 
     # --- the session: any job freezes this tab ---
@@ -229,12 +238,14 @@ class RobotControlWidget(PostsToQtThread, QWidget):
     def setControlsEnabled(self, enabled):
         for control in self._controls:
             control.setEnabled(enabled)
-        self.stopButton.setEnabled(not enabled and self._ownJob)
+        self.stopButton.setEnabled(not enabled and self._ownsJob())
 
     def _onRunEvent(self, event):
+        # Completed, not started: a priming the operator aborted mid-way
+        # primed nothing.
         if isinstance(event, RunStarted):
             self._plan = event.plan
-        elif isinstance(event, SequenceStarted) and self._plan:
+        elif isinstance(event, SequenceCompleted) and self._plan:
             if self._plan[event.position].sequence.get("type") == "priming":
                 self._post_event("_markPrimed")
 

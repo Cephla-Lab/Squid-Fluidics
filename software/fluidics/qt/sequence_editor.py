@@ -604,6 +604,11 @@ class SequencesWidget(PostsToQtThread, QWidget):
         else:
             self._model.set_field(row, item.data(0, Qt.UserRole),
                                   item.text(1).strip())
+            # The title carries the well: repaint it, or the next
+            # top-level change hands set_name the stale title, whose old
+            # suffix it cannot strip, and the stale text becomes the name.
+            with QSignalBlocker(self.tree):
+                top.setText(0, self._model.title(row))
         self._renderValidation()
         self._renderRunControls()
 

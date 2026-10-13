@@ -107,9 +107,9 @@ class FluidicsSystem:
             raise RuntimeError("this rig tracks no reservoir volumes")
         self.devices.reservoirs.refill(key)
 
-    def run_manual(self, verb, callbacks=None):
+    def run_manual(self, verb, callbacks=None, source=None):
         """Start one manual verb; see RunSession.run_manual."""
-        self.session.run_manual(verb, callbacks)
+        self.session.run_manual(verb, callbacks, source=source)
 
     def wait(self, timeout=None):
         """Block until the current job has ended; see RunSession.wait."""
