@@ -17,7 +17,9 @@ from fluidics.control.config import gantry, save_config
 from fluidics.events import RunStarted, SequenceCompleted
 from fluidics.vocabulary import sipper_vocabulary
 
-from .deck_map import DeckMapWidget, DeckMapWindow
+from qtpy.QtCore import Qt
+
+from .deck_map import DeckMapWidget
 from .support import PostsToQtThread, _ask_yes_no, subscribe_until_detached
 
 _logger = logging.getLogger(__name__)
@@ -58,6 +60,16 @@ def connect_click(button, slot):
     """`clicked` carries a `checked` bool; a slot with defaulted arguments
     would take it as its first one. The wrapper drops it."""
     button.clicked.connect(lambda _checked=False, slot=slot: slot())
+
+
+class _ToolWindow(QWidget):
+    """A tool window that floats beside the main window, holding a layout
+    built by the tab; closing hides it, and its controls live on."""
+
+    def __init__(self, title, layout, parent=None):
+        super().__init__(parent, Qt.Tool)
+        self.setWindowTitle(title)
+        self.setLayout(layout)
 
 
 class RobotControlWidget(PostsToQtThread, QWidget):
@@ -103,11 +115,17 @@ class RobotControlWidget(PostsToQtThread, QWidget):
         connect_click(self.stopButton, self.stopMove)
         self.stopButton.setEnabled(False)
         row.addWidget(self.stopButton)
-        # The deck map, in its own window so the tab keeps its room: the
-        # plates where they are taught, the tip where the stage last said
-        # it was. A click on a well is Go to well for that well, and
-        # nothing between wells; the map freezes with the controls, the
-        # button that opens it does not (a look is not a move).
+        # Teaching (with the jog it needs) lives in its own window, opened
+        # from here, so the tab is the run-time view; the button stays live
+        # under a job, since opening the window is not a move.
+        self.teachButton = QPushButton("Teach…")
+        connect_click(self.teachButton, self.showTeach)
+        row.addWidget(self.teachButton)
+        column = QVBoxLayout()
+        column.addLayout(row)
+        # The deck map: the plates where they are taught, the tip where the
+        # stage last said it was. A click on a well is Go to well for that
+        # well, and nothing between wells; it freezes with the controls.
         robot = self.system.devices.robot
         g = gantry(self.config)
         self.deckMap = DeckMapWidget(robot.strokes())
@@ -117,14 +135,13 @@ class RobotControlWidget(PostsToQtThread, QWidget):
             "clean-up": self._vocabulary.resolve(g.clean_up_well),
             "park": None if g.park_well is None else self._vocabulary.resolve(g.park_well)})
         self.deckMap.wellClicked.connect(self._goToClickedWell)
+        column.addWidget(self.deckMap, 1)
         self._controls.append(self.deckMap)
-        self.deckMapWindow = DeckMapWindow(self.deckMap, parent=self)
-        self.deckMapButton = QPushButton("Deck map…")
-        connect_click(self.deckMapButton, self.showDeckMap)
-        row.addWidget(self.deckMapButton)
-        status.setLayout(row)
+        status.setLayout(column)
         layout.addWidget(status)
 
+        # --- the teach window: jog, then the teach row ---
+        teaching = QVBoxLayout()
         jog = QGroupBox("Jog")
         grid = QGridLayout()
         self.jogButtons = {}
@@ -139,7 +156,7 @@ class RobotControlWidget(PostsToQtThread, QWidget):
                                           r, column)
                     self.jogButtons[(axis, mm)] = button
         jog.setLayout(grid)
-        layout.addWidget(jog)
+        teaching.addWidget(jog)
 
         wells = QGroupBox("Wells")
         row = QHBoxLayout()
@@ -159,12 +176,19 @@ class RobotControlWidget(PostsToQtThread, QWidget):
 
         teach = QGroupBox("Teach (then Save)")
         row = QHBoxLayout()
+        row.addWidget(QLabel("Plate"))
+        self.teachPlateCombo = QComboBox()
+        for name in sorted(self._vocabulary.reservoirs):
+            self.teachPlateCombo.addItem(name, name)
+        row.addWidget(self.teachPlateCombo)
+        self._controls.append(self.teachPlateCombo)
         self.setA1Button = self._button(row, "Set A1 here", self.setA1Here)
         self.setDipButton = self._button(row, "Set dip depth here", self.setDipHere)
         self.setTravelButton = self._button(row, "Set travel height here", self.setTravelHere)
         self.saveButton = self._button(row, "Save", self.saveTeaching)
         teach.setLayout(row)
-        layout.addWidget(teach)
+        teaching.addWidget(teach)
+        self.teachWindow = _ToolWindow("Teach", teaching, parent=self)
 
         ledger = QGroupBox("Reservoirs")
         column = QVBoxLayout()
@@ -207,11 +231,11 @@ class RobotControlWidget(PostsToQtThread, QWidget):
         reference = well if "/" in well else f"{reservoir}/{well}"
         self._run(lambda: self.manual.go_to_well(reference))
 
-    def showDeckMap(self):
-        """Open the map's window, or bring it back to the front."""
-        self.deckMapWindow.show()
-        self.deckMapWindow.raise_()
-        self.deckMapWindow.activateWindow()
+    def showTeach(self):
+        """Open the teach window, or bring it back to the front."""
+        self.teachWindow.show()
+        self.teachWindow.raise_()
+        self.teachWindow.activateWindow()
 
     def _goToClickedWell(self, reservoir, well):
         """A click on the map: the pickers show the well, and the move is
@@ -334,14 +358,14 @@ class RobotControlWidget(PostsToQtThread, QWidget):
         position = self._knownPosition()
         if position is None:
             return
-        name, (x, y, _) = self.reservoirCombo.currentData(), position
+        name, (x, y, _) = self.teachPlateCombo.currentData(), position
         self._run(lambda: self.manual.teach_a1(name, (x, y)))
 
     def setDipHere(self):
         position = self._knownPosition()
         if position is None:
             return
-        name, z = self.reservoirCombo.currentData(), position[2]
+        name, z = self.teachPlateCombo.currentData(), position[2]
         self._run(lambda: self.manual.teach_dip(name, z))
 
     def setTravelHere(self):

@@ -226,7 +226,7 @@ def test_teach_goes_through_the_manual_verbs_then_saves(widget, monkeypatch):
     w, system = widget
     saved = []
     monkeypatch.setattr("fluidics.qt.robot_control.save_config", lambda config: saved.append(config))
-    w.reservoirCombo.setCurrentIndex(w.reservoirCombo.findData("probes"))
+    w.teachPlateCombo.setCurrentIndex(w.teachPlateCombo.findData("probes"))
     w.jogButtons[("x", 1.0)].click()
     _settle(system)
     w.setA1Here()
@@ -316,19 +316,22 @@ def test_the_map_shows_the_named_wells_and_freezes_with_the_controls(widget):
     assert w.deckMap.isEnabled()
 
 
-def test_the_deck_map_lives_in_its_own_window_opened_from_the_stage_row(widget):
-    """Not on the tab: a window the operator opens, keeps beside the main
-    window, and closes; opening it is allowed while a job runs (a look,
-    not a move), though its clicks are frozen like every control."""
+def test_teaching_and_jog_live_in_their_own_window_and_the_map_on_the_tab(widget):
+    """The tab is the run-time view (map, go to well, reservoirs); jog and
+    teaching are a window the operator opens from the Stage row and closes.
+    Opening it is allowed while a job runs (not a move); its controls
+    freeze like every other."""
     w, _ = widget
-    assert w.deckMapWindow.isVisible() is False
-    assert w.deckMap.window() is w.deckMapWindow and w.deckMapWindow is not w.window()
-    w.deckMapButton.click()
-    assert w.deckMapWindow.isVisible() and w.deckMapWindow.windowTitle() == "Deck map"
-    w.deckMapWindow.close()
-    assert w.deckMapWindow.isVisible() is False
+    assert w.deckMap.window() is w.window()
+    assert w.teachWindow.isVisible() is False
+    for control in (w.jogButtons[("x", 1.0)], w.setA1Button, w.saveButton, w.teachPlateCombo):
+        assert control.window() is w.teachWindow
+    w.teachButton.click()
+    assert w.teachWindow.isVisible() and w.teachWindow.windowTitle() == "Teach"
+    w.teachWindow.close()
+    assert w.teachWindow.isVisible() is False
     w.setControlsEnabled(False)
-    assert w.deckMapButton.isEnabled() and not w.deckMap.isEnabled()
+    assert w.teachButton.isEnabled() and _frozen(w) and not w.teachPlateCombo.isEnabled()
 
 
 def test_teaching_moves_the_drawn_plate(widget, monkeypatch):
@@ -336,7 +339,7 @@ def test_teaching_moves_the_drawn_plate(widget, monkeypatch):
     w, system = widget
     monkeypatch.setattr("fluidics.qt.robot_control._ask_yes_no", lambda *a, **k: True)
     before = w.deckMap.pixel(*system.devices.robot.placements["probes"].xy_mm("A1"))
-    w.reservoirCombo.setCurrentIndex(w.reservoirCombo.findData("probes"))
+    w.teachPlateCombo.setCurrentIndex(w.teachPlateCombo.findData("probes"))
     w._run(w.manual.home_robot)
     _settle(system)
     w._run(lambda: w.manual.jog("x", 10.0))

@@ -11,7 +11,7 @@ It knows nothing of the robot, the session or the bus; nothing here polls.
 
 from qtpy.QtCore import QPointF, QRectF, QSize, Qt, Signal
 from qtpy.QtGui import QColor, QFont, QPainter, QPen
-from qtpy.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
+from qtpy.QtWidgets import QSizePolicy, QWidget
 
 from fluidics.robot.labware import AXIS_DIRECTIONS, WellRef
 
@@ -24,22 +24,6 @@ TIP_UNKNOWN = QColor("#e0a800")
 WELL_RADIUS_PITCH = 0.36       # a 6.4 mm well on a 9 mm pitch
 HIT_RADIUS_PITCH = 0.45        # a click this close to a centre is that well; farther is nothing
 TEXT_BAND_PX = 20              # the state line above the plates, the legend below
-
-
-class DeckMapWindow(QWidget):
-    """The map's own window, so it takes no room on the tab: a tool window
-    that floats beside the main window, opened from the Robot tab and
-    closed by the operator (closing hides it; the map lives on, fed as
-    before, and reopens where it was)."""
-
-    def __init__(self, deck_map, parent=None):
-        super().__init__(parent, Qt.Tool)
-        self.setWindowTitle("Deck map")
-        layout = QVBoxLayout()
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.addWidget(deck_map)
-        self.setLayout(layout)
-        self.resize(760, 480)
 
 
 class DeckMapWidget(QWidget):
