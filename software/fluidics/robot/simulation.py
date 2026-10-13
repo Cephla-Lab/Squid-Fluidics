@@ -11,8 +11,11 @@ stop or a read fail, make the target-reached bit read stale, put a limit
 switch inside the stroke, or make a move end short of its target. Homing
 presents the drive's real protocol: the attained bit reads stale once,
 clears while the axis moves, then sets again in homing mode; it parks the
-axis exactly at the stroke's low end (the drives park 0.1 to 0.5 mm past
-it, which is why a travel height of 0 is refused on the real driver).
+axis 0.3 mm short of the stroke's low end when that end is above 0 (the
+drives park 0.1 to 0.5 mm past the switch, below the 0.5 mm the driver's
+strokes start at, which is why a travel height of 0 is refused on the real
+driver and why the stage clears every axis into its stroke after homing),
+and exactly at a low end of 0.
 """
 
 import math
@@ -26,9 +29,12 @@ HomingReading = namedtuple("HomingReading", "attained error fault homing_mode")
 # #5, #6, #8: switch spacing less a margin), keyed by driver axis name. A
 # simulated rig uses these so a placement the real stage cannot reach is
 # refused in simulation too.
-XYG321A_STROKES_MM = {"X1": (0.0, 200.0), "Y2": (0.0, 102.0), "Z3": (0.0, 58.5)}
+# The driver's axis table at the vendored commit (nm-servo PRs #13, #15, #16): every
+# stroke starts 0.5 mm clear of the origin switch; Y2 was measured to 109 mm.
+XYG321A_STROKES_MM = {"X1": (0.5, 200.0), "Y2": (0.5, 109.0), "Z3": (0.5, 58.5)}
 
 HOMING_POLLS = 3          # reads between the stale bit clearing and homing attained
+HOMING_PARK_SHORT_MM = 0.3   # where homing parks, short of a stroke that starts above 0
 LIMIT_SWITCH_ALARM = 0x8614   # 603Fh while a limit switch holds the axis (NiMotion B06 table 8-1)
 
 _Move = namedtuple("_Move", "start target velocity t0")
@@ -122,7 +128,8 @@ class SimulatedService:
             return HomingReading(False, False, False, True)     # the axis is moving
         del self._homing[axis]
         self._moves.pop(axis, None)
-        self._position[axis] = self._target[axis] = self._strokes[axis][0]
+        low = self._strokes[axis][0]
+        self._position[axis] = self._target[axis] = max(0.0, low - HOMING_PARK_SHORT_MM)
         self._homed[axis] = True
         return HomingReading(True, False, False, True)
 

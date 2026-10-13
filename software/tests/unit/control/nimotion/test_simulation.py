@@ -16,6 +16,7 @@ from fluidics.control.nimotion.simulation.drive import FAULT_HOMING_TIMEOUT, WAR
 
 Y2 = DEFAULT_AXIS_CONFIGS[AxisName.Y2]  # no brake, so enable() does not sleep
 PPM = Y2.pulses_per_mm
+T5 = DEFAULT_AXIS_CONFIGS[AxisName.T5]
 
 _urls = itertools.count()
 
@@ -38,6 +39,8 @@ class Drive:
         self.w(R.DI3_LOGIC.address, config.di3_logic)
         self.w(R.HOMING_TIMEOUT.address, config.homing_timeout)
         for register, value in (
+            (R.MAX_ACCELERATION, 5000 * PPM),  # the factory 500000 would cap the profile
+            (R.MAX_DECELERATION, 5000 * PPM),
             (R.PROFILE_ACCELERATION, 500 * PPM),
             (R.PROFILE_DECELERATION, 500 * PPM),
             (R.QUICK_STOP_DECELERATION, 1000 * PPM),
@@ -120,6 +123,16 @@ def test_write_to_read_only_register_is_an_exception():
     bus = SimulatedBus([Y2])
     response = bus.handle_frame(frame(2, 0x06, 0x03, 0x81, 0x00, 0x00))  # status word
     assert response[1] == 0x86 and response[2] == 0x02
+
+
+def test_factory_limits_cap_the_profile_acceleration():
+    """60C5h / 60C6h are 500000 from the factory; the X stage's drive capped 6083h-6085h"""
+    d = SimulatedDrive(Y2, now=0.0)
+    value = int(500 * PPM)
+    for register in (R.PROFILE_ACCELERATION, R.PROFILE_DECELERATION, R.QUICK_STOP_DECELERATION):
+        d.write(register.address, [value >> 16, value & 0xFFFF])
+        high, low = d.read(register.address, 2)
+        assert (high << 16) | low == 500000
 
 
 def test_offline_drive_ignores_frames():
@@ -290,6 +303,57 @@ def test_homing_without_limit_inputs_runs_into_the_end_stop():
     assert d.d.error_code() == 0x8611  # following error
 
 
+# ------------------------------------------------------------ the T5 tilt
+
+
+def r32(drive, address, signed=True):
+    high, low = drive.read(address, 2)
+    value = (high << 16) | low
+    return value - (1 << 32) if signed and value & 0x80000000 else value
+
+
+def test_axis_without_limit_inputs_has_no_end_stops():
+    d = Drive(T5)
+    d.enable()
+    target = round(400.0 * T5.pulses_per_mm)  # far past any stroke
+    d.w(R.MODES_OF_OPERATION.address, 1)
+    d.w32(R.PROFILE_VELOCITY.address, round(90 * T5.pulses_per_mm))
+    d.w32(R.TARGET_POSITION.address, target)
+    d.cw(0x0F, 0x1F)
+    d.run_until(lambda: d.d.position() == target)
+    assert d.d.error_code() == 0
+    assert d.d.read(R.DI_PHYSICAL_STATE.address, 1) == [0b111]  # nothing pressed
+
+
+def test_internal_position_ignores_the_home_offset():
+    d = Drive(T5)
+    d.enable()
+    before = r32(d.d, R.POSITION_ACTUAL_INTERNAL.address)
+    home(d, 35)
+    assert d.d.position() == 0
+    assert r32(d.d, R.POSITION_ACTUAL_INTERNAL.address) == before != 0
+
+
+def test_bring_up_registers_start_at_factory_values():
+    d = SimulatedDrive(T5)
+    assert r32(d, R.ENCODER_BITS.address, signed=False) == 17
+    assert r32(d, R.SOFTWARE_LIMIT_MIN.address) == -65535
+    assert r32(d, R.SOFTWARE_LIMIT_MAX.address) == 65535
+    assert d.read(R.POSITION_RESTORE_MODE.address, 1) == [0]
+    assert d.read(R.UNDER_VOLTAGE_POINT.address, 1) == [24]
+
+
+def test_hooks_refuse_writes_and_override_reads():
+    bus = SimulatedBus([T5])
+    drive = bus.drive(T5.slave_id)
+    drive.rejected_writes.add(R.POLARITY.address)
+    response = bus.handle_frame(frame(5, 0x06, 0x03, 0xF3, 0x00, 0x80))
+    assert response[1:3] == bytes([0x86, 0x03])  # illegal data value
+    drive.read_overrides[R.POLARITY.address] = 0x40
+    response = bus.handle_frame(frame(5, 0x03, 0x03, 0xF3, 0x00, 0x01))
+    assert struct.unpack(">H", response[3:5])[0] == 0x40
+
+
 # ------------------------------------------------------------ library on the simulator
 
 
@@ -354,6 +418,82 @@ def test_move_onto_a_limit_switch_fails_at_once():
         service.disconnect()
 
 
+def test_connect_writes_the_limits_before_the_profile(service):
+    """Written after the profile (or not at all), the factory limits would cap it"""
+    config = service.get_axis_config()
+    client = service.get_modbus_client()
+    for register, mm in (
+        (R.PROFILE_ACCELERATION, config.default_acceleration),
+        (R.PROFILE_DECELERATION, config.default_deceleration),
+        (R.QUICK_STOP_DECELERATION, config.quick_stop_deceleration),
+    ):
+        assert client.read_register_32bit(config.slave_id, register.address) == (
+            config.velocity_mm_to_pulses(mm)
+        )
+
+
+def test_connect_fails_when_the_drive_does_not_keep_the_profile():
+    """A profile above the limits is capped by the drive; connect must say so"""
+    import dataclasses
+
+    from fluidics.control.nimotion.motor_control import MotorError
+
+    url = f"sim://test{next(_urls)}"
+    install_bus(url, SimulatedBus(time_scale=20.0))
+    config = dataclasses.replace(Y2, max_acceleration=300.0)  # below the 500 mm/s² profile
+    service = ServoService(port=url, axis_configs={AxisName.Y2: config})
+    service.current_axis = AxisName.Y2
+    with pytest.raises(MotorError, match="6083h"):
+        service.connect()
+    assert not service.is_connected
+
+
+def test_jog_never_moves_against_its_direction():
+    """Homing leaves X1 short of stroke_min: jog - must not drive it forward to stroke_min"""
+    import time
+
+    url = f"sim://test{next(_urls)}"
+    install_bus(url, SimulatedBus(time_scale=20.0))
+    service = ServoService(port=url)
+    service.current_axis = AxisName.X1
+    service.connect()
+    try:
+        service.enable()
+        service.home()
+        time.sleep(0.1)  # 2 s simulated: the axis decelerates past the home switch edge
+        start = service.get_position()
+        assert start < service.get_axis_config().stroke_min
+        service.jog(-10.0)
+        time.sleep(0.2)  # 4 s of simulated time
+        assert service.get_position() == pytest.approx(start, abs=1e-3)
+        service.jog(10.0)  # toward the far end it still moves
+        time.sleep(0.2)
+        service.stop()
+        assert service.get_position() > start + 1.0
+    finally:
+        service.disconnect()
+
+
+def test_home_returns_once_the_axis_has_stopped():
+    """Bit 12 comes on at the switch edge, while the axis is still decelerating"""
+    import time
+
+    url = f"sim://test{next(_urls)}"
+    install_bus(url, SimulatedBus(time_scale=1.0))  # real time: the deceleration takes 50 ms
+    service = ServoService(port=url)
+    service.current_axis = AxisName.Y2
+    service.connect()
+    try:
+        service.enable()
+        service.move_to(2.0, velocity_mm_s=50.0)
+        service.home()
+        at_return = service.get_position()
+        time.sleep(0.3)
+        assert service.get_position() == pytest.approx(at_return, abs=1e-4)
+    finally:
+        service.disconnect()
+
+
 def test_set_home_position_does_not_wait_for_the_timeout(service):
     """Method 35 completes on the trigger; the wait used to need a 1 -> 0 edge"""
     service.enable()
@@ -379,5 +519,48 @@ def test_custom_axis_config_gets_a_simulated_drive():
     service.connect()
     try:
         assert service.get_axis_status().connected
+    finally:
+        service.disconnect()
+
+
+def test_connect_without_initialize_writes_nothing(monkeypatch):
+    url = f"sim://test{next(_urls)}"
+    bus = install_bus(url, SimulatedBus([T5], time_scale=20.0))
+    functions = []
+    real = bus.handle_frame
+
+    def record(frame_bytes):
+        functions.append(frame_bytes[1])
+        return real(frame_bytes)
+
+    monkeypatch.setattr(bus, "handle_frame", record)
+    service = ServoService(port=url, axis_configs={AxisName.T5: T5})
+    service.current_axis = AxisName.T5
+    service.connect(initialize=False)
+    try:
+        assert functions and set(functions) <= {0x03, 0x04}
+    finally:
+        service.disconnect()
+
+
+def test_t5_zeroes_and_tilts():
+    url = f"sim://test{next(_urls)}"
+    install_bus(url, SimulatedBus([T5], time_scale=20.0))
+    service = ServoService(port=url, axis_configs={AxisName.T5: T5})
+    service.current_axis = AxisName.T5
+    service.connect()
+    try:
+        assert service.get_motor().read_software_limits() == (-2548, 11650)
+        service.enable()
+        service.set_home_position()
+        assert service.get_position() == 0
+        service.move_to(30.0, velocity_mm_s=90.0)
+        assert service.get_position() == pytest.approx(30.0, abs=0.01)
+        service.move_to(-5.0, velocity_mm_s=90.0)
+        assert service.get_position() == pytest.approx(-5.0, abs=0.01)
+        with pytest.raises(ValueError):
+            service.move_to(31.0)
+        with pytest.raises(ValueError):
+            service.home()
     finally:
         service.disconnect()

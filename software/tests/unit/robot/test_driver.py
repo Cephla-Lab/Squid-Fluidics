@@ -135,8 +135,9 @@ def test_reset_fault_is_the_drivers_fault_reset(fake_service):
 def test_strokes_come_from_the_driver_table(fake_service):
     driver, _ = fake_service
     service, names = driver.open_service("COM5", 115200, {"x": "X1", "y": "Y2", "z": "Z3"})
-    assert service.stroke(names["x"]) == (0.0, 200.0)
-    assert service.stroke(names["z"]) == (0.0, 58.5)
+    assert service.stroke(names["x"]) == (0.5, 200.0)       # every stroke starts clear of the origin switch
+    assert service.stroke(names["y"]) == (0.5, 109.0)       # measured between Y2's switches (nm-servo #15)
+    assert service.stroke(names["z"]) == (0.5, 58.5)
 
 
 @pytestmark_driver
@@ -212,7 +213,7 @@ def test_a_move_after_a_halt_goes_to_the_new_target_not_the_old_one(real_clock):
         canceller.start()
         try:
             with pytest.raises(AbortRequested):
-                stage.move_xy(150.0, 0.0)             # 1.5 s at 100 mm/s, cancelled past 30 mm
+                stage.move_xy(150.0, 1.0)             # 1.5 s at 100 mm/s, cancelled past 30 mm
         finally:
             move_over.set()
             canceller.join()
@@ -232,7 +233,7 @@ def test_a_move_after_a_halt_goes_to_the_new_target_not_the_old_one(real_clock):
         sampler = threading.Thread(target=sample)
         sampler.start()
         try:
-            stage2.move_xy(back_to, 0.0)
+            stage2.move_xy(back_to, 1.0)
         finally:
             done.set()
             sampler.join()

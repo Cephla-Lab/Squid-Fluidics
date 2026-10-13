@@ -25,6 +25,10 @@ MANUAL_ADDRESSES = [
     (Registers.PROFILE_VELOCITY, 0x03F8, 0x6081, 0x00),
     (Registers.PROFILE_ACCELERATION, 0x03FC, 0x6083, 0x00),
     (Registers.PROFILE_DECELERATION, 0x03FE, 0x6084, 0x00),
+    (Registers.QUICK_STOP_DECELERATION, 0x0400, 0x6085, 0x00),
+    (Registers.MAX_PROFILE_VELOCITY, 0x03F4, 0x607F, 0x00),
+    (Registers.MAX_ACCELERATION, 0x043B, 0x60C5, 0x00),
+    (Registers.MAX_DECELERATION, 0x043D, 0x60C6, 0x00),
     (Registers.ENCODER_RESOLUTION_NUM, 0x0406, 0x608F, 0x01),
     (Registers.ENCODER_RESOLUTION_DEN, 0x0408, 0x608F, 0x02),
     (Registers.GEAR_RATIO_NUM, 0x040E, 0x6091, 0x01),
@@ -46,3 +50,37 @@ MANUAL_ADDRESSES = [
 )
 def test_address_matches_manual(reg: RegisterDef, address: int, index: int, subindex: int) -> None:
     assert (reg.address, reg.object_index, reg.object_subindex) == (address, index, subindex)
+
+
+# Objects the T5 tilt work adds, per the PMM60L/STM-M/BLM/TSM Modbus manual B03
+# (chapter 10; 2005h:18h and 1Dh from section 6.7, which the dictionary omits)
+STEPPER_ADDRESSES = [
+    (Registers.POSITION_ACTUAL_INTERNAL, 0x03C6, 0x6063, 0x00),
+    (Registers.POSITION_RANGE_MIN, 0x03E9, 0x607B, 0x01),
+    (Registers.POSITION_RANGE_MAX, 0x03EB, 0x607B, 0x02),
+    (Registers.HOME_OFFSET, 0x03ED, 0x607C, 0x00),
+    (Registers.SOFTWARE_LIMIT_MIN, 0x03EF, 0x607D, 0x01),
+    (Registers.SOFTWARE_LIMIT_MAX, 0x03F1, 0x607D, 0x02),
+    (Registers.POSITION_RESTORE_MODE, 0x012A, 0x2005, 0x18),
+    (Registers.RESTORE_BLOCKING_POSITION, 0x012F, 0x2005, 0x1D),
+    (Registers.ENCODER_BITS, 0x0075, 0x2000, 0x19),
+    (Registers.UNDER_VOLTAGE_POINT, 0x0094, 0x2001, 0x10),
+    (Registers.OVER_VOLTAGE_POINT, 0x0092, 0x2001, 0x0E),
+    (Registers.FIRMWARE_VERSION, 0x0053, 0x1018, 0x03),
+]
+
+
+@pytest.mark.parametrize(
+    "reg, address, index, subindex",
+    STEPPER_ADDRESSES,
+    ids=[r[0].name for r in STEPPER_ADDRESSES],
+)
+def test_stepper_address_matches_manual(
+    reg: RegisterDef, address: int, index: int, subindex: int
+) -> None:
+    assert (reg.address, reg.object_index, reg.object_subindex) == (address, index, subindex)
+
+
+def test_addresses_are_unique() -> None:
+    defs = [reg for reg in vars(Registers).values() if isinstance(reg, RegisterDef)]
+    assert len({reg.address for reg in defs}) == len(defs)

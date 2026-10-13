@@ -14,13 +14,21 @@ It is for exercising software without the rig, not for predicting the rig:
   the sign of 606Ch: with 0x80 it reads in the motor's direction, opposite to
   the position (measured on the Y stage).
 - Addresses the simulator does not know read as 0 and accept writes.
-- Speed limits (607Fh, 6080h) are not applied; following error, torque and
-  bus voltage are plausible readings, not a model.
+- Writing 6083h stores at most 60C5h, and 6084h / 6085h at most 60C6h, as
+  the X stage's drive does (factory limits 500000). Speed limits (607Fh,
+  6080h) are not applied.
+- Following error, torque and bus voltage are plausible readings, not a model.
+- An axis whose configuration gives no input a limit function (the T5 tilt)
+  has no limit switches and no end stops.
+- 6063h reads the carriage in encoder units; homing does not change it.
+  Position restore is not modelled; 607Dh is stored, not enforced.
+- rejected_writes and read_overrides let tests make a write fail or a
+  read-back differ.
 """
 
 import math
 import random
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from ..high_level_api.axis_config import AxisConfig
 from ..motor_control.registers import Registers, StatusWordBits
@@ -30,8 +38,7 @@ CONTROL_MODE = 0x00B1  # 2002h:01h, 0 = CiA402
 QUICK_STOP_OPTION = 0x03BF  # 605Ah
 HALT_OPTION = 0x03C0  # 605Dh
 FAULT_REACTION_OPTION = 0x03C1  # 605Eh
-HOME_OFFSET = 0x03ED  # 607Ch, INT32
-MAX_PROFILE_VELOCITY = 0x03F4  # 607Fh, UINT32
+HOME_OFFSET = Registers.HOME_OFFSET.address  # 607Ch, INT32
 
 # Alarm codes (603Fh, B06 table 8-1)
 FAULT_FOLLOWING_ERROR = 0x8611
@@ -109,6 +116,7 @@ class SimulatedDrive:
         self._low_stop = -END_STOP_MM * ppm
         self._far_stop = self._far_switch + END_STOP_MM * ppm
         self._low_di, self._far_di = self._wiring(config)
+        self._switches = self._has_limit_switches(config)
 
         self._words: Dict[int, int] = {}
         self._load_defaults()
@@ -134,6 +142,9 @@ class SimulatedDrive:
         self._homing_error = False
         self._stall_since: Optional[float] = None
         self._saved = False
+        # Test hooks: writes to these addresses are refused; reads return these values
+        self.rejected_writes: Set[int] = set()
+        self.read_overrides: Dict[int, int] = {}
 
     # ------------------------------------------------------------ set-up
 
@@ -161,6 +172,14 @@ class SimulatedDrive:
             return 2, 3
         return low, far
 
+    @staticmethod
+    def _has_limit_switches(config: AxisConfig) -> bool:
+        """Whether the configuration gives some input a limit function (the tilt gives none)"""
+        limits = (DI_FUNCTION_NEGATIVE_LIMIT, DI_FUNCTION_POSITIVE_LIMIT)
+        return any(
+            f in limits for f in (config.di1_function, config.di2_function, config.di3_function)
+        )
+
     def _load_defaults(self) -> None:
         """Factory settings (B06 object dictionary)"""
         r = Registers
@@ -176,10 +195,15 @@ class SimulatedDrive:
             (r.BLOCKING_TIME.address, 500),
             (r.RATED_VOLTAGE.address, 48),
             (r.SLAVE_ADDRESS.address, self.slave_id),
+            (r.UNDER_VOLTAGE_POINT.address, 24),
+            (r.OVER_VOLTAGE_POINT.address, 100),
+            (r.POSITION_RESTORE_MODE.address, 0),
         ):
             self._words[address] = value & 0xFFFF
         for address, value in (
-            (MAX_PROFILE_VELOCITY, 500000),
+            (r.MAX_PROFILE_VELOCITY.address, 500000),
+            (r.MAX_ACCELERATION.address, 500000),
+            (r.MAX_DECELERATION.address, 500000),
             (r.PROFILE_VELOCITY.address, 500000),
             (r.PROFILE_ACCELERATION.address, 409600),
             (r.PROFILE_DECELERATION.address, 409600),
@@ -191,6 +215,11 @@ class SimulatedDrive:
             (r.ENCODER_RESOLUTION_DEN.address, 1),
             (r.GEAR_RATIO_NUM.address, 1),
             (r.GEAR_RATIO_DEN.address, 1),
+            (r.ENCODER_BITS.address, 17),
+            (r.SOFTWARE_LIMIT_MIN.address, -65535),
+            (r.SOFTWARE_LIMIT_MAX.address, 65535),
+            (r.POSITION_RANGE_MIN.address, -1048576),
+            (r.POSITION_RANGE_MAX.address, 1048576),
         ):
             self._set32(address, value)
 
@@ -203,6 +232,7 @@ class SimulatedDrive:
             Registers.MODES_OF_OPERATION_DISPLAY,
             Registers.ERROR_CODE,
             Registers.POSITION_ACTUAL_VALUE,
+            Registers.POSITION_ACTUAL_INTERNAL,
             Registers.VELOCITY_ACTUAL_VALUE,
             Registers.TORQUE_ACTUAL_VALUE,
             Registers.FOLLOWING_ERROR_ACTUAL,
@@ -213,6 +243,13 @@ class SimulatedDrive:
             Registers.BUS_VOLTAGE,
         )
         for a in range(reg.address, reg.address + reg.size)
+    )
+
+    # (register, the limit the drive caps it at when it is written)
+    _CAPPED = (
+        (Registers.PROFILE_ACCELERATION, Registers.MAX_ACCELERATION),
+        (Registers.PROFILE_DECELERATION, Registers.MAX_DECELERATION),
+        (Registers.QUICK_STOP_DECELERATION, Registers.MAX_DECELERATION),
     )
 
     def _get32(self, address: int) -> int:
@@ -226,11 +263,16 @@ class SimulatedDrive:
     def read(self, address: int, count: int) -> List[int]:
         """Holding registers address .. address+count-1"""
         live = self._live_values()
-        return [live.get(a, self._words.get(a, 0)) for a in range(address, address + count)]
+        return [
+            self.read_overrides.get(a, live.get(a, self._words.get(a, 0)))
+            for a in range(address, address + count)
+        ]
 
     def write(self, address: int, values: List[int]) -> None:
         """Write registers starting at address, then act on what changed"""
         addresses = range(address, address + len(values))
+        if any(a in self.rejected_writes for a in addresses):
+            raise SimulatedModbusError(ILLEGAL_DATA_VALUE)
         if any(a in self._READ_ONLY for a in addresses):
             raise SimulatedModbusError(ILLEGAL_DATA_ADDRESS)
         control = Registers.CONTROL_WORD.address
@@ -240,6 +282,9 @@ class SimulatedDrive:
         for a, value in zip(addresses, values):
             if a != control:
                 self._words[a] = value & 0xFFFF
+        for reg, limit in self._CAPPED:
+            if reg.address in addresses:
+                self._set32(reg.address, min(self._get32(reg.address), self._get32(limit.address)))
         if mode in addresses:
             self._set_mode(_s8(values[mode - address]))
         if Registers.SAVE_PARAMETERS.address in addresses:
@@ -264,6 +309,7 @@ class SimulatedDrive:
         }
         for reg, value in (
             (r.POSITION_ACTUAL_VALUE, self.position()),
+            (r.POSITION_ACTUAL_INTERNAL, self._internal_position()),
             (r.VELOCITY_ACTUAL_VALUE, self._rpm()),
             (r.FOLLOWING_ERROR_ACTUAL, round(self._velocity * 0.002)),
             (r.DIGITAL_INPUTS, self._digital_inputs()),
@@ -279,6 +325,12 @@ class SimulatedDrive:
     def position(self) -> int:
         """6064h, user units"""
         return round(self._carriage + self._offset)
+
+    def _internal_position(self) -> int:
+        """6063h: the carriage in encoder units (6064h x 6091h), unaffected by homing"""
+        r = Registers
+        gear = self._get32(r.GEAR_RATIO_NUM.address) / max(1, self._get32(r.GEAR_RATIO_DEN.address))
+        return round(self._carriage * gear)
 
     def _rpm(self) -> int:
         """606Ch: motor speed in rpm (B06: 6081h x 6091h x 60 / 608Fh)"""
@@ -303,6 +355,8 @@ class SimulatedDrive:
 
     def _switch_levels(self) -> Tuple[bool, bool]:
         """Physical (low, far) switches pressed"""
+        if not self._switches:
+            return False, False
         return self._carriage < 0.0, self._carriage > self._far_switch
 
     def _di_levels(self) -> int:
@@ -607,6 +661,8 @@ class SimulatedDrive:
 
     def _end_stops(self) -> None:
         """Hitting an end stop stalls the motor: following error, unless homing on it"""
+        if not self._switches:
+            return  # no end stops either (the tilt)
         if self._low_stop <= self._carriage <= self._far_stop:
             self._stall_since = None
             return

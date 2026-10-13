@@ -219,7 +219,7 @@ def test_a_jog_click_moves_the_axis_it_says(widget):
     w, system = widget
     w.jogButtons[("z", 10.0)].click()
     _settle(system)
-    assert system.devices.robot.position()[2] == 10.0
+    assert system.devices.robot.position()[2] == 10.5      # from the stroke's start, 0.5
 
 
 def test_teach_goes_through_the_manual_verbs_then_saves(widget, monkeypatch):
@@ -232,8 +232,8 @@ def test_teach_goes_through_the_manual_verbs_then_saves(widget, monkeypatch):
     w.setA1Here()
     _settle(system)
     from fluidics.control.config import gantry
-    assert tuple(gantry(w.config).reservoirs[1].a1_xy_mm) == (1.0, 0.0)
-    assert system.devices.robot.placements["probes"].a1_xy_mm == (1.0, 0.0)
+    assert tuple(gantry(w.config).reservoirs[1].a1_xy_mm) == (1.5, 0.5)     # homing clears to 0.5, then +1
+    assert system.devices.robot.placements["probes"].a1_xy_mm == (1.5, 0.5)
     w.saveTeaching()
     assert saved == [w.config]
 

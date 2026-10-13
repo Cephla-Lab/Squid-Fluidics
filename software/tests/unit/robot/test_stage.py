@@ -32,9 +32,26 @@ def rig():
 
 class TestRules:
     def test_after_homing_every_axis_is_read_and_the_stage_is_retracted_at_the_top(self, rig):
-        stage, _, _ = rig
+        stage, service, _ = rig
         assert stage.position() == (0.0, 0.0, 0.0)
         assert stage.is_retracted
+        assert "move_to" not in [verb for verb, _ in service.log], "inside a stroke from 0: no move"
+
+    def test_homing_clears_each_axis_off_its_switch_into_its_stroke(self):
+        """The driver's strokes start 0.5 mm clear of the switches and homing
+        parks short of that (0.2 mm here, 0.1 to 0.5 on the drives): left
+        there, a jog of one axis would be refused for the others' targets.
+        Z first, never below travel height, then X and Y as one leg."""
+        control = RunControl()
+        strokes = {"X1": (0.5, 200.0), "Y2": (0.5, 109.0), "Z3": (0.5, 58.5)}
+        service = SimulatedService(AXES.values(), strokes, instant=True)
+        stage = XYZStage(service, AXES, 1.0, 50.0, 20.0, control)
+        stage.connect()
+        stage.home()
+        assert stage.position() == (0.5, 0.5, 0.5) and stage.is_retracted
+        after_homing = service.log[[v for v, _ in service.log].index("home") + 3:]
+        assert [axis for verb, axis in after_homing if verb == "move_to"] == ["Z3", "X1", "Y2"]
+        stage.move_xy(1.5, 0.5)                   # a single-axis jog's shape: the other axis stays put
 
     def test_before_homing_the_position_is_unknown_and_xy_is_refused(self):
         stage, service, _ = build()
@@ -152,7 +169,7 @@ class TestHoming:
         must say so, not only suspect the homing method."""
         stage, service, _ = build()
         stage.connect()
-        service._strokes["Z3"] = (0.3, 58.5)      # homing parks Z at 0.3
+        service._strokes["Z3"] = (0.6, 58.5)      # the simulation parks 0.3 short of the stroke's start: at 0.3
         with pytest.raises(DeviceError, match="travel height 0.00.*homing parks"):
             stage.home()
 

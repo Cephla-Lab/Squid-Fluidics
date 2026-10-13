@@ -8,10 +8,17 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 
 from ..modbus_rtu import ModbusClient, NoResponseError
-from .registers import ControlWordBits, HomingMethod, OperationMode, Registers, StatusWordBits
+from .registers import (
+    ControlWordBits,
+    HomingMethod,
+    OperationMode,
+    RegisterDef,
+    Registers,
+    StatusWordBits,
+)
 from .state_machine import DriveState, StateMachine, get_transition_path
 
 logger = logging.getLogger(__name__)
@@ -96,6 +103,8 @@ class Motor:
     DEFAULT_MOTION_TIMEOUT = 30.0  # Motion timeout (seconds)
     DEFAULT_POLL_INTERVAL = 0.01  # Polling interval (seconds)
     SET_POINT_TIMEOUT = 0.5  # Each step of the PP set-point handshake (seconds)
+    HOMING_SETTLE_TIME = 0.3  # After homing: position within 6067h for this long (seconds)
+    HOMING_SETTLE_TIMEOUT = 5.0  # Give up waiting for that after this long (seconds)
 
     def __init__(
         self,
@@ -388,6 +397,54 @@ class Motor:
         self._wait_for_state(DriveState.SWITCH_ON_DISABLED, timeout)
         logger.info("Fault reset successful")
 
+    def reset_alarm(self) -> Tuple[int, int]:
+        """
+        Clear a latched alarm, including those that pause and lock the axis
+        without entering the Fault state (reaction code 3: 0x2312, 0x7501,
+        0x8613, 0x8614; manual B03 table 8-1). fault_reset() only acts in Fault.
+
+        B03 8.3: with the motor disabled, send control word 0x80 (rising edge of
+        bit 7). The words sent are 0x0000, 0x0080, 0x0000, so the drive ends in
+        Switch On Disabled; enable() brings it back.
+
+        Returns:
+            (status word, 603Fh error code) read afterwards
+
+        Raises:
+            MotorStateError: the drive is not disabled (Operation Enabled, Quick
+                Stop Active or Fault Reaction Active): disable() or
+                disable_voltage() first
+        """
+        state = self.get_state()
+        if state in (
+            DriveState.OPERATION_ENABLED,
+            DriveState.QUICK_STOP_ACTIVE,
+            DriveState.FAULT_REACTION_ACTIVE,
+        ):
+            raise MotorStateError(
+                f"Disable the motor before resetting an alarm (state: {state.value})"
+            )
+        self.write_control_word(0x0000)
+        time.sleep(0.01)
+        self.write_control_word(ControlWordBits.FAULT_RESET)
+        time.sleep(0.05)
+        self.write_control_word(0x0000)
+        time.sleep(0.05)
+        return self.read_status_word(), self.read_error_code()
+
+    def disable_voltage(self, timeout: Optional[float] = None) -> None:
+        """
+        Disable voltage (control word 0) and wait for Switch On Disabled. Unlike
+        disable(), this also leaves Quick Stop Active (CiA402 transition 12).
+        Does nothing in Switch On Disabled or Fault.
+        """
+        if timeout is None:
+            timeout = self._state_timeout
+        if self.get_state() in (DriveState.SWITCH_ON_DISABLED, DriveState.FAULT):
+            return
+        self.write_control_word(ControlWordBits.CMD_DISABLE_VOLTAGE)
+        self._wait_for_state(DriveState.SWITCH_ON_DISABLED, timeout)
+
     def _wait_for_state(
         self,
         target_state: DriveState,
@@ -533,6 +590,27 @@ class Motor:
         return self._client.read_register_32bit(
             self._slave_id, Registers.PROFILE_DECELERATION.address
         )
+
+    def write_checked(self, register: RegisterDef, value: int) -> None:
+        """
+        Write an unsigned 32-bit parameter and check that the drive kept it
+
+        The drive accepts some values without a Modbus error but stores less:
+        it caps the profile acceleration and decelerations at its limits
+        60C5h / 60C6h (seen on the X stage, whose drive held the factory 500000).
+
+        Raises:
+            MotorError: The drive holds a different value after the write
+        """
+        self._client.write_register_32bit(self._slave_id, register.address, value)
+        kept = self._client.read_register_32bit(self._slave_id, register.address)
+        if kept != value:
+            index = register.object_index
+            where = f"{index:04X}h" if index is not None else f"0x{register.address:04X}"
+            raise MotorError(
+                f"Drive at slave {self._slave_id} kept {where} ({register.name}) = {kept} "
+                f"after {value} was written"
+            )
 
     def move_absolute(
         self,
@@ -905,6 +983,12 @@ class Motor:
         This distinguishes a "genuine new homing cycle" from "residual bits left
         by the previous move."
 
+        Bit 12 comes on at the switch edge, while the axis is still decelerating
+        (50-90 µm still to go on the bench stages, then a few µm of settling;
+        X1 kept creeping for about 4 s), and on those drives bit 10 stays set
+        through the whole run. So after bit 12 the wait goes on until the
+        position settles (see _wait_for_homing_settled).
+
         Method 35 (current position as home) does not move: the drive sets the
         home when triggered (B06 5.7.4), so bit 12 can be set again before the
         first read and there is no 1 -> 0 edge to wait for. Stage 1 is skipped.
@@ -946,11 +1030,38 @@ class Motor:
                 # Stage 2: bit 12 set again, and the mode is still HOMING: homing complete
                 if attained and self.read_operation_mode() == OperationMode.HOMING:
                     logger.info("Homing complete")
+                    self._wait_for_homing_settled()
                     return
 
             time.sleep(self.DEFAULT_POLL_INTERVAL)
 
         raise MotorTimeoutError(f"Timed out waiting for homing to complete ({timeout}s)")
+
+    def _wait_for_homing_settled(self) -> None:
+        """
+        Wait until the position stays within the position window (6067h) for
+        HOMING_SETTLE_TIME, the tolerance the drive uses for "target reached"
+        after a move. Gives up with a warning after HOMING_SETTLE_TIMEOUT (homing
+        itself has succeeded), and returns at once if a stop was requested.
+        """
+        window = self._client.read_register_32bit(self._slave_id, Registers.POSITION_WINDOW.address)
+        start = time.time()
+        reference, since = self.read_position(), start
+        while not self._stop_requested.is_set():
+            now = time.time()
+            if now - since >= self.HOMING_SETTLE_TIME:
+                logger.info(f"Settled after homing at {reference} ({now - start:.2f}s)")
+                return
+            if now - start >= self.HOMING_SETTLE_TIMEOUT:
+                logger.warning(
+                    f"Position still changing {self.HOMING_SETTLE_TIMEOUT}s after homing "
+                    f"(now {reference})"
+                )
+                return
+            time.sleep(self.DEFAULT_POLL_INTERVAL)
+            position = self.read_position()
+            if abs(position - reference) > window:
+                reference, since = position, time.time()
 
     # ==================== Digital I/O ====================
 
@@ -1173,6 +1284,142 @@ class Motor:
             DI state (bit0=DI1, bit1=DI2, bit2=DI3)
         """
         return self._client.read_register(self._slave_id, Registers.DI_PHYSICAL_STATE.address)
+
+    # ==================== Raw access and bring-up registers ====================
+
+    def read_raw(self, address: int, size: int = 1, signed: bool = False) -> int:
+        """One 16-bit (size 1) or 32-bit (size 2, high word first) register"""
+        if size == 2:
+            return self._client.read_register_32bit(self._slave_id, address, signed=signed)
+        if size != 1:
+            raise ValueError(f"Register size must be 1 or 2, not {size}")
+        value = self._client.read_register(self._slave_id, address)
+        return _to_signed16(value) if signed else value
+
+    def write_raw(self, address: int, value: int, size: int = 1) -> None:
+        """Write one 16-bit or 32-bit register; negative values as two's complement"""
+        if size == 2:
+            if not -(2**31) <= value <= 0xFFFFFFFF:
+                raise ValueError(f"{value} does not fit a 32-bit register")
+            self._client.write_register_32bit(self._slave_id, address, value, signed=value < 0)
+        elif size == 1:
+            if not -0x8000 <= value <= 0xFFFF:
+                raise ValueError(f"{value} does not fit a 16-bit register")
+            self._client.write_register(self._slave_id, address, value & 0xFFFF)
+        else:
+            raise ValueError(f"Register size must be 1 or 2, not {size}")
+
+    def read_position_internal(self) -> int:
+        """6063h: absolute position in encoder units"""
+        return self.read_raw(Registers.POSITION_ACTUAL_INTERNAL.address, 2, signed=True)
+
+    def read_home_offset(self) -> int:
+        """607Ch (user units)"""
+        return self.read_raw(Registers.HOME_OFFSET.address, 2, signed=True)
+
+    def set_home_offset(self, offset: int) -> None:
+        """607Ch (user units)"""
+        self.write_raw(Registers.HOME_OFFSET.address, offset, 2)
+
+    def read_software_limits(self) -> Tuple[int, int]:
+        """607Dh:01h, :02h (user units)"""
+        return (
+            self.read_raw(Registers.SOFTWARE_LIMIT_MIN.address, 2, signed=True),
+            self.read_raw(Registers.SOFTWARE_LIMIT_MAX.address, 2, signed=True),
+        )
+
+    def set_software_limits(self, minimum: int, maximum: int) -> None:
+        """607Dh:01h, :02h (user units, INT32)"""
+        if minimum > maximum:
+            raise ValueError(f"Software limit minimum {minimum} is above the maximum {maximum}")
+        self.write_raw(Registers.SOFTWARE_LIMIT_MIN.address, minimum, 2)
+        self.write_raw(Registers.SOFTWARE_LIMIT_MAX.address, maximum, 2)
+
+    def read_position_range(self) -> Tuple[int, int]:
+        """607Bh:01h, :02h (user units)"""
+        return (
+            self.read_raw(Registers.POSITION_RANGE_MIN.address, 2, signed=True),
+            self.read_raw(Registers.POSITION_RANGE_MAX.address, 2, signed=True),
+        )
+
+    def read_position_restore_mode(self) -> int:
+        """2005h:18h: 0 multi-turn, 1 single turn"""
+        return self.read_raw(Registers.POSITION_RESTORE_MODE.address)
+
+    def set_position_restore_mode(self, mode: int) -> None:
+        """2005h:18h: 0 multi-turn, 1 single turn"""
+        if mode not in (0, 1):
+            raise ValueError(f"Position restore mode must be 0 or 1, not {mode}")
+        self.write_raw(Registers.POSITION_RESTORE_MODE.address, mode)
+
+    def read_restore_blocking_position(self) -> int:
+        """2005h:1Dh, raw 16-bit value"""
+        return self.read_raw(Registers.RESTORE_BLOCKING_POSITION.address)
+
+    def set_restore_blocking_position(self, value: int) -> None:
+        """2005h:1Dh, raw 16-bit value (units unconfirmed, spec Q4)"""
+        if not 0 <= value <= 0xFFFF:
+            raise ValueError(f"Blocking position {value} does not fit 16 bits")
+        self.write_raw(Registers.RESTORE_BLOCKING_POSITION.address, value)
+
+    def read_encoder_bits(self) -> int:
+        """2000h:19h"""
+        return self.read_raw(Registers.ENCODER_BITS.address, 2)
+
+    def read_encoder_resolution(self) -> Tuple[int, int]:
+        """608Fh:01h, :02h"""
+        return (
+            self.read_raw(Registers.ENCODER_RESOLUTION_NUM.address, 2),
+            self.read_raw(Registers.ENCODER_RESOLUTION_DEN.address, 2),
+        )
+
+    def read_gear_ratio(self) -> Tuple[int, int]:
+        """6091h:01h, :02h"""
+        return (
+            self.read_raw(Registers.GEAR_RATIO_NUM.address, 2),
+            self.read_raw(Registers.GEAR_RATIO_DEN.address, 2),
+        )
+
+    def read_polarity(self) -> int:
+        """607Eh"""
+        return self.read_raw(Registers.POLARITY.address)
+
+    def read_di_config(self, di_number: int) -> Tuple[int, int]:
+        """(function, logic) of DI1..DI3 (2003h)"""
+        if di_number not in (1, 2, 3):
+            raise ValueError(f"Invalid DI number: {di_number}, must be 1, 2, or 3")
+        function = Registers.DI1_FUNCTION.address + 2 * (di_number - 1)
+        return self.read_raw(function), self.read_raw(function + 1)
+
+    def read_rated_voltage(self) -> int:
+        """2000h:07h (1 V)"""
+        return self.read_raw(Registers.RATED_VOLTAGE.address)
+
+    def read_bus_voltage(self) -> float:
+        """200Bh:15h, in volts"""
+        return self.read_raw(Registers.BUS_VOLTAGE.address) / 10
+
+    def read_under_voltage_point(self) -> int:
+        """2001h:10h (1 V)"""
+        return self.read_raw(Registers.UNDER_VOLTAGE_POINT.address)
+
+    def read_over_voltage_point(self) -> int:
+        """2001h:0Eh (1 V)"""
+        return self.read_raw(Registers.OVER_VOLTAGE_POINT.address)
+
+    def read_firmware_version(self) -> int:
+        """1018h:03h"""
+        return self.read_raw(Registers.FIRMWARE_VERSION.address, 2)
+
+    def read_slave_address(self) -> int:
+        """200Ch:02h: the stored address (it takes effect after a power cycle)"""
+        return self.read_raw(Registers.SLAVE_ADDRESS.address)
+
+    def set_slave_address(self, address: int) -> None:
+        """200Ch:02h; save the parameters and power-cycle for it to take effect"""
+        if not 1 <= address <= 247:
+            raise ValueError(f"Slave address must be 1-247, not {address}")
+        self.write_raw(Registers.SLAVE_ADDRESS.address, address)
 
     # ==================== DO control ====================
 

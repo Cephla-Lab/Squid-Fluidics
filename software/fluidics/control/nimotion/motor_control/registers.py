@@ -222,6 +222,41 @@ class Registers:
         object_subindex=0x00,
     )
 
+    # ==================== Motion limits ====================
+    # B06 5.3: 6081h is limited by 607Fh, 6083h by 60C5h, 6084h by 60C6h, and
+    # 500000 is the factory setting of all three. The X stage's drive capped
+    # 6083h-6085h when they were written, but kept a 6081h above its 607Fh.
+
+    # Max profile velocity (607Fh) - 32-bit
+    MAX_PROFILE_VELOCITY = RegisterDef(
+        address=0x03F4,
+        name="MaxProfileVelocity",
+        description="Max profile velocity",
+        size=2,
+        object_index=0x607F,
+        object_subindex=0x00,
+    )
+
+    # Max acceleration (60C5h) - 32-bit
+    MAX_ACCELERATION = RegisterDef(
+        address=0x043B,
+        name="MaxAcceleration",
+        description="Max acceleration",
+        size=2,
+        object_index=0x60C5,
+        object_subindex=0x00,
+    )
+
+    # Max deceleration (60C6h) - 32-bit
+    MAX_DECELERATION = RegisterDef(
+        address=0x043D,
+        name="MaxDeceleration",
+        description="Max deceleration",
+        size=2,
+        object_index=0x60C6,
+        object_subindex=0x00,
+    )
+
     # ==================== Torque control registers ====================
 
     # Target torque (6071h)
@@ -585,6 +620,127 @@ class Registers:
         size=1,
         object_index=0x607E,
         object_subindex=0x00,
+    )
+
+    # ==================== Stepper bring-up (T5 tilt, manual B03) ====================
+
+    # Absolute position in encoder units (6063h); 6064h x 6091h = 6063h
+    POSITION_ACTUAL_INTERNAL = RegisterDef(
+        address=0x03C6,
+        name="PositionActualInternal",
+        description="Absolute position (encoder units)",
+        size=2,
+        access=RegisterAccess.READ_ONLY,
+        signed=True,
+        object_index=0x6063,
+        object_subindex=0x00,
+    )
+
+    POSITION_RANGE_MIN = RegisterDef(
+        address=0x03E9,
+        name="PositionRangeMin",
+        description="Position range limit, minimum (user units)",
+        size=2,
+        signed=True,
+        object_index=0x607B,
+        object_subindex=0x01,
+    )
+
+    POSITION_RANGE_MAX = RegisterDef(
+        address=0x03EB,
+        name="PositionRangeMax",
+        description="Position range limit, maximum (user units)",
+        size=2,
+        signed=True,
+        object_index=0x607B,
+        object_subindex=0x02,
+    )
+
+    # Home offset (607Ch): where homing puts 0; method 35 makes "here" read this value
+    HOME_OFFSET = RegisterDef(
+        address=0x03ED,
+        name="HomeOffset",
+        description="Home offset (user units)",
+        size=2,
+        signed=True,
+        object_index=0x607C,
+        object_subindex=0x00,
+    )
+
+    # Software position limits (607Dh); exceeding one raises 0x8613, which pauses
+    # and locks the axis without entering the Fault state (B03 table 8-1)
+    SOFTWARE_LIMIT_MIN = RegisterDef(
+        address=0x03EF,
+        name="SoftwareLimitMin",
+        description="Software position limit, minimum (user units)",
+        size=2,
+        signed=True,
+        object_index=0x607D,
+        object_subindex=0x01,
+    )
+
+    SOFTWARE_LIMIT_MAX = RegisterDef(
+        address=0x03F1,
+        name="SoftwareLimitMax",
+        description="Software position limit, maximum (user units)",
+        size=2,
+        signed=True,
+        object_index=0x607D,
+        object_subindex=0x02,
+    )
+
+    # Position restore after power-up (2005h:18h, B03 6.7; not in the object
+    # dictionary): 0 multi-turn absolute, 1 within a single turn
+    POSITION_RESTORE_MODE = RegisterDef(
+        address=0x012A,
+        name="PositionRestoreMode",
+        description="Position restore: 0 multi-turn, 1 single turn",
+        object_index=0x2005,
+        object_subindex=0x18,
+    )
+
+    # Cut point of single-turn restore (2005h:1Dh, B03 6.7); size and units unconfirmed
+    RESTORE_BLOCKING_POSITION = RegisterDef(
+        address=0x012F,
+        name="RestoreBlockingPosition",
+        description="Single-turn restore blocking position (cut point)",
+        object_index=0x2005,
+        object_subindex=0x1D,
+    )
+
+    ENCODER_BITS = RegisterDef(
+        address=0x0075,
+        name="EncoderBits",
+        description="Encoder absolute bits",
+        size=2,
+        object_index=0x2000,
+        object_subindex=0x19,
+    )
+
+    UNDER_VOLTAGE_POINT = RegisterDef(
+        address=0x0094,
+        name="UnderVoltagePoint",
+        description="DC bus under-voltage point (1 V)",
+        object_index=0x2001,
+        object_subindex=0x10,
+    )
+
+    OVER_VOLTAGE_POINT = RegisterDef(
+        address=0x0092,
+        name="OverVoltagePoint",
+        description="DC bus over-voltage point (1 V)",
+        object_index=0x2001,
+        object_subindex=0x0E,
+    )
+
+    FIRMWARE_VERSION = RegisterDef(
+        address=0x0053,
+        name="FirmwareVersion",
+        description="Firmware version",
+        size=2,
+        access=RegisterAccess.READ_ONLY,
+        object_index=0x1018,
+        object_subindex=0x03,
     )
 
 

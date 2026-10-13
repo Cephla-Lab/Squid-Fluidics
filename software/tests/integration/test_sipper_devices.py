@@ -9,7 +9,7 @@ def test_a_gantry_rig_builds_a_homed_retracted_sipper_and_a_declared_ledger(plat
     devices = built(plate_sipper_config, simulation=True, instant=True,
                     ledger_path=tmp_path / "ledger.json")
     assert devices.robot is not None and devices.robot.current_well is None
-    assert devices.robot.position() == (0.0, 0.0, 0.0)           # every axis read after homing
+    assert devices.robot.position() == (0.5, 0.5, 0.5)           # every axis read after homing, cleared into its stroke
     assert devices.reservoirs is not None and devices.reservoirs.undeclared == sorted(
         devices.reservoirs._defs), "no file yet: undeclared until declared"
     devices.reservoirs.refill("all")

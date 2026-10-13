@@ -3,6 +3,9 @@ Axis configuration module tests
 """
 
 import dataclasses
+import math
+
+import pytest
 
 from fluidics.control.nimotion.high_level_api.axis_config import (
     DEFAULT_AXIS_CONFIGS,
@@ -22,11 +25,12 @@ class TestAxisName:
         assert AxisName.Y2.value == "Y2"
         assert AxisName.Z3.value == "Z3"
         assert AxisName.X1.value == "X1"
+        assert AxisName.T5.value == "T5"
 
     def test_iteration(self) -> None:
         """Test iteration"""
         axes = list(AxisName)
-        assert len(axes) == 4
+        assert len(axes) == 5
 
 
 class TestAxisConfig:
@@ -166,7 +170,8 @@ class TestDefaultConfigs:
         """Test getting all configurations"""
         configs = get_all_axis_configs()
 
-        assert len(configs) == 4
+        assert len(configs) == 5
+        assert AxisName.T5 in configs
         assert AxisName.X1 in configs
         assert AxisName.Z4 in configs
         assert AxisName.Y2 in configs
@@ -191,13 +196,15 @@ class TestDefaultConfigs:
         assert config.slave_id == 2
         assert config.model == "CFG5"
         assert config.motor_power == 100
+        # inside the switches: origin at -0.012 mm, far at +110.20 mm
+        assert (config.stroke_min, config.stroke_max) == (0.5, 109.0)
 
     def test_x_axis_config(self) -> None:
         """X1: limit switches on DI1 (far) / DI2 (origin), 0 at the origin"""
         config = get_axis_config(AxisName.X1)
 
         assert config.slave_id == 1
-        assert config.encoder_resolution == 262144  # as saved in the drive
+        assert config.encoder_resolution == 131072  # as saved in the drive
         assert config.ball_screw_lead == 20.0
         assert config.stroke_max == 200.0
         assert (config.di1_function, config.di1_logic) == (15, 0)
@@ -214,3 +221,54 @@ class TestDefaultConfigs:
         assert config.slave_id == 3
         assert config.model == "CFG4"
         assert config.has_brake is False  # held by lead-screw friction
+        # inside the switches: upper at -0.018..0.000 mm, lower at +59.7 mm
+        assert (config.stroke_min, config.stroke_max) == (0.5, 58.5)
+
+
+class TestT5:
+    """The plate tilter's tilt motor (STM2851 stepper), spec section 5"""
+
+    config = DEFAULT_AXIS_CONFIGS[AxisName.T5]
+
+    def test_degrees(self) -> None:
+        assert self.config.unit == "°"
+        assert self.config.ball_screw_lead == 360.0
+        assert self.config.pulses_to_mm(131072) == pytest.approx(360.0)
+        assert self.config.mm_to_pulses(1.0) == 364
+        assert self.config.velocity_mm_to_pulses(20.0) == 7281
+        assert self.config.rpm_to_mm_s(10.0) == pytest.approx(60.0)
+
+    def test_address_stroke_and_inputs(self) -> None:
+        c = self.config
+        assert c.slave_id == 5
+        assert (c.stroke_min, c.stroke_max) == (-5.0, 30.0)
+        assert c.homing_method is None
+        assert c.has_brake is False
+        assert (c.di1_function, c.di1_logic) == (31, 0)
+        assert (c.di2_function, c.di3_function) == (0, 0)
+
+    def test_drive_limits_in_counts(self) -> None:
+        c = self.config
+        assert (c.drive_limit_min, c.drive_limit_max) == (-7.0, 32.0)
+        assert c.max_acceleration == 1000.0  # 60C5h / 60C6h, read back on connect
+        assert c.limit_to_counts(-7.0) == -2548
+        assert c.limit_to_counts(32.0) == 11650
+        assert c.limit_to_counts(math.inf) == 2**31 - 1
+        assert c.limit_to_counts(-math.inf) == -(2**31)
+        assert c.limit_to_counts(1e12) == 2**31 - 1
+
+    def test_restore_settings_wait_for_the_bench(self) -> None:
+        assert self.config.position_restore_mode is None
+        assert self.config.restore_blocking_position is None
+
+    def test_limits_are_set_together(self) -> None:
+        with pytest.raises(ValueError):
+            dataclasses.replace(self.config, drive_limit_max=None)
+
+    def test_servo_axes_are_unchanged(self) -> None:
+        for axis in (AxisName.Z4, AxisName.Y2, AxisName.Z3, AxisName.X1):
+            c = DEFAULT_AXIS_CONFIGS[axis]
+            assert c.unit == "mm"
+            assert c.position_restore_mode is None
+            assert c.restore_blocking_position is None
+            assert c.drive_limit_min is None and c.drive_limit_max is None

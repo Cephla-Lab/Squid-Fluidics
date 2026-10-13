@@ -4,12 +4,16 @@ Axis Configuration Module
 Defines the axis configuration and parameters for the XYG321-A 3-axis platform.
 """
 
+import math
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Dict, Optional
 
 if TYPE_CHECKING:
     pass
+
+INT32_MIN = -(2**31)
+INT32_MAX = 2**31 - 1
 
 
 class AxisName(Enum):
@@ -19,6 +23,7 @@ class AxisName(Enum):
     Y2 = "Y2"
     Z3 = "Z3"
     X1 = "X1"
+    T5 = "T5"  # plate tilter tilt motor (STM2851 stepper)
 
 
 @dataclass
@@ -41,10 +46,13 @@ class AxisConfig:
     """Whether a brake is present"""
 
     ball_screw_lead: float
-    """Ball screw lead (mm/rev)"""
+    """
+    Travel per motor revolution, in axis units: the ball screw lead (mm/rev),
+    or 360 for a direct-drive rotary axis (°/rev)
+    """
 
     max_velocity: float
-    """Maximum velocity (mm/s)"""
+    """Maximum velocity (mm/s); written to the drive's limit 607Fh on connect"""
 
     stroke_min: float
     """Minimum stroke value (mm)"""
@@ -90,6 +98,11 @@ class AxisConfig:
 
     quick_stop_deceleration: float = 1000.0
     """Quick stop (E-stop) deceleration (mm/s²)"""
+
+    max_acceleration: float = 5000.0
+    """Acceleration and deceleration limit (mm/s²), written to 60C5h / 60C6h on
+    connect. The drive caps 6083h-6085h at these limits; the X stage's drive
+    held the factory 500000 units/s² (38 mm/s²), so every stop was slow."""
 
     # Homing parameters
     homing_velocity_high: float = 50.0
@@ -154,6 +167,27 @@ class AxisConfig:
     brake_auto_control: bool = True
     """Whether to enable automatic brake control (True=follows motor enable state)"""
 
+    # Axis unit and the stepper settings (T5 tilt, spec section 5). None leaves
+    # the drive's own value untouched, so the servo axes are unaffected.
+    unit: str = "mm"
+    """Axis unit: positions are in it and speeds in it per second ("mm" or "°")"""
+
+    position_restore_mode: Optional[int] = None
+    """2005h:18h position restore at power-up: 0 multi-turn, 1 single turn (None: not written)"""
+
+    restore_blocking_position: Optional[int] = None
+    """2005h:1Dh raw value: where single-turn restore cuts the circle (None: not written)"""
+
+    drive_limit_min: Optional[float] = None
+    """607Dh:01h drive software limit, axis units; -math.inf means open (None: not written)"""
+
+    drive_limit_max: Optional[float] = None
+    """607Dh:02h drive software limit, axis units; math.inf means open (None: not written)"""
+
+    def __post_init__(self) -> None:
+        if (self.drive_limit_min is None) != (self.drive_limit_max is None):
+            raise ValueError("drive_limit_min and drive_limit_max are set together")
+
     @property
     def stroke(self) -> float:
         """Effective stroke (mm)"""
@@ -192,6 +226,15 @@ class AxisConfig:
             value in millimeters
         """
         return pulses * self.mm_per_pulse
+
+    def limit_to_counts(self, value: float) -> int:
+        """
+        A drive limit in axis units as INT32 user units (607Dh). Values beyond
+        the INT32 range, and ±math.inf ("open"), clamp to it.
+        """
+        if math.isinf(value):
+            return INT32_MAX if value > 0 else INT32_MIN
+        return max(INT32_MIN, min(INT32_MAX, self.mm_to_pulses(value)))
 
     def velocity_mm_to_pulses(self, velocity_mm_s: float) -> int:
         """
@@ -300,8 +343,11 @@ DEFAULT_AXIS_CONFIGS: Dict[AxisName, AxisConfig] = {
         has_brake=False,
         ball_screw_lead=10.0,
         max_velocity=500.0,
-        stroke_min=0,
-        stroke_max=102,
+        # Measured 2026-10-12: the origin switch closes at -0.012 mm (0 is its edge,
+        # as on X1) and the far switch at +110.20 mm after homing. Homing leaves
+        # the axis at about +0.18 mm, below stroke_min.
+        stroke_min=0.5,
+        stroke_max=109.0,
         positioning_accuracy=0.015,
         repeat_accuracy=0.005,
         max_payload_horizontal=30.0,
@@ -337,7 +383,10 @@ DEFAULT_AXIS_CONFIGS: Dict[AxisName, AxisConfig] = {
         has_brake=False,  # vertical, held by lead-screw friction when unpowered
         ball_screw_lead=10.0,
         max_velocity=500.0,
-        stroke_min=0.0,
+        # The upper switch stops the axis at -0.018 to 0.000 mm after homing
+        # (measured 2026-10-12): 0 is its edge, as on X1 and Y2. Homing leaves the
+        # axis at +0.01 to +0.24 mm, below this.
+        stroke_min=0.5,
         stroke_max=58.5,  # lower switch closes at +59.7 mm after homing; stay clear of it
         positioning_accuracy=0.01,
         repeat_accuracy=0.005,
@@ -373,18 +422,23 @@ DEFAULT_AXIS_CONFIGS: Dict[AxisName, AxisConfig] = {
         has_brake=False,
         ball_screw_lead=20.0,  # 20 mm ball screw lead (Y and Z: 10 mm)
         max_velocity=500.0,
-        stroke_min=0.0,
+        # The origin switch reads active from about -0.02 mm (0 is its edge), so
+        # a move to 0 that overshoots a little ended on the switch (LimitSwitchError).
+        # Homing leaves the axis at +0.1 to +0.3 mm, below this.
+        stroke_min=0.5,
         stroke_max=200.0,  # far switch closes at +205.8 mm after homing; see CLAUDE.md
         positioning_accuracy=0.01,
         repeat_accuracy=0.005,
         max_payload_horizontal=30.0,
         max_payload_vertical=15.0,
-        # Saved in the drive (2026-10-12). 17-bit encoder (the drive's 2000h:19h
-        # reads 18); with the 20 mm lead this is 13107.2 units/mm, as on Y2/Z3.
-        # At the factory 10000 the drive ran slow moves at the wrong speed
-        # (1 mm/s as 2 mm/s) and unevenly. Matches the drive, so connecting never
-        # changes 608Fh (a change rescales and corrupts the position reading).
-        encoder_resolution=262144,
+        # Saved in the drive (2026-10-12): the 17-bit encoder's 2^17, as the PSMP
+        # manual and NiMotion's guide give (the drive's 2000h:19h reads 18; 262144
+        # was used first). With the 20 mm lead this is 6553.6 units/mm. Whatever
+        # 608Fh is, this drive tracks 10000 counts/rev inside (2 µm steps). At the
+        # factory 10000 it ran slow moves at the wrong speed (1 mm/s as 2 mm/s) and
+        # unevenly. Matches the drive, so connecting never changes 608Fh (a change
+        # rescales and corrupts the position reading).
+        encoder_resolution=131072,
         driver_polarity=0x80,  # position reversed: 0 at the origin, positive toward the far end
         default_velocity=100.0,
         default_acceleration=500.0,
@@ -404,6 +458,55 @@ DEFAULT_AXIS_CONFIGS: Dict[AxisName, AxisConfig] = {
         # Stall homing parameters
         blocking_torque=300,  # 30%
         blocking_time=500,  # 500ms
+    ),
+    AxisName.T5: AxisConfig(
+        name=AxisName.T5,
+        slave_id=5,  # set once on the bench: the STM28 ships at 1, the same as X1
+        model="STM2851 closed-loop stepper (RS-485)",
+        motor_power=24,  # 24 V x 1.0 A rated; NiMotion publishes no power rating
+        has_brake=False,
+        unit="°",
+        ball_screw_lead=360.0,  # direct drive: one motor turn is 360° of tilt
+        max_velocity=90.0,  # 15 rpm
+        stroke_min=-5.0,
+        stroke_max=30.0,
+        positioning_accuracy=0.05,  # placeholders, unmeasured
+        repeat_accuracy=0.02,
+        max_payload_horizontal=0.0,  # not a load-rated stage
+        max_payload_vertical=0.0,
+        # Provisional: 17-bit per the STM28 manual; read 2000h:19h on the motor first.
+        # encoder_resolution and driver_polarity are written on every connect, so
+        # changing either after the zero is set rescales or mirrors the angle:
+        # set the zero again after changing them.
+        encoder_resolution=131072,
+        driver_polarity=0x00,  # provisional: decides which way is +tilt
+        default_velocity=20.0,
+        default_acceleration=100.0,
+        default_deceleration=100.0,
+        quick_stop_deceleration=400.0,
+        # 60C5h / 60C6h: connect writes and reads back the drive's acceleration
+        # limits (PR #12); the profile above stays below them
+        max_acceleration=1000.0,
+        homing_method=None,  # no switch: the zero is set once with set_home_position()
+        homing_velocity_high=5.0,  # unused unless a method is passed explicitly
+        homing_velocity_low=1.0,
+        homing_acceleration=50.0,
+        # Homing mode needs a home or limit switch function on some input (manual
+        # B03 5.7.3, 8.4); B03 does not say whether method 35 is exempt. DI1 is
+        # unwired and pulled up inside the motor, so active low it never reads
+        # active. Provisional until checked on the bench (spec Q10).
+        di1_function=31,
+        di1_logic=0,
+        di2_function=0,  # factory: alarm reset
+        di2_logic=0,
+        di3_function=0,  # factory: pause
+        di3_logic=0,
+        # Single-turn restore and its cut point are written once the bench has
+        # settled the cut point's units (spec Q4); until then the drive keeps its own.
+        position_restore_mode=None,
+        restore_blocking_position=None,
+        drive_limit_min=-7.0,  # 2° outside the stroke; subject to spec Q5
+        drive_limit_max=32.0,
     ),
 }
 

@@ -89,6 +89,22 @@ class XYZStage:
             self._home_axis(axis)
         self._refresh_position()
         self._homed = True
+        self._clear_switches()
+
+    def _clear_switches(self):
+        """Homing parks an axis 0.1 to 0.5 mm past its switch, which can be
+        below the stroke's start (the driver keeps moves 0.5 mm clear of the
+        switch, nm-servo #13): left there, every single-axis move would be
+        refused, the untouched axes' targets being out of stroke. Each such
+        axis moves to its stroke's start, Z alone (never below travel
+        height) and then X and Y together, so every later target is inside
+        the stroke. No move for an axis already inside it."""
+        x, y, z = self._position
+        low = {axis: self._service.stroke(axis)[0] for axis in (self._x, self._y, self._z)}
+        if z < low[self._z] <= self.travel_z_mm:      # never above travel height to do it
+            self.move_z(low[self._z])
+        if x < low[self._x] or y < low[self._y]:
+            self.move_xy(max(x, low[self._x]), max(y, low[self._y]))
 
     def _home_axis(self, axis):
         """The drive's homing protocol, polled: the attained bit may read
