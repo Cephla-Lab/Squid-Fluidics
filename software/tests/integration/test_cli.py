@@ -80,3 +80,20 @@ def test_a_wrong_application_sequence_file_fails_at_time_zero(cli_pair, monkeypa
                         SimpleNamespace(build=lambda *a, **k: built.append(True)))
     assert cli_pair("open-chamber-experiment.yaml", "flow_cell_config.yaml") == 1
     assert built == [], "the rig was built for a file the check should have refused"
+
+
+def test_refilled_declares_the_ledger_before_the_run(cli, tmp_path):
+    """Task B10: no ledger file yet, so the ledger starts undeclared and the
+    run is refused; --refilled all declares it and the run goes."""
+    (tmp_path / "s.yaml").write_text(
+        "sequences:\n  - {type: flow_reagent, fluidic_port: 1, well: A1, flow_rate: 2000, volume: 100}\n")
+    # The fixture until Task B12 writes sample_config/plate_sipper_config.yaml.
+    config = str(SOFTWARE / "tests" / "fixtures" / "plate_sipper_config.yaml")
+    assert cli("--path", str(tmp_path / "s.yaml"), "--config", config, "--simulation",
+               "--ledger", str(tmp_path / "ledger.json")) == 1
+    assert cli("--path", str(tmp_path / "s.yaml"), "--config", config, "--simulation",
+               "--ledger", str(tmp_path / "ledger.json"), "--refilled", "all") == 0
+    # Declared now and restored from the file: the well the second run drew
+    # from has 5 uL left, so the same run is refused at time zero.
+    assert cli("--path", str(tmp_path / "s.yaml"), "--config", config, "--simulation",
+               "--ledger", str(tmp_path / "ledger.json")) == 1

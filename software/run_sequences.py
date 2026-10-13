@@ -33,6 +33,16 @@ def parse_args():
         default=False,
         help='Run in simulation mode without operating hardware'
     )
+    parser.add_argument(
+        '--refilled', action='append', default=[], metavar='KEY',
+        help="Declare a reservoir full before the run: a port key (port_25), a "
+             "plate name (ssct), or all. Repeatable."
+    )
+    parser.add_argument(
+        '--ledger', default=None,
+        help="Where the reservoir ledger lives (default: beside the run reports, "
+             "named after the config). Tests and odd setups only."
+    )
     return parser.parse_args()
 
 def main():
@@ -59,7 +69,9 @@ def main():
         # before any hardware is touched.
         validate_sequences(included, config)
 
-        system = FluidicsSystem.build(config, args.simulation)
+        system = FluidicsSystem.build(config, args.simulation, ledger_path=args.ledger)
+        for key in args.refilled:
+            system.refill(key)
 
         # The worker narrates its own run through the fluidics logger, so
         # the CLI renders nothing -- but a failed run must not exit 0, and
