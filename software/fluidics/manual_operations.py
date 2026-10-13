@@ -207,7 +207,20 @@ class ManualOperations:
     def refill(self, key):
         if self.reservoirs is None:
             raise RuntimeError("this rig tracks no reservoir volumes")
+        self._refuse_a_refill_under_the_tip(key)
         self.reservoirs.refill(key)
+
+    def _refuse_a_refill_under_the_tip(self, key):
+        """With no park well the tip rests in a well between steps, and
+        lifting that plate with the tip in it bends the tip: a refill of
+        that plate (or of everything) waits for Retract. Read from the
+        witness, which is set only while the tip is at dip depth."""
+        if self.robot is None or self.robot.current_well is None:
+            return
+        well = self.robot.current_well
+        if key in ("all", well.reservoir, f"{well.reservoir}/{well.well}"):
+            raise RuntimeError(f"the sipper's tip is in {well.reservoir}/{well.well}: "
+                               f"Retract before reloading {well.reservoir}")
 
     def _move(self, op, args, flow_rate_ul_min, on_started):
         """One syringe move: a fresh queue, the op, then the wait.

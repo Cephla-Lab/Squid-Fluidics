@@ -111,10 +111,9 @@ class FluidicsSystem:
         return check_reservoirs(plan, self.devices.config, ledger.snapshot())
 
     def refill(self, key):
-        """Declare a reservoir full: `all`, a plate name, or one key."""
-        if self.devices.reservoirs is None:
-            raise RuntimeError("this rig tracks no reservoir volumes")
-        self.devices.reservoirs.refill(key)
+        """Declare a reservoir full: `all`, a plate name, or one key. Through
+        the manual verb, which refuses a plate the sipper's tip is in."""
+        self.manual.refill(key)
 
     def run_manual(self, verb, callbacks=None, source=None):
         """Start one manual verb; see RunSession.run_manual."""

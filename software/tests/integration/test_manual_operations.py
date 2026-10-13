@@ -246,3 +246,24 @@ def test_teach_travel_rechecks_the_sippers_installed_placements(plate_sipper_con
         manual.teach_travel(16.0)                 # fine by the config (dip 50), not by the sipper
     assert devices.robot._stage.travel_z_mm == 1.0
     assert gantry(plate_sipper_config).travel_z_mm == 1.0
+
+
+def test_a_reload_of_the_plate_the_tip_is_in_is_refused_until_retract(plate_sipper_config, built, tmp_path):
+    """With no park well the tip rests in a well between steps: lifting that
+    plate with the tip in it bends the tip. A refill of that plate, or of
+    everything, is refused naming the well and the remedy; the other plate's
+    goes through; after Retract so does this one's."""
+    devices = built(plate_sipper_config, simulation=True, instant=True,
+                    ledger_path=tmp_path / "ledger.json")
+    manual = ManualOperations(devices)
+    manual.go_to_well("ssct/A2")
+    with pytest.raises(RuntimeError, match="tip is in ssct/A2.*Retract"):
+        manual.refill("ssct")
+    with pytest.raises(RuntimeError, match="tip is in ssct/A2.*Retract"):
+        manual.refill("all")
+    assert "ssct/A2" in devices.reservoirs.undeclared, "nothing was declared"
+    manual.refill("probes")
+    assert "probes/A1" not in devices.reservoirs.undeclared
+    manual.retract()
+    manual.refill("ssct")
+    assert devices.reservoirs.remaining("ssct/A2") == 1750

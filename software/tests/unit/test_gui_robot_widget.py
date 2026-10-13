@@ -215,6 +215,28 @@ def test_a_click_asks_before_reloading_a_plate(widget, monkeypatch):
     assert system.devices.reservoirs.remaining("probes/A1") == 55, "declined: nothing refilled"
 
 
+def test_plate_reloaded_refuses_while_the_tip_is_in_that_plate(widget, monkeypatch):
+    """Lifting the plate the tip rests in bends the tip: the tab says so
+    before it asks, and starts no job; the other plate reloads as usual."""
+    w, system = widget
+    asked, warned = [], []
+    monkeypatch.setattr("fluidics.qt.robot_control._ask_yes_no", lambda *a, **k: asked.append(a) or True)
+    monkeypatch.setattr("fluidics.qt.robot_control.QMessageBox.warning", lambda *a, **k: warned.append(a[2]))
+    w.reservoirCombo.setCurrentIndex(w.reservoirCombo.findData("ssct"))
+    w.wellCombo.setCurrentText("A2")
+    w.goToWell()
+    _settle(system)
+    system.devices.reservoirs._dispatched["ssct/A1"] = 100
+    w.plateReloaded()
+    QApplication.processEvents()
+    assert asked == [] and len(warned) == 1 and "ssct/A2" in warned[0] and "Retract" in warned[0]
+    assert system.devices.reservoirs.remaining("ssct/A1") == 1650, "nothing refilled"
+    w.reservoirCombo.setCurrentIndex(w.reservoirCombo.findData("probes"))
+    w.plateReloaded()
+    _settle(system)
+    assert len(asked) == 1
+
+
 def test_a_jog_click_moves_the_axis_it_says(widget):
     w, system = widget
     w.jogButtons[("z", 10.0)].click()
