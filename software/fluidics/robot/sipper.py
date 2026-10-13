@@ -118,6 +118,10 @@ class RobotSipper:
         """The stage's reading of its last published position (no I/O)."""
         return self._stage.is_retracted
 
+    def retracted_at(self, position):
+        """Whether a published position counts as retracted (no I/O)."""
+        return self._stage.retracted_at(position)
+
     def strokes(self):
         """The stage's XYZ strokes in mm (no I/O): the deck a map draws."""
         return self._stage.strokes()

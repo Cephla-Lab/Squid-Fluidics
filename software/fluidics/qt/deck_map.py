@@ -243,15 +243,17 @@ class DeckMapWidget(QWidget):
         painter.drawEllipse(QPointF(px, py), TIP_RADIUS_PX, TIP_RADIUS_PX)
 
     def _paintLegend(self, painter):
-        entries = [(label, ROLE_COLORS[label.split(" well")[0].split(" + ")[0]]) for label in self.legend()]
-        entries += [("tip retracted", TIP_RETRACTED), ("tip lowered", TIP_LOWERED)]
+        # A well's swatch is well-sized, the tip's is the dot's own size.
+        entries = [(label, ROLE_COLORS[label.split(" well")[0].split(" + ")[0]], 4.5)
+                   for label in self.legend()]
+        entries += [("tip retracted", TIP_RETRACTED, TIP_RADIUS_PX), ("tip lowered", TIP_LOWERED, TIP_RADIUS_PX)]
         painter.setFont(QFont("Helvetica", 8))
         x = 6.0
         y = self.height() - TEXT_BAND_PX / 2
-        for label, color in entries:
-            painter.setPen(QPen(QColor("#999"), 0.8))
+        for label, color, radius in entries:
+            painter.setPen(QPen(QColor("#999") if radius > TIP_RADIUS_PX else QColor("#111"), 0.8))
             painter.setBrush(color)
-            painter.drawEllipse(QPointF(x + 4, y), 4.5, 4.5)
+            painter.drawEllipse(QPointF(x + 4, y), radius, radius)
             painter.setPen(QPen(QColor("#333")))
             painter.drawText(QPointF(x + 13, y + 4), label)
             x += 14 + painter.fontMetrics().horizontalAdvance(label) + 14

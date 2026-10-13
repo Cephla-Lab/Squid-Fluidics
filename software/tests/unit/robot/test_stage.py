@@ -62,6 +62,15 @@ class TestRules:
             stage.move_xy(10.0, 10.0)
         assert service.log[-1] != ("move_to", "X1"), "nothing was sent"
 
+    def test_retracted_at_judges_a_published_position_on_its_own(self, rig):
+        """For a paint that lands after the publish, when the stage may be
+        mid-leg with its position unknown: the published Z decides."""
+        stage, _, _ = rig
+        assert stage.retracted_at((5.0, 5.0, stage.travel_z_mm))
+        assert stage.retracted_at((5.0, 5.0, stage.travel_z_mm + 0.04))
+        assert not stage.retracted_at((5.0, 5.0, stage.travel_z_mm + 1.0))
+        assert not stage.retracted_at(None)
+
     def test_retracted_means_at_or_above_travel_height(self, rig):
         stage, _, _ = rig
         stage.move_z(0.0)

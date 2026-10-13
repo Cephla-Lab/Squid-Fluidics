@@ -280,6 +280,20 @@ def test_the_reservoir_table_shows_its_whole_headers(widget):
     assert header.sectionResizeMode(1) == header.sectionResizeMode(2) == QHeaderView.ResizeToContents
 
 
+def test_the_map_judges_the_published_position_not_the_live_stage(widget):
+    """The paint lands on the Qt thread after the publish, when the next leg
+    may already be under way and the stage's own position is unknown: with
+    "Do not lower tip" on, a retract followed by the travel flashed red. The
+    published Z decides."""
+    w, system = widget
+    stage = system.devices.robot._stage
+    stage._position = None                     # a leg in flight
+    w._paintPosition((102.5, 10.5, 1.0))
+    assert w.deckMap.stateText().startswith("sipper: retracted over ssct/A2")
+    w._paintPosition((102.5, 10.5, 52.0))
+    assert w.deckMap.stateText().startswith("sipper: lowered")
+
+
 def test_an_unknown_position_is_painted_as_such(widget):
     w, _ = widget
     w._paintPosition(None)

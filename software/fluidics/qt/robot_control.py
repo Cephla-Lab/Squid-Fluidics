@@ -350,8 +350,12 @@ class RobotControlWidget(PostsToQtThread, QWidget):
         self._post_event("_paintPosition", position)
 
     def _paintPosition(self, position):
+        # Judged from the published position, not the live stage: this
+        # paint lands after the publish, when the next leg may already be
+        # under way and the stage's own position unknown (a retract before
+        # a travel flashed "lowered").
         robot = self.system.devices.robot
-        self.deckMap.setPosition(position, robot.is_retracted)
+        self.deckMap.setPosition(position, robot.retracted_at(position))
         self.deckMap.setCurrentWell(robot.current_well)
         if position is None:
             self.positionLabel.setText("x --  y --  z --  (position unknown: home or retract)")

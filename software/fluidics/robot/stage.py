@@ -160,8 +160,14 @@ class XYZStage:
     def is_retracted(self):
         """True only while the stage is homed, the position is known and Z
         is at or above travel height: anything less refuses XY."""
-        return (self._homed and self._position is not None
-                and self._position[2] <= self.travel_z_mm + TOLERANCE_MM)
+        return self._homed and self.retracted_at(self._position)
+
+    def retracted_at(self, position):
+        """Whether a published (x, y, z) counts as retracted: Z at or above
+        travel height. For a paint that lands after the publish, when the
+        stage may already be mid-leg with its own position unknown; None
+        (unknown) is not retracted."""
+        return position is not None and position[2] <= self.travel_z_mm + TOLERANCE_MM
 
     def position(self):
         """(x, y, z), or None while unknown (before homing, after a halt
