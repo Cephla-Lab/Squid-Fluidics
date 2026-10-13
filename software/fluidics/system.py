@@ -16,7 +16,7 @@ from .reports import RunReports
 from .run_session import RunSession
 from .sequences import validate_sequences
 from .subscribers import Subscribers
-from .time_estimate import plan_run
+from .time_estimate import check_reservoirs, plan_run
 from .usage import ReagentUsage
 
 _logger = logging.getLogger(__name__)
@@ -81,7 +81,27 @@ class FluidicsSystem:
             # A list, not a generator: validate_sequences walks it twice.
             validate_sequences([entry.sequence for entry in plan],
                                self.devices.config)
+        # The reservoir gate (spec §7): the plan replayed against the live
+        # ledger, so a run that would draw from an emptied well or bottle
+        # -- a fresh list or a resumed tail alike -- is refused here, not
+        # at the pump hours in.
+        self.check_reservoirs(plan)
         self.session.start(sequences, self.operations, plan=plan)
+
+    def check_reservoirs(self, plan):
+        """The per-reservoir report for `plan` against the live ledger, or
+        ReservoirShortfall / ReservoirUndeclared. Empty on a rig with no
+        ledger."""
+        ledger = self.devices.reservoirs
+        if ledger is None:
+            return []
+        return check_reservoirs(plan, self.devices.config, ledger.snapshot())
+
+    def refill(self, key):
+        """Declare a reservoir full: `all`, a plate name, or one key."""
+        if self.devices.reservoirs is None:
+            raise RuntimeError("this rig tracks no reservoir volumes")
+        self.devices.reservoirs.refill(key)
 
     def run_manual(self, verb, callbacks=None):
         """Start one manual verb; see RunSession.run_manual."""

@@ -125,6 +125,10 @@ def _replay(config, sequences):
         fixed = 0.0
         previous = 0.0
         durations = []
+        # The robot's travel, counted by its simulated service (XY legs
+        # concurrent, each leg's longest axis), from the build onward.
+        robot = devices.robot
+        robot_counted = robot._stage._service.travel_seconds if robot is not None else 0.0
         for seq in sequences:
             for _ in range(seq.get("repeat", 1)):
                 if seq["type"] == "set_temperature":
@@ -143,10 +147,45 @@ def _replay(config, sequences):
                                    for command, *_ in sent[commands_counted:])
                 commands_counted = len(sent)
 
+                robot_seconds = (robot._stage._service.travel_seconds - robot_counted
+                                 if robot is not None else 0.0)
                 total = (fixed + control.metered + chain_seconds
-                         + valve_moves * VALVE_MOVE_SECONDS)
+                         + valve_moves * VALVE_MOVE_SECONDS + robot_seconds)
                 durations.append(total - previous)
                 previous = total
         return durations
+    finally:
+        devices.close()
+
+
+def check_reservoirs(entries, config, snapshot):
+    """Replay `entries` (PlanEntry, each once) on an instant simulated twin
+    whose ledger starts from `snapshot`; the per-reservoir report when every
+    draw fits, else ReservoirShortfall naming the step, or ReservoirUndeclared
+    when anything tracked is undeclared. Separate from plan_run, which prices
+    on a full ledger and never raises (spec §7)."""
+    from .errors import ReservoirError, ReservoirShortfall, ReservoirUndeclared
+    if snapshot.get("undeclared"):
+        raise ReservoirUndeclared(
+            "the reservoir ledger is undeclared for " + ", ".join(snapshot["undeclared"])
+            + ": declare refills (Plate reloaded / Bottle refilled, or --refilled) first")
+    config = config.model_copy(update={"flow_sensors": None})
+    devices = build_devices(config, simulation=True, run_control=_MeteredRunControl(),
+                            instant=True)
+    try:
+        devices.reservoirs.restore(snapshot)
+        ops = build_operations(config, devices)
+        for entry in entries:
+            if entry.sequence["type"] == "set_temperature":
+                continue
+            try:
+                ops.process_sequence(entry.sequence)
+            except ReservoirError as e:
+                key = getattr(e, "key", "?")
+                needed = getattr(e, "needed_ul", getattr(e, "volume_ul", 0))
+                remaining = devices.reservoirs.remaining(key) if key != "?" else 0
+                usable = getattr(e, "usable_ul", remaining)
+                raise ReservoirShortfall(key, needed, remaining, usable, entry.label) from e
+        return devices.reservoirs.rows()
     finally:
         devices.close()

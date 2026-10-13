@@ -81,6 +81,17 @@ class ReservoirUndeclared(ReservoirError):
     operator declares its refill first."""
 
 
+class ReservoirShortfall(ReservoirError):
+    """The reservoir gate's verdict: which step, which reservoir, how much."""
+
+    def __init__(self, key, needed_ul, remaining_ul, usable_ul, step_label):
+        super().__init__(f"{step_label}: {key} cannot supply {needed_ul:.0f} uL "
+                         f"({remaining_ul:.0f} uL left of {usable_ul:.0f} usable); "
+                         "refill or reload before starting")
+        self.key, self.needed_ul = key, needed_ul
+        self.remaining_ul, self.usable_ul, self.step_label = remaining_ul, usable_ul, step_label
+
+
 class ReservoirNoWell(ReservoirError):
     """A draw through the sipper's port with the tip in no well: refused at
     the pump, the last line of the no-air rule."""
