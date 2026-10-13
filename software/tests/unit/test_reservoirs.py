@@ -1,9 +1,10 @@
 """ReservoirLedger: authorizes the pump's draws, persists first, never guesses."""
 import json
+import re
 
 import pytest
 
-from fluidics.errors import (ReservoirDrawTooLarge, ReservoirInUse, ReservoirNoWell,
+from fluidics.errors import (ReservoirDrawTooLarge, ReservoirError, ReservoirInUse, ReservoirNoWell,
                              ReservoirOverdraw, ReservoirUndeclared, ReservoirWriteError)
 from fluidics.reservoirs import ReservoirLedger
 
@@ -112,6 +113,23 @@ class TestCharging:
         with pytest.raises(ReservoirUndeclared, match="probes/B2"):
             pump.extract(EXTRACT_PORT, 100)
         assert pump.started == []
+
+    @pytest.mark.parametrize("volume", [float("nan"), 0, -100, float("inf")],
+                             ids=["nan", "zero", "negative", "infinite"])
+    def test_a_draw_that_is_not_a_finite_volume_above_zero_is_refused_and_charges_nothing(
+            self, rig, tmp_path, volume):
+        """NaN fails every comparison, so it passes every check; charged, it
+        makes the balance NaN and lets every later draw through."""
+        ledger, pump, _ = rig
+        refused = re.escape(f"port_25: {volume!r} uL is not a volume")
+        with pytest.raises(ReservoirError, match=refused):
+            ledger.authorize(EXTRACT_PORT, volume)
+        assert ledger.remaining("port_25") == 4800
+        assert not (tmp_path / "ledger.json").exists(), "nothing was charged, nothing written"
+        with pytest.raises(ReservoirError, match=refused):
+            ledger.check("port_25", volume)
+        pump.extract(EXTRACT_PORT, 500)               # and the ledger still charges a real draw
+        assert ledger.remaining("port_25") == 4300
 
 
 class TestPersistence:

@@ -18,11 +18,13 @@ never guesses. One process at a time holds a rig's ledger (a lock file).
 import hashlib
 import json
 import logging
+import math
+import numbers
 import os
 import threading
 from pathlib import Path
 
-from .errors import (ReservoirDrawTooLarge, ReservoirInUse, ReservoirNoWell,
+from .errors import (ReservoirDrawTooLarge, ReservoirError, ReservoirInUse, ReservoirNoWell,
                      ReservoirOverdraw, ReservoirUndeclared, ReservoirWriteError)
 from .files import atomic_write
 
@@ -124,6 +126,12 @@ class ReservoirLedger:
     def _check(self, key, volume_ul):
         if key not in self._defs:
             return
+        # First: NaN fails every comparison, so it would pass every check
+        # below and, charged, every check on every draw after it.
+        if (isinstance(volume_ul, bool) or not isinstance(volume_ul, numbers.Real)
+                or not 0 < volume_ul < math.inf):
+            raise ReservoirError(f"{key}: {volume_ul!r} uL is not a volume that can be drawn "
+                                 "(a finite number above 0)")
         if self._undeclared:
             raise ReservoirUndeclared(
                 "the reservoir ledger is undeclared for " + ", ".join(sorted(self._undeclared))
