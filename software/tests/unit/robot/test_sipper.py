@@ -45,7 +45,7 @@ def test_moving_between_wells_lifts_first(sipper):
     before = len(service.log)
     robot.go_to_well(WellRef("probes", "B1"))
     legs = [axis for verb, axis in service.log[before:] if verb == "move_to"]
-    assert legs == ["Z3", "X1", "Y2", "Z3"]      # up, across, down
+    assert legs == ["Z3", "X1", "Z3"]            # up, across (Y is already there: no set-point), down
 
 
 def test_agitate_goes_up_by_the_amplitude_and_back_and_keeps_the_witness(sipper):

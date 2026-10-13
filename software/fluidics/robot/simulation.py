@@ -11,11 +11,11 @@ stop or a read fail, make the target-reached bit read stale, put a limit
 switch inside the stroke, or make a move end short of its target. Homing
 presents the drive's real protocol: the attained bit reads stale once,
 clears while the axis moves, then sets again in homing mode; it parks the
-axis 0.3 mm short of the stroke's low end when that end is above 0 (the
-drives park 0.1 to 0.5 mm past the switch, below the 0.5 mm the driver's
-strokes start at, which is why a travel height of 0 is refused on the real
-driver and why the stage clears every axis into its stroke after homing),
-and exactly at a low end of 0.
+axis 0.3 mm short of the stroke's low end, floored at 0 (the drives park
+0.1 to 0.5 mm past the switch, below the 0.5 mm the driver's strokes start
+at, which is why a travel height of 0 is refused on the real driver and why
+the stage clears every axis into its stroke after homing). A test can make
+an axis creep after homing (`creep`), as the drives do before they settle.
 """
 
 import math
@@ -25,12 +25,11 @@ from collections import namedtuple
 AxisReading = namedtuple("AxisReading", "position_mm target_reached enabled fault error_code")
 HomingReading = namedtuple("HomingReading", "attained error fault homing_mode")
 
-# The XYG321-A's strokes as the driver's axis table has them (nm-servo PRs
-# #5, #6, #8: switch spacing less a margin), keyed by driver axis name. A
-# simulated rig uses these so a placement the real stage cannot reach is
-# refused in simulation too.
-# The driver's axis table at the vendored commit (nm-servo PRs #13, #15, #16): every
-# stroke starts 0.5 mm clear of the origin switch; Y2 was measured to 109 mm.
+# The XYG321-A's strokes as the driver's axis table has them at the vendored
+# commit (nm-servo #8, #13, #15, #16: switch spacing less a margin, every stroke
+# starting 0.5 mm clear of the origin switch, Y2 measured to 109 mm), keyed by
+# driver axis name. A simulated rig uses these so a placement the real stage
+# cannot reach is refused in simulation too.
 XYG321A_STROKES_MM = {"X1": (0.5, 200.0), "Y2": (0.5, 109.0), "Z3": (0.5, 58.5)}
 
 HOMING_POLLS = 3          # reads between the stale bit clearing and homing attained
@@ -54,6 +53,7 @@ class SimulatedService:
         self._faults = {}                                  # axis -> (polls until, error_code)
         self._stop_failures = {}
         self._read_failures = {}
+        self._creep = {}                                   # axis -> [mm per read, reads left or None]
         self._limits = {}                                  # axis -> mm of a switch inside the stroke
         self._on_limit = set()                             # axes a switch stopped, alarm 8614h showing
         self._short = {}                                   # axis -> mm where the next move ends, "reached"
@@ -139,6 +139,13 @@ class SimulatedService:
         if failure is not None and self._polls[axis] >= failure[0]:
             del self._read_failures[axis]
             raise failure[1]
+        creep = self._creep.get(axis)
+        if creep is not None and axis not in self._moves:
+            self._position[axis] += creep[0]
+            if creep[1] is not None:
+                creep[1] -= 1
+                if creep[1] <= 0:
+                    del self._creep[axis]
         fault = self._fault_reading(axis)
         if fault is not None:
             return fault
@@ -173,6 +180,12 @@ class SimulatedService:
     def fault(self, axis, after_polls=1, error_code=0x1000):
         """The axis reads faulted from its `after_polls`-th poll from now."""
         self._faults[axis] = (self._polls[axis] + after_polls, error_code)
+
+    def creep(self, axis, per_read_mm, reads=None):
+        """The axis drifts by `per_read_mm` on each of the next `reads` reads
+        while no move is in flight (None: for ever), as a drive does after
+        homing attained before it settles."""
+        self._creep[axis] = [float(per_read_mm), reads]
 
     def freeze(self, axis):
         """The axis never arrives (and never homes)."""

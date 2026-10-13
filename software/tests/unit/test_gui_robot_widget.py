@@ -261,7 +261,7 @@ def test_teach_goes_through_the_manual_verbs_then_saves(widget, monkeypatch):
 
 
 def test_a_refused_teach_is_a_dialog_and_changes_nothing(widget, monkeypatch):
-    """Set travel height at Z 0 (where homing leaves it) is refused by the
+    """Set travel height at Z 0.5 (where homing leaves it) is refused by the
     verb, on the job's thread; the refusal comes back as this tab's
     dialog, and the config keeps its travel height."""
     w, system = widget

@@ -49,9 +49,92 @@ class TestRules:
         stage.connect()
         stage.home()
         assert stage.position() == (0.5, 0.5, 0.5) and stage.is_retracted
-        after_homing = service.log[[v for v, _ in service.log].index("home") + 3:]
-        assert [axis for verb, axis in after_homing if verb == "move_to"] == ["Z3", "X1", "Y2"]
+        assert [axis for verb, axis in service.log if verb == "move_to"] == ["Z3", "X1", "Y2"]
         stage.move_xy(1.5, 0.5)                   # a single-axis jog's shape: the other axis stays put
+
+    def test_only_the_axes_below_their_strokes_are_cleared(self):
+        """X from 0 and Z from 0 park inside their strokes: only Y moves, and
+        X is not even sent a zero-length set-point."""
+        strokes = {"X1": (0.0, 200.0), "Y2": (0.5, 109.0), "Z3": (0.0, 58.5)}
+        service = SimulatedService(AXES.values(), strokes, instant=True)
+        stage = XYZStage(service, AXES, 1.0, 50.0, 20.0, RunControl())
+        stage.connect()
+        stage.home()
+        assert [axis for verb, axis in service.log if verb == "move_to"] == ["Y2"]
+        assert stage.position() == (0.0, 0.5, 0.0)
+
+    def test_z_is_not_cleared_above_travel_height(self):
+        """A Z stroke starting above travel height: clearing Z would un-retract
+        the stage, so Z stays where homing parked it and only X and Y clear."""
+        strokes = {"X1": (0.5, 200.0), "Y2": (0.5, 109.0), "Z3": (1.05, 58.5)}
+        service = SimulatedService(AXES.values(), strokes, instant=True)
+        stage = XYZStage(service, AXES, 1.0, 50.0, 20.0, RunControl())      # parks Z at 0.75
+        stage.connect()
+        stage.home()
+        assert [axis for verb, axis in service.log if verb == "move_to"] == ["X1", "Y2"]
+        assert stage.position() == (0.5, 0.5, 0.75) and stage.is_retracted
+
+    def test_a_fault_during_the_clearing_leg_halts_and_keeps_the_homing(self):
+        """The homing reference is good; the clearing leg fails like any leg:
+        halted, re-read, raised. The stage stays homed (a re-home would run
+        the same leg) and refuses the next move until the fault is reset."""
+        strokes = {"X1": (0.5, 200.0), "Y2": (0.5, 109.0), "Z3": (0.5, 58.5)}
+        service = SimulatedService(AXES.values(), strokes, instant=True)
+        stage = XYZStage(service, AXES, 1.0, 50.0, 20.0, RunControl())
+        stage.connect()
+        original_read = service.read
+
+        def read(axis):
+            if ("move_to", "Y2") in service.log and "Y2" not in service._faults:
+                service.fault("Y2", after_polls=0, error_code=0x7331)
+            return original_read(axis)
+        service.read = read
+        with pytest.raises(DeviceError, match="Y2.*7331"):
+            stage.home()
+        assert stage.is_homed and stage.position() is not None
+        assert ("stop", "X1") in service.log and ("stop", "Y2") in service.log
+        with pytest.raises(DeviceError, match="Y2"):
+            stage.move_xy(10.0, 10.0)
+
+    def test_a_jog_after_a_re_read_at_the_stroke_start_is_not_refused(self):
+        """The drives count in pulses, so a re-read of an axis cleared to 0.5
+        comes back as 0.49995: after a STOP, a jog of the other axis must
+        not be refused for it. The untouched axis is left out of the leg."""
+        strokes = {"X1": (0.5, 200.0), "Y2": (0.5, 109.0), "Z3": (0.5, 58.5)}
+        service = SimulatedService(AXES.values(), strokes, instant=True)
+        stage = XYZStage(service, AXES, 1.0, 50.0, 20.0, RunControl())
+        stage.connect()
+        stage.home()
+        original_read = service.read
+        service.read = lambda axis: original_read(axis)._replace(
+            position_mm=original_read(axis).position_mm - 0.00005)
+        stage.halt()                                  # re-reads: Y now 0.49995
+        assert stage.position()[1] < 0.5
+        before = len(service.log)
+        stage.move_xy(1.5, stage.position()[1])       # the jog's shape
+        assert [axis for verb, axis in service.log[before:] if verb == "move_to"] == ["X1"]
+
+    def test_homing_waits_for_the_axis_to_settle_before_reading_or_moving(self):
+        """Attained comes on with the axis still creeping (nm-servo #14): the
+        position is read, and the clearing leg sent, only once it holds."""
+        strokes = {"X1": (0.0, 200.0), "Y2": (0.0, 109.0), "Z3": (0.0, 58.5)}
+        service = SimulatedService(AXES.values(), strokes, instant=True)
+        stage = XYZStage(service, AXES, 1.0, 50.0, 20.0, RunControl())
+        stage.connect()
+        service.creep("X1", 0.01, reads=8)            # 0.08 mm over the next eight reads
+        stage.home()
+        assert stage.position()[0] == pytest.approx(0.08)
+        assert "move_to" not in [verb for verb, _ in service.log]
+
+    def test_a_homing_that_never_settles_goes_on_with_a_warning(self, caplog):
+        strokes = {"X1": (0.0, 200.0), "Y2": (0.0, 109.0), "Z3": (0.0, 58.5)}
+        service = SimulatedService(AXES.values(), strokes, instant=True)
+        stage = XYZStage(service, AXES, 1.0, 50.0, 20.0, RunControl())
+        stage.connect()
+        service.creep("Y2", 0.01)                     # for ever
+        stage.home()
+        assert stage.is_homed
+        assert any("Y2: still moving" in record.message for record in caplog.records)
 
     def test_before_homing_the_position_is_unknown_and_xy_is_refused(self):
         stage, service, _ = build()
@@ -416,7 +499,7 @@ class TestMessages:
         stage.home()
         with pytest.raises(StageError) as refused:
             stage.move_xy(250.0, 10.0)
-        assert str(refused.value) == "axis X1: 250.00 mm is outside the stroke 0.00..200.00 mm"
+        assert str(refused.value) == "axis X1: 250.000 mm is outside the stroke 0.000..200.000 mm"
         service.fault(AxisName.Z3, after_polls=2, error_code=0x7331)    # in flight
         service.fail_stop(AxisName.Z3, OSError("no response"))
         with pytest.raises(DeviceError) as failed:

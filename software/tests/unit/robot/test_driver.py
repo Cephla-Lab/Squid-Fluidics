@@ -155,7 +155,8 @@ def test_the_adapter_runs_a_leg_end_to_end_on_the_driver_simulator(real_clock):
     about 0 after homing, which is the top under this rig's convention.
     Homing parks the axis a little past 0 (0.12 mm here; 0.12 to 0.5 mm on
     the drives, nm-servo PR #12), so the travel height must sit below the
-    park: a travel height of 0 is refused by home()."""
+    park: a travel height of 0 is refused by home(). The stage then clears
+    each axis to its stroke's start (0.5 mm)."""
     driver = driver_or_skip()
     from fluidics.errors import RunControl
     from fluidics.robot.stage import XYZStage

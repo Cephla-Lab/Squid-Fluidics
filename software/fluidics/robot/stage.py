@@ -40,6 +40,12 @@ TOLERANCE_MM = 0.05
 # Z parks below: the lowest travel height a config or a teach may give.
 MIN_TRAVEL_Z_MM = 1.0
 LIMIT_SWITCH_ALARM = 0x8614   # 603Fh while a limit switch holds the axis (NiMotion B06 table 8-1)
+# After homing attained the axis is still creeping (nm-servo #14 measured 50-90 um over up
+# to 4 s on X1): the position must hold within the window for the hold time before it is
+# read or moved; past the budget the stage goes on with a warning.
+SETTLE_WINDOW_MM = 0.005
+SETTLE_HOLD_S = 0.3
+SETTLE_BUDGET_S = 6.0
 
 
 def _label(axis):
@@ -93,12 +99,13 @@ class XYZStage:
 
     def _clear_switches(self):
         """Homing parks an axis 0.1 to 0.5 mm past its switch, which can be
-        below the stroke's start (the driver keeps moves 0.5 mm clear of the
-        switch, nm-servo #13): left there, every single-axis move would be
-        refused, the untouched axes' targets being out of stroke. Each such
-        axis moves to its stroke's start, Z alone (never below travel
-        height) and then X and Y together, so every later target is inside
-        the stroke. No move for an axis already inside it."""
+        below the stroke's start (the strokes start 0.5 mm clear of the
+        switches: nm-servo #13 for X1, #15 for Y2, #16 for Z3). Left there,
+        a jog of one XY axis would be refused for the other's out-of-stroke
+        target. Each such axis moves to its stroke's start, Z alone (only
+        when that start is at or below travel height) and then X and Y
+        together; an axis already inside its stroke is left out of the leg
+        (move_xy drops an axis within tolerance of its target)."""
         x, y, z = self._position
         low = {axis: self._service.stroke(axis)[0] for axis in (self._x, self._y, self._z)}
         if z < low[self._z] <= self.travel_z_mm:      # never above travel height to do it
@@ -128,6 +135,7 @@ class XYZStage:
                 elif reading.error:
                     raise DeviceError(f"axis {_label(axis)}: homing error")
                 elif reading.attained and reading.homing_mode:
+                    self._settle_after_homing(axis)
                     return
                 if time.monotonic() > deadline:
                     raise DeviceError(f"axis {_label(axis)}: homing did not complete in "
@@ -135,6 +143,30 @@ class XYZStage:
         except BaseException as cause:
             self._end_early([axis], cause)
             raise
+
+    def _settle_after_homing(self, axis):
+        """The attained bit comes on at the switch edge with the axis still
+        creeping (nm-servo #14): a set-point sent then would switch the
+        drive's mode mid-motion, and a read would be stale. Poll until the
+        position holds within SETTLE_WINDOW_MM for SETTLE_HOLD_S -- counted
+        in polls, so an instant simulation needs no clock -- and give up
+        with a warning after SETTLE_BUDGET_S. A fault seen meanwhile ends
+        the homing like one seen before."""
+        needed = max(3, int(round(SETTLE_HOLD_S / self._poll))) if self._poll > 0 else 3
+        budget = needed * int(SETTLE_BUDGET_S / SETTLE_HOLD_S)
+        last = self._service.read(axis).position_mm
+        steady = 0
+        for _ in range(budget):
+            self._control.sleep(self._poll)
+            reading = self._service.read(axis)
+            if reading.fault or not reading.enabled:
+                raise DeviceError(self._describe(axis, reading))
+            steady = steady + 1 if abs(reading.position_mm - last) <= SETTLE_WINDOW_MM else 0
+            last = reading.position_mm
+            if steady >= needed:
+                return
+        _logger.warning("axis %s: still moving %.0f s after homing attained (last read %.3f mm); going on",
+                        _label(axis), SETTLE_BUDGET_S, last)
 
     def close(self, quiescent=True, retract=True):
         """Quiescent: retract, brake, disable, disconnect. Under a job that
@@ -216,11 +248,29 @@ class XYZStage:
         if not self.is_retracted:
             raise StageError(f"XY move refused: Z is at {self._position[2]:.2f} mm, "
                              f"below travel height {self.travel_z_mm:.2f} mm")
-        self._check_stroke(self._x, x)
-        self._check_stroke(self._y, y)
-        z = self._position[2]
-        self._leg({self._x: (x, self._vxy), self._y: (y, self._vxy)})
-        self._position = (x, y, z)
+        known_x, known_y, z = self._position
+        targets = {}
+        for axis, target, known in ((self._x, x, known_x), (self._y, y, known_y)):
+            # An axis already within tolerance of its target is left out: no
+            # zero-length set-point, and no stroke check on a position the
+            # drive's count quantization reads a hair below the stroke's
+            # start (0.49995 mm for 0.5), which would refuse the other
+            # axis's jog after any re-read.
+            if abs(target - known) > TOLERANCE_MM:
+                self._check_stroke(axis, target)
+                targets[axis] = (target, self._vxy)
+            else:
+                # Left out of the leg, but not out of the pre-check: a
+                # faulted or disabled axis refuses the move like one that
+                # was going to travel.
+                reading = self._service.read(axis)
+                if reading.fault or not reading.enabled:
+                    raise DeviceError(self._describe(axis, reading))
+        if not targets:
+            return
+        self._leg(targets)
+        self._position = (x if self._x in targets else known_x,
+                          y if self._y in targets else known_y, z)
         self._publish()
 
     def move_z(self, z):
@@ -258,8 +308,8 @@ class XYZStage:
     def _check_stroke(self, axis, target):
         low, high = self._service.stroke(axis)
         if not low <= target <= high:
-            raise StageError(f"axis {_label(axis)}: {target:.2f} mm is outside the stroke "
-                             f"{low:.2f}..{high:.2f} mm")
+            raise StageError(f"axis {_label(axis)}: {target:.3f} mm is outside the stroke "
+                             f"{low:.3f}..{high:.3f} mm")
 
     def _leg(self, targets):
         """Dispatch every axis in `targets` ({axis: (mm, mm/s)}), then poll
