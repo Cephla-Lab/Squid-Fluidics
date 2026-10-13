@@ -144,8 +144,13 @@ uint8_t RheoLink::send_command(RheoLinkCommand_t cmd, uint8_t data ) {
     return 22;
   }
   
-  // Retry loop for robust communication
-  do {
+  // Retry loop for robust communication: one attempt plus up to
+  // RheoLink_MAX_RETRIES retries, then give up with the last error.
+  // The exit must not depend on the counter still advancing: it used to
+  // stop at the limit while the loop condition still held, so a bus that
+  // never answers (valve unpowered or unplugged) spun here forever, and
+  // loop() with it -- the MCU went silent and the host hung at bring-up.
+  while (true) {
     checksum = address_ << 1;
 
     w_->beginTransmission(address_);
@@ -161,18 +166,15 @@ uint8_t RheoLink::send_command(RheoLinkCommand_t cmd, uint8_t data ) {
     w_->beginTransmission(0);
     w_->endTransmission();
 
-    // If successful, break out of retry loop
-    if (err == 0) {
+    // Done on success, or once the retries are spent
+    if (err == 0 || retry_count >= RheoLink_MAX_RETRIES) {
       break;
     }
 
-    // If we have retries left, wait and try again
-    if (retry_count < RheoLink_MAX_RETRIES) {
-      delay(RheoLink_RETRY_DELAY);
-      retry_count++;
-    }
-
-  } while (retry_count <= RheoLink_MAX_RETRIES);
+    // Wait and try again
+    delay(RheoLink_RETRY_DELAY);
+    retry_count++;
+  }
   
   return err;
 }
@@ -220,22 +222,20 @@ uint8_t RheoLink::read_register(RheoLinkCommand_t target){
   uint8_t retry_count = 0;
   uint8_t bytes_received = 0;
 
-  do {
+  // Same bound as send_command(): the exit cannot depend on the counter
+  while (true) {
     // Request the data
     bytes_received = w_->requestFrom(address_, 3, true);
 
-    // If we got data, break out of retry loop
-    if(bytes_received > 0){
+    // Done on data, or once the retries are spent
+    if (bytes_received > 0 || retry_count >= RheoLink_MAX_RETRIES) {
       break;
     }
 
-    // If we have retries left, wait and try again
-    if (retry_count < RheoLink_MAX_RETRIES) {
-      delay(RheoLink_RETRY_DELAY);
-      retry_count++;
-    }
-
-  } while (retry_count <= RheoLink_MAX_RETRIES);
+    // Wait and try again
+    delay(RheoLink_RETRY_DELAY);
+    retry_count++;
+  }
 
   // If we didn't get any data after all retries, return an error
   if(bytes_received == 0){
