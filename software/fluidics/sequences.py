@@ -251,6 +251,14 @@ def sequence_well_problems(seq: dict, vocabulary) -> list[str]:
     rig without a sipper), as messages; empty when there are none. Reads
     the raw dict, so a value the models would refuse is named here too."""
     problems = []
+    # The model forbids a field its type lacks; the raw row is not run
+    # through the model here, so a stray one would be silently ignored at
+    # run time (a priming row's dips never happen). Named first.
+    model = SEQUENCE_TYPES.get(seq.get("type"))
+    if model is not None:
+        problems.extend(f"{f} is not a field of {seq['type']} rows"
+                        for f in (*WELL_FIELDS, "dip_cycles")
+                        if f in seq and f not in model.model_fields)
     set_fields = [f for f, falsy_unset in WELL_FIELDS.items()
                   if seq.get(f) is not None and not (falsy_unset and not seq.get(f))]
     dips = seq.get("dip_cycles") or 0
@@ -263,6 +271,9 @@ def sequence_well_problems(seq: dict, vocabulary) -> list[str]:
         return problems
     port, well = seq.get("fluidic_port"), seq.get("well")
     for field in set_fields:
+        if not isinstance(seq[field], str):
+            problems.append(f"{field}={seq[field]}: must be a well reference such as A1 or ssct/A1")
+            continue
         try:
             vocabulary.resolve(seq[field])
         except ValueError as e:

@@ -161,9 +161,16 @@ class SequenceList:
 
     def set_name(self, row, name):
         """Name the row, or unname it: blank, or the type's own label typed
-        back, both mean unnamed."""
+        back, both mean unnamed. The editor hands back the whole title, so
+        the ": well" suffix title() appends is taken off first -- else it
+        would pile up on the name with every edit."""
         seq = self._rows[row]
-        name = (name or "").strip()
+        name = name or ""
+        well = seq.get("well")
+        suffix = f": {well}" if well else ""
+        if suffix and name.endswith(suffix):
+            name = name[:-len(suffix)]
+        name = name.strip()
         label = label_for_type(seq.get("type", ""))
         seq["name"] = name if name and name != label else None
         self._validate_row(row)

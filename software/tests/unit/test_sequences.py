@@ -364,7 +364,7 @@ class TestWellFields:
 class TestPairingRules:
     def test_a_well_on_a_rig_without_a_sipper_is_refused(self, flow_cell_config):
         """Review focus 1."""
-        with pytest.raises(ValueError, match="no sipper"):
+        with pytest.raises(ValueError, match="this rig has no sipper"):
             _validate([HYB], flow_cell_config)
 
     def test_a_well_needs_the_sipper_port_and_the_sipper_port_needs_a_well(self, plate_sipper_config):
@@ -405,3 +405,32 @@ class TestPairingRules:
     def test_a_file_with_no_well_fields_validates_as_before(self, flow_cell_config):
         _validate([{"type": "flow_reagent", "fluidic_port": 2, "flow_rate": 500, "volume": 500,
                     "fill_tubing_with": 25}], flow_cell_config)
+
+    def test_a_well_that_is_not_text_is_named_not_raised(self, plate_sipper_config):
+        """A raw row reaches the gate unvalidated: a number where a well
+        reference belongs is a named refusal, not a TypeError."""
+        with pytest.raises(ValueError, match=r"sequence 0 .*well=5: must be a well reference"):
+            _validate([dict(HYB, well=5)], plate_sipper_config)
+        prime = {"type": "priming", "fluidic_port": 25, "flow_rate": 5000, "volume": 800,
+                 "sipper_well": 7}
+        with pytest.raises(ValueError, match=r"sequence 0 .*sipper_well=7: must be a well reference"):
+            _validate([prime], plate_sipper_config)
+
+    @pytest.mark.parametrize("row, message", [
+        (dict(HYB, sipper_well="ssct/H10"), "sipper_well is not a field of flow_reagent rows"),
+        ({"type": "priming", "fluidic_port": 1, "well": "A1", "dip_cycles": 3,
+          "flow_rate": 5000, "volume": 800}, "dip_cycles is not a field of priming rows"),
+        ({"type": "set_temperature", "temperature": 37.0, "fluidic_port": 1, "well": "A1"},
+         "well is not a field of set_temperature rows"),
+    ])
+    def test_a_well_field_the_row_type_lacks_is_refused(self, plate_sipper_config, row, message):
+        """The model forbids these; the raw-dict gate must too, or the
+        field is silently ignored at run time (a priming row's dips never
+        happen). Named before the pairing rules."""
+        from fluidics.control.config import available_ports
+        v = _vocabulary(plate_sipper_config)
+        assert sequence_well_problems(row, v)[0] == message
+        with pytest.raises(ValueError, match=message):
+            _validate([row], plate_sipper_config)
+        assert _sequence_problem(row, plate_sipper_config.application,
+                                 available_ports(plate_sipper_config), sipper=v) is not None
