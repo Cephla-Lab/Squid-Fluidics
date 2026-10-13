@@ -80,7 +80,6 @@ reagent_selection:
         residual_ul: 50
     priming_well: ssct/H11
     clean_up_well: ssct/H12
-    park_well: ssct/H11
     agitate_amplitude_mm: 5.0
 flow_sensors:
   - index: 1

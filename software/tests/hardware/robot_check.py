@@ -132,7 +132,7 @@ def jog_until_enter(manual, robot, settle, prompt, on_enter):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--config", required=True, help="rig config YAML with a nimotion_gantry_system block")
-    parser.add_argument("--agitate-well", help="a full well to agitate in (default: the config's park_well)")
+    parser.add_argument("--agitate-well", help="a full well to agitate in (default: the config's priming_well)")
     parser.add_argument("--simulation", action="store_true",
                         help="simulated hardware, to check the script itself")
     args = parser.parse_args()
@@ -143,9 +143,7 @@ def main():
     if g is None:
         sys.exit(f"{args.config} has no nimotion_gantry_system block: there is no robot to check")
     vocabulary = sipper_vocabulary(config)
-    agitate_well = args.agitate_well or g.park_well
-    if agitate_well is None:
-        sys.exit("the config names no park_well: give --agitate-well")
+    agitate_well = args.agitate_well or g.priming_well
     try:
         # Here, before anything moves: a typo found after the teaching
         # would end the script and lose the taught values unsaved.
@@ -207,8 +205,7 @@ def main():
             manual.go_to_well(agitate_well)
             robot.agitate(2)
             settle.report(f"agitate in {agitate_well}")
-            park = (f"dip into {g.park_well}" if g.park_well else
-                    "move over park_xy_mm" if g.park_xy_mm else "stay there")
+            park = "move over park_xy_mm" if g.park_xy_mm else "stay over the well"
             input(f"Enter to park: retract, then {park}...")
             manual.park()
             settle.report("park")
@@ -220,12 +217,12 @@ def main():
                 print("Simulation: the taught values are not saved.")
             elif input(f"Write the taught values into {config.source_path}? [y/N] ").strip().lower() == "y":
                 print("written to", save_config(config))
-            input(f"Enter to close: the sipper parks once more (retract, then {park}), "
+            input("Enter to close: no move (the tip stays where it is), "
                   "then every drive is disabled...")
         except BaseException as e:
             # A failure or Ctrl+C: the stage halted any leg it was in. Close
-            # without a move -- the with's close would retract and park.
-            print("Stopped: closing without moving (no retract, no park).")
+            # without a move, as the with's close would also do.
+            print("Stopped: closing without moving.")
             system.devices.close(quiescent=False)
             if isinstance(e, KeyboardInterrupt):
                 sys.exit(130)

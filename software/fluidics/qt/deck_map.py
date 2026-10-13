@@ -1,7 +1,7 @@
 """The deck map: both plates drawn where their placements put them, the
 sipper's tip painted where the stage last published it and colored by
-whether it is retracted or lowered, the priming, clean-up and park wells
-marked, and a click on a well that names the well -- never a point between
+whether it is retracted or lowered, the wells with a role (priming,
+clean-up) marked, and a click on a well that names the well -- never a point between
 wells, so a click can only ever send the tip to a well's centre.
 
 Pure Qt over plain labware values: the Robot tab feeds it placements, a
@@ -83,9 +83,24 @@ class DeckMapWidget(QWidget):
         if self._position is None:
             return "sipper: position unknown (home or retract)"
         x, y, z = self._position
-        state = "retracted" if self._retracted else "lowered"
-        where = f" in {self._current_well.reservoir}/{self._current_well.well}" if self._current_well else ""
-        return f"sipper: {state}{where}   x {x:.1f}  y {y:.1f}  z {z:.1f} mm"
+        if self._retracted:
+            over = self.wellAtXY(x, y)
+            state = "retracted" + (f" over {over.reservoir}/{over.well}" if over is not None else "")
+        else:
+            state = "lowered" + (f" in {self._current_well.reservoir}/{self._current_well.well}"
+                                 if self._current_well else "")
+        return f"sipper: {state}   x {x:.1f}  y {y:.1f}  z {z:.1f} mm"
+
+    def wellAtXY(self, x_mm, y_mm):
+        """The well whose centre is within the hit radius of a deck point,
+        or None: what the tip is over, read from its published XY."""
+        for name, placement in self._placements.items():
+            radius = HIT_RADIUS_PITCH * placement.pitch_mm
+            for well in placement.geometry.wells():
+                wx, wy = placement.xy_mm(well)
+                if (wx - x_mm) ** 2 + (wy - y_mm) ** 2 <= radius ** 2:
+                    return WellRef(name, well)
+        return None
 
     def legend(self):
         """The roles present, a well with two roles listed once with both."""

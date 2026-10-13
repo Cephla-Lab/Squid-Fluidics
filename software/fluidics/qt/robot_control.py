@@ -9,9 +9,9 @@ live robot and the config together, or neither; Save writes the config.
 
 import logging
 
-from qtpy.QtWidgets import (QComboBox, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView,
-                            QLabel, QMessageBox, QPushButton, QTableWidget, QTableWidgetItem,
-                            QVBoxLayout, QWidget)
+from qtpy.QtWidgets import (QCheckBox, QComboBox, QGridLayout, QGroupBox, QHBoxLayout,
+                            QHeaderView, QLabel, QMessageBox, QPushButton, QTableWidget,
+                            QTableWidgetItem, QVBoxLayout, QWidget)
 
 from fluidics.control.config import gantry, save_config
 from fluidics.events import RunStarted, SequenceCompleted
@@ -121,6 +121,16 @@ class RobotControlWidget(PostsToQtThread, QWidget):
         self.teachButton = QPushButton("Teach…")
         connect_click(self.teachButton, self.showTeach)
         row.addWidget(self.teachButton)
+        # Checked: Go to well (button or map) retracts and travels, never
+        # dips -- taught positions checked over empty plates; no witness,
+        # so no draw, and a run is refused while it is on. Per session.
+        self.lowerTipBox = QCheckBox("Do not lower tip")
+        self.lowerTipBox.setToolTip("Go to well travels over the well and stops retracted: check "
+                                    "taught positions over empty plates. No draw can pass and a run "
+                                    "is refused while this is on.")
+        self.lowerTipBox.toggled.connect(lambda checked: self.manual.set_lower_tip(not checked))
+        row.addWidget(self.lowerTipBox)
+        self._controls.append(self.lowerTipBox)
         column = QVBoxLayout()
         column.addLayout(row)
         # The deck map: the plates where they are taught, the tip where the
@@ -132,8 +142,7 @@ class RobotControlWidget(PostsToQtThread, QWidget):
         self.deckMap.setPlacements(robot.placements)
         self.deckMap.setNamedWells({
             "priming": self._vocabulary.resolve(g.priming_well),
-            "clean-up": self._vocabulary.resolve(g.clean_up_well),
-            "park": None if g.park_well is None else self._vocabulary.resolve(g.park_well)})
+            "clean-up": self._vocabulary.resolve(g.clean_up_well)})
         self.deckMap.wellClicked.connect(self._goToClickedWell)
         column.addWidget(self.deckMap, 1)
         self._controls.append(self.deckMap)

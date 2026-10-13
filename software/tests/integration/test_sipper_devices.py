@@ -350,7 +350,7 @@ def test_the_facades_close_under_a_job_that_will_not_stop_moves_nothing_and_rese
         plate_sipper_config, instant_devices, tmp_path, real_clock):
     """FluidicsSystem.close: the job ignores the cancel and the wait times
     out, so the devices close non-quiescently -- the robot halts where it
-    is (no park in the park well), and the abort latch stays set so the
+    is (no move at all), and the abort latch stays set so the
     job cannot resume on what is left."""
     import threading
     from fluidics.system import FluidicsSystem

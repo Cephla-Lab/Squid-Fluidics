@@ -115,6 +115,13 @@ class ManualOperations:
         self._need_robot()
         self.robot.park()
 
+    def set_lower_tip(self, enabled):
+        """"Do not lower tip" off (True) or on (False): with it on,
+        go_to_well ends retracted over the well (no dip, no witness) and a
+        run is refused at time zero. A setting, not a move: no job."""
+        self._need_robot()
+        self.robot.lower_tip = bool(enabled)
+
     def home_robot(self):
         self._need_robot()
         self.robot.home()

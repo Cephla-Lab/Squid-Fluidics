@@ -143,7 +143,7 @@ class DeviceSet:
         facade's close after its wait timed out). Then nothing moves: the
         abort latch stays set so the job cannot resume, the syringe is not
         parked, and the robot halts where it is and makes no move. A
-        quiescent close parks the robot instead, the tip in the park well.
+        quiescent close leaves the robot where it is, the tip wet in its last well.
 
         Threading: a non-quiescent close halts the robot from this, the
         closer's, thread while the stuck job may still poll the same RS-485
@@ -171,10 +171,10 @@ class DeviceSet:
         if quiescent:
             steps.append(self.run_control.reset)
         if self.robot is not None:
-            # After the reset (a quiescent robot's park passes the gates),
-            # before the syringe parks. Quiescent, the sipper parks with its
-            # tip in the park well (wet between runs); otherwise it halts and
-            # makes no move. The robot's own shielded steps are folded into
+            # After the reset, before the syringe parks (the order kept from
+            # when the robot parked on close). The robot makes no move either
+            # way: quiescent, the tip rests wet in its last well; otherwise
+            # it halts. The robot's own shielded steps are folded into
             # this one.
             steps.append(lambda: _raise_first(self.robot.close(quiescent=quiescent)))
         steps.append(lambda: self.syringe_pump.close(empty_syringe if quiescent else False))
@@ -209,9 +209,8 @@ def _build_robot(config, simulation, run_control, instant):
     stage = XYZStage(service, names, g.travel_z_mm, g.xy_velocity_mm_s,
                      g.z_velocity_mm_s, run_control,
                      poll_seconds=0.0 if instant else POLL_SECONDS)
-    park_well = parse_ref(g.park_well, g.default_reservoir) if g.park_well else None
     robot = RobotSipper(stage, vocabulary.placements(), g.default_reservoir,
-                        g.agitate_amplitude_mm, park_xy_mm=g.park_xy_mm, park_well=park_well)
+                        g.agitate_amplitude_mm, park_xy_mm=g.park_xy_mm)
     try:
         stage.connect()
         robot.home()

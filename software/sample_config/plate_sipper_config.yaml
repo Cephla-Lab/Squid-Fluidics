@@ -88,13 +88,14 @@ reagent_selection:
         row_axis: "+x"
         loaded_ul: 1800
         residual_ul: 50
-    # Dedicated wells: the sipper primes from priming_well, is cleaned from
-    # clean_up_well and parks wet in park_well. Keep them out of sequences
-    # and keep them full. park_well (H11) is also the default agitation
-    # well of tests/hardware/robot_check.py.
+    # Dedicated wells: the sipper primes from priming_well and is cleaned from
+    # clean_up_well. Keep them out of sequences and keep them full. Between
+    # steps and sessions the tip rests wet in the last step's well; there is
+    # no park well (Park lifts the tip, and moves it only to park_xy_mm).
+    # priming_well is also the default agitation well of
+    # tests/hardware/robot_check.py.
     priming_well: ssct/H11
     clean_up_well: ssct/H12
-    park_well: ssct/H11
     agitate_amplitude_mm: 5.0
 flow_sensors:
   - index: 1

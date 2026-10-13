@@ -52,7 +52,9 @@ def test_the_state_line_reads_lowered_retracted_or_unknown(deck):
     assert deck.stateText() == "sipper: lowered in probes/C9   x 30.0  y 73.5  z 50.0 mm"
     deck.setPosition((30.0, 73.5, 1.0), retracted=True)
     deck.setCurrentWell(None)
-    assert deck.stateText() == "sipper: retracted   x 30.0  y 73.5  z 1.0 mm"
+    assert deck.stateText() == "sipper: retracted over probes/C9   x 30.0  y 73.5  z 1.0 mm"
+    deck.setPosition((60.0, 60.0, 1.0), retracted=True)           # the gap between the plates
+    assert deck.stateText() == "sipper: retracted   x 60.0  y 60.0  z 1.0 mm"
     deck.setPosition(None, retracted=False)
     assert deck.stateText() == "sipper: position unknown (home or retract)"
 

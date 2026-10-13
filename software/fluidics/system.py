@@ -11,6 +11,7 @@ once.
 import logging
 
 from .devices import build_devices, build_operations
+from .errors import OperationError
 from .manual_operations import ManualOperations
 from .reports import RunReports
 from .run_session import RunSession
@@ -83,6 +84,14 @@ class FluidicsSystem:
             # A list, not a generator: validate_sequences walks it twice.
             validate_sequences([entry.sequence for entry in plan],
                                self.devices.config)
+        # "Do not lower tip" (the Robot tab's switch for checking taught
+        # positions over empty plates): the sipper would never dip, so no
+        # well row could draw. Refused here, before the replay and before
+        # anything moves, as a FluidicsError the start slot shows.
+        robot = self.devices.robot
+        if robot is not None and not robot.lower_tip:
+            raise OperationError("Do not lower tip is on: the sipper would travel to its wells "
+                                 "without dipping, so nothing could be drawn; switch it off to run")
         # The reservoir gate (spec §7): the plan replayed on a simulated
         # twin restored from the live ledger's snapshot (the live ledger is
         # only read), so a run that would draw from an emptied well or

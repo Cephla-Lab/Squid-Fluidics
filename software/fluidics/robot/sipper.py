@@ -1,10 +1,13 @@
 """The sipper on the stage: the verbs the operations call (spec §2.3).
 
 current_well is the witness the no-air rule reads (spec D9): set only
-while the tip sits at dip depth in a well, cleared by retract, home, a
-park in air, and for the length of an agitation (the tip leaves dip depth,
-so a draw interrupted there would start from the wrong depth); a park in
-the park well sets it, since the tip is wet there. Every plate's corners
+while the tip sits at dip depth in a well, cleared by retract, park, home,
+and for the length of an agitation (the tip leaves dip depth, so a draw
+interrupted there would start from the wrong depth). With `lower_tip` off
+(the Robot tab's "Do not lower tip"), go_to_well ends retracted over the
+well and sets no witness, so positions can be checked over an empty deck
+and no draw can pass. Between steps and sessions the tip rests in the last
+step's well; there is no park well. Every plate's corners
 are checked against the stage's strokes when the sipper is built and when
 a placement is taught, so a plate the stage cannot reach fails bring-up
 with the plate and the well named, not a run hours in. So is its
@@ -19,19 +22,17 @@ from .labware import WellRef  # noqa: F401  (the type callers hand in)
 
 class RobotSipper:
     def __init__(self, stage, placements, default_reservoir, agitate_amplitude_mm,
-                 park_xy_mm=None, park_well=None):
+                 park_xy_mm=None):
         self._stage = stage
         self._placements = {}
         self.default_reservoir = default_reservoir
         self.agitate_amplitude_mm = float(agitate_amplitude_mm)
         self._park_xy = park_xy_mm
-        self._park_well = park_well
         self.current_well = None
+        self.lower_tip = True          # off: go_to_well stops retracted over the well
         self.moves = stage.moves
         for name, placement in placements.items():
             self.set_placement(name, placement)
-        if park_well is not None:
-            self._placement(park_well).xy_mm(park_well.well)
 
     @property
     def placements(self):
@@ -76,11 +77,16 @@ class RobotSipper:
                              f"this rig has {', '.join(sorted(self._placements))}") from None
 
     def go_to_well(self, ref):
+        """Retract, travel over the well, dip to the plate's depth, and
+        vouch for the well. With lower_tip off the move ends retracted over
+        the well and vouches for nothing."""
         plate = self._placement(ref)
         x, y = plate.xy_mm(ref.well)          # refuses a well the plate lacks
         self.current_well = None
         self._stage.retract()
         self._stage.move_xy(x, y)
+        if not self.lower_tip:
+            return
         self._stage.move_z(plate.dip_z_mm)
         self.current_well = ref
 
@@ -103,10 +109,11 @@ class RobotSipper:
         self._stage.retract()
 
     def park(self):
+        """A dry park: retract, then to park_xy_mm when the config names
+        one, else stay over the well. The tip's resting place between
+        steps is the last step's well; Park lifts it out, for a plate swap."""
         self.retract()
-        if self._park_well is not None:
-            self.go_to_well(self._park_well)
-        elif self._park_xy is not None:
+        if self._park_xy is not None:
             self._stage.move_xy(*self._park_xy)
 
     def home(self):
@@ -130,20 +137,11 @@ class RobotSipper:
         self._stage.halt()
 
     def close(self, quiescent=True):
-        """Quiescent on a homed stage: park, then the stage's close without
-        its retract, so the tip stays wet in the park well (a park that
-        failed still ends retracted). Otherwise the stage's close alone,
-        which makes no move here. A closed robot vouches for no well.
-        Returns the exceptions the steps raised."""
+        """No move either way: the tip waits where the last step left it,
+        wet in its well (the lead screw holds Z unpowered, and the next
+        launch homes upward first); under a live job the stage halts. A
+        closed robot vouches for no well. Returns the steps' exceptions."""
         self.current_well = None
-        errors = []
-        parked = False
-        if quiescent and self._stage.is_homed:
-            try:
-                self.park()
-                parked = True
-            except Exception as e:
-                errors.append(e)
-        errors.extend(self._stage.close(quiescent=quiescent, retract=not parked))
+        errors = self._stage.close(quiescent=quiescent, retract=False)
         self.current_well = None
         return errors

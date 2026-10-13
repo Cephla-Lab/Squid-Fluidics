@@ -177,3 +177,21 @@ def test_selective_priming_that_leaves_out_the_sipper_is_refused_at_time_zero(sy
         system.run([prime, HYB])
     assert not system.busy
     assert {key: reservoirs.remaining(key) for key in balances} == balances
+
+
+def test_a_run_is_refused_at_time_zero_while_do_not_lower_tip_is_on(system):
+    """The sipper would travel to its wells without dipping, so no well
+    row could draw: refused before the replay and before anything moves,
+    as a FluidicsError the editor's start slot shows; nothing is charged."""
+    robot = system.devices.robot
+    system.manual.set_lower_tip(False)
+    log = robot._stage._service.log
+    before = len(log)
+    balance = system.devices.reservoirs.remaining("probes/A1")
+    with pytest.raises(OperationError, match="^Do not lower tip is on"):
+        system.run([HYB])
+    assert not system.busy and len(log) == before
+    assert system.devices.reservoirs.remaining("probes/A1") == balance
+    system.manual.set_lower_tip(True)
+    system.run([HYB])
+    assert system.wait()

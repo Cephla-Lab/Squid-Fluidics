@@ -301,7 +301,7 @@ def test_the_deck_map_follows_the_sipper(widget):
     w._run(w.manual.retract)
     _settle(system)
     assert w.deckMap.currentWell is None
-    assert w.deckMap.stateText().startswith("sipper: retracted   x 102.5  y 10.5  z 1.0 mm")
+    assert w.deckMap.stateText() == "sipper: retracted over ssct/A2   x 102.5  y 10.5  z 1.0 mm"
 
 
 def test_a_click_on_a_well_of_the_map_goes_there_as_a_manual_job(widget):
@@ -320,11 +320,35 @@ def test_a_click_on_a_well_of_the_map_goes_there_as_a_manual_job(widget):
 
 def test_the_map_shows_the_named_wells_and_freezes_with_the_controls(widget):
     w, _ = widget
-    assert w.deckMap.legend() == ["clean-up well", "priming + park well"]
+    assert w.deckMap.legend() == ["clean-up well", "priming well"]
     w.setControlsEnabled(False)
     assert not w.deckMap.isEnabled()
     w.setControlsEnabled(True)
     assert w.deckMap.isEnabled()
+
+
+def test_do_not_lower_tip_stops_go_to_well_over_the_well_and_refuses_a_run(widget):
+    """Checked, Go to well (button or map) retracts and travels, never dips:
+    no witness, the map says "retracted over", and a run is refused at
+    time zero. The box is one of the controls, so it freezes under a job."""
+    w, system = widget
+    robot = system.devices.robot
+    w.lowerTipBox.setChecked(True)
+    assert robot.lower_tip is False
+    w.reservoirCombo.setCurrentIndex(w.reservoirCombo.findData("ssct"))
+    w.wellCombo.setCurrentText("A2")
+    w.goToWell()
+    _settle(system)
+    assert robot.current_well is None and robot.position() == (102.5, 10.5, 1.0)
+    assert w.deckMap.stateText() == "sipper: retracted over ssct/A2   x 102.5  y 10.5  z 1.0 mm"
+    from fluidics.errors import OperationError
+    with pytest.raises(OperationError, match="Do not lower tip"):
+        system.run([HYB_FROM_A1])
+    assert not system.busy
+    w.lowerTipBox.setChecked(False)
+    assert robot.lower_tip is True
+    w.setControlsEnabled(False)
+    assert not w.lowerTipBox.isEnabled()
 
 
 def test_teaching_and_jog_live_in_their_own_window_and_the_map_on_the_tab(widget):

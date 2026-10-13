@@ -196,7 +196,6 @@ class GantryConfig(_StrictModel):
     reservoirs: Dict[int, ReservoirConfig]
     priming_well: str
     clean_up_well: str
-    park_well: Optional[str] = None
     agitate_amplitude_mm: float = Field(gt=0)
 
     @model_validator(mode='after')
@@ -214,10 +213,8 @@ class GantryConfig(_StrictModel):
         by_name = {r.name: r for r in self.reservoirs.values()}
         if self.default_reservoir not in by_name:
             raise ValueError(f"default_reservoir {self.default_reservoir!r} names no reservoir")
-        for field_name in ('priming_well', 'clean_up_well', 'park_well'):
+        for field_name in ('priming_well', 'clean_up_well'):
             text = getattr(self, field_name)
-            if text is None:
-                continue
             ref = parse_ref(text, self.default_reservoir)
             if ref.reservoir not in by_name:
                 raise ValueError(f"{field_name}: no reservoir named {ref.reservoir!r}")
