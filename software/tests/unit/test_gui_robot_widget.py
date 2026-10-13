@@ -269,6 +269,17 @@ def test_the_wells_table_shows_what_was_drawn_and_a_reload_clears_it(widget, mon
     assert w.reservoirTable.rowCount() == 0, "the reload's finish repaints the table"
 
 
+def test_the_reservoir_table_shows_its_whole_headers(widget):
+    """"Dispatched (µL)" and "Remaining (µL)" read "ispatched (µ" at the
+    default column width: the numeric columns size to their contents and
+    the name column takes the rest, as the editor's usage table does."""
+    from qtpy.QtWidgets import QHeaderView
+    w, _ = widget
+    header = w.reservoirTable.horizontalHeader()
+    assert header.sectionResizeMode(0) == QHeaderView.Stretch
+    assert header.sectionResizeMode(1) == header.sectionResizeMode(2) == QHeaderView.ResizeToContents
+
+
 def test_an_unknown_position_is_painted_as_such(widget):
     w, _ = widget
     w._paintPosition(None)

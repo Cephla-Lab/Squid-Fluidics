@@ -9,8 +9,8 @@ live robot and the config together, or neither; Save writes the config.
 
 import logging
 
-from qtpy.QtWidgets import (QComboBox, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
-                            QMessageBox, QPushButton, QTableWidget, QTableWidgetItem,
+from qtpy.QtWidgets import (QComboBox, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView,
+                            QLabel, QMessageBox, QPushButton, QTableWidget, QTableWidgetItem,
                             QVBoxLayout, QWidget)
 
 from fluidics.control.config import gantry, save_config
@@ -194,6 +194,13 @@ class RobotControlWidget(PostsToQtThread, QWidget):
         column = QVBoxLayout()
         self.reservoirTable = QTableWidget(0, 3)
         self.reservoirTable.setHorizontalHeaderLabels(["Reservoir", "Dispatched (µL)", "Remaining (µL)"])
+        # The numeric columns size to their contents (the header's label
+        # counts), the name takes the rest: at the default width the labels
+        # read "ispatched (µ".
+        header = self.reservoirTable.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self.reservoirTable.verticalHeader().setVisible(False)
         self.reservoirTable.setEditTriggers(QTableWidget.NoEditTriggers)
         column.addWidget(self.reservoirTable)
