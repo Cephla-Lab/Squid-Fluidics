@@ -114,9 +114,9 @@ class TestCharging:
             pump.extract(EXTRACT_PORT, 100)
         assert pump.started == []
 
-    @pytest.mark.parametrize("volume", [float("nan"), 0, -100, float("inf")],
-                             ids=["nan", "zero", "negative", "infinite"])
-    def test_a_draw_that_is_not_a_finite_volume_above_zero_is_refused_and_charges_nothing(
+    @pytest.mark.parametrize("volume", [float("nan"), -100, float("inf")],
+                             ids=["nan", "negative", "infinite"])
+    def test_a_draw_that_is_not_a_finite_volume_is_refused_and_charges_nothing(
             self, rig, tmp_path, volume):
         """NaN fails every comparison, so it passes every check; charged, it
         makes the balance NaN and lets every later draw through."""
@@ -130,6 +130,17 @@ class TestCharging:
             ledger.check("port_25", volume)
         pump.extract(EXTRACT_PORT, 500)               # and the ledger still charges a real draw
         assert ledger.remaining("port_25") == 4300
+
+    def test_a_draw_of_nothing_passes_and_charges_nothing(self, rig, tmp_path):
+        """No liquid moves, so there is no air to refuse; the operations can
+        compute a zero volume, and it must not stop the run."""
+        ledger, pump, _ = rig
+        pump.extract(EXTRACT_PORT, 0)
+        ledger.check("port_25", 0)
+        assert pump.started == [(EXTRACT_PORT, 0)]
+        assert ledger.remaining("port_25") == 4800
+        assert ledger.rows() == []
+        assert not (tmp_path / "ledger.json").exists(), "nothing was charged, nothing written"
 
 
 class TestPersistence:

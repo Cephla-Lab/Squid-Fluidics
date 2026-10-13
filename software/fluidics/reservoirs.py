@@ -85,8 +85,8 @@ class ReservoirLedger:
                 "the draw was not started")
         with self._lock:
             self._check(key, volume_ul)
-            if key not in self._defs:
-                return
+            if key not in self._defs or volume_ul == 0:
+                return      # untracked, or no draw at all: nothing to charge or write
             self._dispatched[key] += volume_ul
             try:
                 self._write()
@@ -129,9 +129,11 @@ class ReservoirLedger:
         # First: NaN fails every comparison, so it would pass every check
         # below and, charged, every check on every draw after it.
         if (isinstance(volume_ul, bool) or not isinstance(volume_ul, numbers.Real)
-                or not 0 < volume_ul < math.inf):
+                or not 0 <= volume_ul < math.inf):
             raise ReservoirError(f"{key}: {volume_ul!r} uL is not a volume that can be drawn "
-                                 "(a finite number above 0)")
+                                 "(a finite number, 0 or more)")
+        if volume_ul == 0:
+            return      # not a draw: no liquid moves, so there is nothing to refuse
         if self._undeclared:
             raise ReservoirUndeclared(
                 "the reservoir ledger is undeclared for " + ", ".join(sorted(self._undeclared))
