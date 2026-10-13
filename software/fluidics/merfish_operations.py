@@ -1,6 +1,8 @@
 import logging
-from .errors import Cancelled, OperationError
+from .control.config import gantry
+from .errors import Cancelled, OperationError, ReservoirError
 from .flow_monitor import DrawGuard
+from .vocabulary import sipper_vocabulary
 from . import sequence_utils
 
 _logger = logging.getLogger(__name__)
@@ -9,11 +11,21 @@ _logger = logging.getLogger(__name__)
 class MERFISHOperations():
     def __init__(self, config, syringe_pump, selector_valves,
                  temperature_controller=None, flow_sensors=None, on_warning=None,
-                 run_control=None):
+                 run_control=None, robot=None, reservoirs=None):
         self.config = config
         self.sp = syringe_pump
         self.sv = selector_valves
         self.tc = temperature_controller
+        # The sipper's robot and the reservoir ledger, both None on a rig
+        # without them (spec §5). The vocabulary spells the wells.
+        self.robot = robot
+        self.reservoirs = reservoirs
+        g = gantry(config) if robot is not None else None
+        self.sipper_port = g.selector_valve_port if g is not None else None
+        self.priming_well = g.priming_well if g is not None else None
+        self.clean_up_well = g.clean_up_well if g is not None else None
+        self.vocabulary = sipper_vocabulary(config)
+        self._op = None
         # The run's cancellation signal, borrowed once here rather than read
         # off whichever device is in scope. build_operations passes the
         # DeviceSet's, which every device shares.
@@ -60,13 +72,18 @@ class MERFISHOperations():
                 sequence['fluidic_port'],
                 sequence['flow_rate'],
                 sequence['volume'],
-                sequence.get('fill_tubing_with'))
+                sequence.get('fill_tubing_with'),
+                well=sequence.get('well'),
+                dip_cycles=sequence.get('dip_cycles') or 0)
         elif seq_type in ("priming", "clean_up"):
+            self._op = seq_type
             self.priming_or_clean_up(
                 sequence['fluidic_port'],
                 sequence['flow_rate'],
                 sequence['volume'],
-                sequence.get('use_ports'))
+                sequence.get('use_ports'),
+                well=sequence.get('well'),
+                sipper_well=sequence.get('sipper_well'))
         elif seq_type == "set_temperature":
             sequence_utils.set_temperature(self.tc, sequence['temperature'],
                                            self.run_control)
@@ -83,10 +100,25 @@ class MERFISHOperations():
             except Exception as e:
                 raise OperationError(f"Failed to empty syringe pump: {str(e)}")
 
-    def flow_reagent(self, port, flow_rate, volume, fill_tubing_with_port):
+    def _select(self, port, well=None, volume_ul=None):
+        """Route reagent `port`; for a well, move the sipper into it first
+        (spec §5). The ledger's check here is asked before the sipper moves,
+        so a draw that cannot fit never moves the robot; the pump asks the
+        ledger again before it dispatches. The move ends before the valve
+        opens, so the pump never runs with the tip out of liquid (D9)."""
+        if well is not None:
+            ref = self.vocabulary.resolve(well)
+            if self.reservoirs is not None:
+                self.reservoirs.check(f"{ref.reservoir}/{ref.well}", volume_ul)
+            self.robot.go_to_well(ref)
+        self.sv.open_port(port)
+
+    def flow_reagent(self, port, flow_rate, volume, fill_tubing_with_port, well=None, dip_cycles=0):
         """
         Flow reagent from {port}. Finally, fill the tubings before sample with reagent from {fill_tubing_with_port}.
         Only the ports on the last selector valve should be used for {fill_tubing_with_port}, usually a common buffer.
+        With `well`, the sipper is moved into it before its port opens, and
+        `dip_cycles` dips run before the draw, while the well is full.
 
         Both draws run under a DrawGuard. The dispense-to-waste inside
         _empty_syringe_pump_on_full does not: it goes out the waste port, not
@@ -97,7 +129,9 @@ class MERFISHOperations():
         try:
             self.sp.reset_chain()
             self._empty_syringe_pump_on_full(volume)
-            self.sv.open_port(port)
+            self._select(port, well, volume)
+            if dip_cycles:
+                self.robot.agitate(dip_cycles)
             self.sp.extract(self.extract_port, volume, speed_code)
             self._guarded_execute(speed_code)
             if fill_tubing_with_port:
@@ -106,16 +140,17 @@ class MERFISHOperations():
                 self.sp.extract(self.extract_port, self.sv.get_tubing_fluid_amount_to_valve(fill_tubing_with_port), speed_code)
                 self._guarded_execute(speed_code)
 
-        except Cancelled:
+        except (Cancelled, ReservoirError):
             # The run ending on purpose -- an abort, or a flow fault raised on
-            # the draw with its sensor, band and measurement. The wrapper
+            # the draw with its sensor, band and measurement -- or the ledger
+            # refusing a draw, typed for the gate's replay. The wrapper
             # below would flatten either into an OperationError string and
             # report it as a failed step.
             raise
         except Exception as e:
             raise OperationError(f"Error in flow_reagent from port: {port}: {str(e)}")
 
-    def priming_or_clean_up(self, port, flow_rate, volume, use_ports=None):
+    def priming_or_clean_up(self, port, flow_rate, volume, use_ports=None, well=None, sipper_well=None):
         """
         Fill the tubings from reagents to selector valves with the corresponding reagents. Finally, fill the tubings before
         syringe pump with {volume} of the reagent from {port}.
@@ -135,7 +170,13 @@ class MERFISHOperations():
                 if use_ports is not None and i not in use_ports:
                     continue
                 volume_to_port = self.sv.get_tubing_fluid_amount_to_port(i)
-                self.sv.open_port(i)
+                if i == self.sipper_port:
+                    # The sipper's port is primed from a well: the configured
+                    # one for this step type, or the row's override (D7).
+                    default = self.priming_well if self._op == "priming" else self.clean_up_well
+                    self._select(i, sipper_well or default, volume_to_port)
+                else:
+                    self.sv.open_port(i)
                 self.sp.extract(self.extract_port, volume_to_port, speed_code)
                 self.sp.dispense_to_waste()
                 self.sp.execute()
@@ -145,10 +186,10 @@ class MERFISHOperations():
                 # than being noticed a second later.
                 self.run_control.delay(1)
 
-            self.sv.open_port(port)
+            self._select(port, well, volume)
             self.sp.extract(self.extract_port, volume, speed_code)
             self.sp.execute()
-        except Cancelled:
+        except (Cancelled, ReservoirError):
             raise
         except Exception as e:
             raise OperationError(f"Error in priming_or_clean_up: {str(e)}")

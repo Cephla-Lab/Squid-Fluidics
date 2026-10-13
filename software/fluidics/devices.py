@@ -19,6 +19,7 @@ import logging
 from functools import partial
 
 from .control._def import CMD_SET
+from .control.config import gantry
 from .control.controller import FluidController, FluidControllerSimulation
 from .control.disc_pump import DiscPump
 from .control.flow_sensor import start_flow_sensors
@@ -29,6 +30,11 @@ from .errors import RunControl
 from .experiment_worker import ExperimentWorker
 from .merfish_operations import MERFISHOperations
 from .open_chamber_operations import OpenChamberOperations
+from .reservoirs import ReservoirLedger, default_ledger_path, reservoir_definitions
+from .robot.labware import parse_ref
+from .robot.sipper import RobotSipper
+from .robot.stage import POLL_SECONDS, XYZStage
+from .vocabulary import sipper_vocabulary
 
 
 # The vocabulary of what a degraded bring-up reports, passed to on_issue as
@@ -80,7 +86,8 @@ class DeviceSet:
     """
 
     def __init__(self, config, controller, syringe_pump, selector_valves,
-                 disc_pump, temperature_controller, flow_sensors, run_control):
+                 disc_pump, temperature_controller, flow_sensors, run_control,
+                 robot=None, reservoirs=None):
         self.config = config
         self.run_control = run_control
         self.controller = controller
@@ -89,6 +96,8 @@ class DeviceSet:
         self.disc_pump = disc_pump
         self.temperature_controller = temperature_controller
         self.flow_sensors = flow_sensors
+        self.robot = robot                  # RobotSipper, or None without a gantry
+        self.reservoirs = reservoirs        # ReservoirLedger, or None when nothing is tracked
         self._closed = False
 
     def make_safe(self):
@@ -99,6 +108,8 @@ class DeviceSet:
         returns the exceptions raised, already logged, for the worker to
         report."""
         steps = [self.syringe_pump.halt]
+        if self.robot is not None:
+            steps.append(self.robot.halt)
         tc = self.temperature_controller
         if tc is not None:
             steps.extend(partial(tc.set_output_enabled, c, False)
@@ -107,7 +118,7 @@ class DeviceSet:
             steps.append(self.disc_pump.stop)
         return _run_shielded(steps, doing="making the rig safe")
 
-    def close(self, empty_syringe=None):
+    def close(self, empty_syringe=None, quiescent=True):
         """Release every device, tolerating failures along the way.
 
         Each step runs even if an earlier one fails: teardown is the one place
@@ -126,6 +137,11 @@ class DeviceSet:
         parking behaviour the GUI has always had on exit. Default (None)
         derives it from the application: Flow Cell empties, Open Chamber does
         not. The abort latch is cleared first so an aborted run still parks.
+
+        quiescent: False when a job is still running on these devices (the
+        facade's close after its wait timed out). Then nothing moves: the
+        abort latch stays set so the job cannot resume, the syringe is not
+        parked, the robot halts instead of retracting.
         """
         if self._closed:
             return []
@@ -142,15 +158,72 @@ class DeviceSet:
         if self.temperature_controller is not None:
             steps.append(self.temperature_controller.close)
         steps.extend(sensor.close for sensor in self.flow_sensors)
-        steps.append(self.run_control.reset)
-        steps.append(lambda: self.syringe_pump.close(empty_syringe))
+        if quiescent:
+            steps.append(self.run_control.reset)
+        if self.robot is not None:
+            # After the reset (a quiescent robot's park passes the gates),
+            # before the syringe parks (the sipper leaves its well dry-free
+            # first); the robot's own shielded steps are folded into this one.
+            steps.append(lambda: _raise_first(self.robot.close(quiescent=quiescent)))
+        steps.append(lambda: self.syringe_pump.close(empty_syringe if quiescent else False))
         steps.append(self.controller.close)
+        if self.reservoirs is not None:
+            steps.append(self.reservoirs.close)
 
         return _run_shielded(steps)
 
 
+def _raise_first(errors):
+    if errors:
+        raise errors[0]
+
+
+def _build_robot(config, simulation, run_control, instant):
+    """A connected, homed, retracted RobotSipper, or raise. Partial state is
+    torn down here (the stage's non-quiescent close), the way the
+    flow-sensor starter closes what it started."""
+    g = gantry(config)
+    vocabulary = sipper_vocabulary(config)
+    names = dict(g.axes)
+    if simulation:
+        from .robot.simulation import XYG321A_STROKES_MM, SimulatedService
+        strokes = {name: XYG321A_STROKES_MM.get(name, (0.0, 300.0)) for name in names.values()}
+        service = SimulatedService(names.values(), strokes, instant=instant)
+    else:
+        from .robot._driver import open_service          # the one import site
+        from .control.discovery import find_serial_port
+        port = g.port or find_serial_port(g.serial_number, "RS-485 adapter")
+        service, names = open_service(port, g.baudrate, names)
+    stage = XYZStage(service, names, g.travel_z_mm, g.xy_velocity_mm_s,
+                     g.z_velocity_mm_s, run_control,
+                     poll_seconds=0.0 if instant else POLL_SECONDS)
+    park_well = parse_ref(g.park_well, g.default_reservoir) if g.park_well else None
+    robot = RobotSipper(stage, vocabulary.placements(), g.default_reservoir,
+                        g.agitate_amplitude_mm, park_xy_mm=g.park_xy_mm, park_well=park_well)
+    try:
+        stage.connect()
+        robot.home()
+    except Exception:
+        stage.close(quiescent=False)
+        raise
+    return robot
+
+
+def _build_ledger(config, simulation, ledger_path):
+    """The ledger for everything this config tracks, or None when it tracks
+    nothing. A simulated rig gets a fresh in-memory ledger unless a path
+    is given (the tests', the CLI's --ledger)."""
+    definitions = reservoir_definitions(config)
+    if not definitions:
+        return None
+    if simulation and ledger_path is None:
+        return ReservoirLedger(definitions)
+    path = ledger_path or default_ledger_path(config.source_path or "in-memory")
+    return ReservoirLedger.load(path, definitions)
+
+
 def build_devices(config, simulation=False, on_issue=None, run_control=None,
-                  instant=False):
+                  instant=False, ledger_path=None):
     """Construct and start the full stack for `config`. Returns a DeviceSet.
 
     Mirrors what the two entry points did, once: construct controller, syringe
@@ -217,6 +290,8 @@ def build_devices(config, simulation=False, on_issue=None, run_control=None,
                      f"Failed to initialize temperature controller: {e}")
 
     flow_sensors = []
+    robot = None
+    reservoirs = None
     try:
         controller.begin()
         controller.send_command(CMD_SET.CLEAR)
@@ -231,9 +306,26 @@ def build_devices(config, simulation=False, on_issue=None, run_control=None,
             on_issue(ISSUE_FLOW_SENSORS, f"Failed to initialize flow sensors: {e}")
         _switch_off_inert_draw_protection(config, flow_sensors, on_issue)
 
+        # The robot before the valves: its own port, no Teensy dependence,
+        # and a wrong adapter fails before the valves spend their homing
+        # time. Not survivable: a sipper that cannot home cannot select.
+        if gantry(config) is not None:
+            robot = _build_robot(config, simulation, run_control, instant)
+
         selector_valves = SelectorValveSystem(controller, config, run_control)
         disc_pump = (DiscPump(controller, run_control)
                      if config.application == "Open Chamber" else None)
+
+        # The ledger last, inside the protected block: a file it cannot
+        # read or lock fails the launch with everything above released.
+        reservoirs = _build_ledger(config, simulation, ledger_path)
+        if reservoirs is not None:
+            reservoirs.attach(
+                syringe_pump, None if robot is None else gantry(config).selector_valve_port,
+                config.syringe_pump.extract_port, selector_valves.get_current_port,
+                (lambda: None) if robot is None else
+                (lambda: None if robot.current_well is None
+                 else f"{robot.current_well.reservoir}/{robot.current_well.well}"))
     except Exception:
         # A dead controller or a stuck valve is not survivable, but the pieces
         # already running must not outlive the failed launch: the controller's
@@ -246,13 +338,17 @@ def build_devices(config, simulation=False, on_issue=None, run_control=None,
         cleanups = [sensor.close for sensor in flow_sensors]
         if temperature_controller is not None:
             cleanups.append(temperature_controller.close)
+        if robot is not None:
+            cleanups.append(lambda: robot.close(quiescent=False))
+        if reservoirs is not None:
+            cleanups.append(reservoirs.close)
         cleanups.append(controller.close)
         _run_shielded(cleanups)
         raise
 
     return DeviceSet(config, controller, syringe_pump, selector_valves,
                      disc_pump, temperature_controller, flow_sensors,
-                     run_control)
+                     run_control, robot=robot, reservoirs=reservoirs)
 
 
 def _switch_off_inert_draw_protection(config, flow_sensors, on_issue):
@@ -292,7 +388,9 @@ def build_operations(config, devices, on_warning=None):
                                  devices.temperature_controller,
                                  devices.flow_sensors,
                                  on_warning=on_warning,
-                                 run_control=devices.run_control)
+                                 run_control=devices.run_control,
+                                 robot=devices.robot,
+                                 reservoirs=devices.reservoirs)
     if config.application == "Open Chamber":
         # Not handed the flow sensors: draw_protection_available says so to
         # everyone else. Arm them here and that predicate changes with it.

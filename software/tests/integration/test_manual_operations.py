@@ -142,3 +142,58 @@ class TestTheRunsControl:
         devices.run_control.reset()
         manual.extract(2, 300, 500)
         assert len(devices.syringe_pump.executed) == 1
+
+
+# --- the sipper's manual verbs (spec §9, Task B7) ---
+
+def test_a_manual_extract_through_the_sipper_needs_a_well(plate_sipper_config, built, tmp_path):
+    """Review focus 4: the manual tab cannot pull air through the sipper."""
+    devices = built(plate_sipper_config, simulation=True, instant=True,
+                    ledger_path=tmp_path / "ledger.json")
+    devices.reservoirs.refill("all")
+    manual = ManualOperations(devices)
+    manual.open_port(1)
+    with pytest.raises(RuntimeError, match="not in a well"):
+        manual.extract(2, 100, 1000)
+    manual.go_to_well("ssct/A1")
+    manual.extract(2, 100, 1000)            # fine with the tip in a well
+    manual.retract()
+    with pytest.raises(RuntimeError, match="not in a well"):
+        manual.extract(2, 100, 1000)
+
+
+def test_robot_verbs_refuse_on_a_rig_without_a_robot(flow_cell_config, built):
+    manual = ManualOperations(built(flow_cell_config, simulation=True, instant=True))
+    with pytest.raises(RuntimeError, match="no robot"):
+        manual.retract()
+
+
+def test_teaching_changes_the_live_placement_and_the_config_together(plate_sipper_config, built):
+    """Codex finding 11: a taught A1 is where the next go-to-well goes,
+    and what save_config will write."""
+    from fluidics.control.config import gantry
+    from fluidics.errors import StageError
+    devices = built(plate_sipper_config, simulation=True, instant=True)
+    manual = ManualOperations(devices)
+    manual.teach_a1("probes", (13.0, 2.0))
+    manual.teach_dip("probes", 49.0)
+    manual.go_to_well("probes/A1")
+    assert devices.robot.position() == (13.0, 2.0, 49.0)
+    assert tuple(gantry(plate_sipper_config).reservoirs[1].a1_xy_mm) == (13.0, 2.0)
+    with pytest.raises(StageError, match="out of reach"):
+        manual.teach_a1("probes", (150.0, 2.0))          # row H would sit at x = 213
+    assert tuple(gantry(plate_sipper_config).reservoirs[1].a1_xy_mm) == (13.0, 2.0), "refused: nothing changed"
+    with pytest.raises(ValueError, match="agitation"):
+        manual.teach_dip("probes", 4.0)
+    manual.teach_travel(2.0)
+    assert devices.robot._stage.travel_z_mm == 2.0
+    assert gantry(plate_sipper_config).travel_z_mm == 2.0
+
+
+def test_jog_refuses_xy_below_travel_height(plate_sipper_config, built):
+    from fluidics.errors import StageError
+    devices = built(plate_sipper_config, simulation=True, instant=True)
+    manual = ManualOperations(devices)
+    manual.jog("z", 10.0)
+    with pytest.raises(StageError, match="travel height"):
+        manual.jog("x", 1.0)

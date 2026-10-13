@@ -47,11 +47,14 @@ class FluidicsSystem:
                                   self.warnings, directory=report_dir)
 
     @classmethod
-    def build(cls, config, simulation=False, on_issue=None, report_dir=None):
+    def build(cls, config, simulation=False, on_issue=None, report_dir=None, ledger_path=None):
         """Bring the rig up for `config` and assemble it. What build_devices
         reports through on_issue (a degraded bring-up) passes straight
-        through; what it raises (no controller, no pump) raises."""
-        return cls(config, build_devices(config, simulation, on_issue=on_issue),
+        through; what it raises (no controller, no pump) raises.
+        ledger_path: where the reservoir ledger lives (None: beside the run
+        reports, named after the config)."""
+        return cls(config, build_devices(config, simulation, on_issue=on_issue,
+                                         ledger_path=ledger_path),
                    report_dir=report_dir)
 
     # --- the one job ---
@@ -117,6 +120,7 @@ class FluidicsSystem:
         thread still driving them. Returns the exceptions the close raised,
         as DeviceSet.close does; safe to call twice.
         """
+        quiescent = True
         try:
             if self.session.busy:
                 what = self.session.kind
@@ -125,10 +129,12 @@ class FluidicsSystem:
                 if not self.session.wait(timeout):
                     _logger.error("The %s did not stop within %s s; closing the devices under it.",
                                   what, timeout)
+                    quiescent = False
         finally:
             # Unconditional: a second Ctrl+C lands in the wait above, and the
             # ports must still be released -- the exception goes on afterwards.
-            errors = self.devices.close()
+            # Under a job that did not stop, the devices make no moves.
+            errors = self.devices.close(quiescent=quiescent and not self.session.busy)
         return errors
 
     def __enter__(self):
