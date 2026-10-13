@@ -158,3 +158,38 @@ def test_a_quiescent_close_on_an_unhomed_stage_makes_no_move_and_reports_nothing
                         agitate_amplitude_mm=5.0, park_well=WellRef("ssct", "H11"))
     assert robot.close(quiescent=True) == []
     assert "move_to" not in [verb for verb, _ in service.log]
+
+
+def test_a_plate_whose_agitation_stroke_reaches_travel_height_is_refused():
+    """go_to_well vouches for a well at dip depth and agitate lifts the tip
+    by the amplitude: a dip no more than an amplitude below travel height
+    would agitate in air. Refused when the sipper is built and by
+    set_placement, naming the plate; the old placement and the witness
+    stay."""
+    control = RunControl()
+    service = SimulatedService(AXES.values(), STROKES, instant=True)
+    stage = XYZStage(service, AXES, 10.0, 50.0, 20.0, control)
+    at_travel = PlatePlacement((12.0, 1.5), 15.0, G96, column_axis="+y", row_axis="+x")   # 15 - 5 = 10
+    with pytest.raises(StageError, match="plate 'probes'.*15.00 mm.*5 mm agitation.*10.00 mm"):
+        RobotSipper(stage, {"probes": at_travel}, "probes", 5.0)
+    stage.connect()
+    stage.home()
+    robot = RobotSipper(stage, {"probes": PROBES}, "probes", 5.0)
+    robot.go_to_well(WellRef("probes", "A1"))
+    for dip in (15.0, 12.0, 8.0):            # at travel height, inside it, above it
+        shallow = PlatePlacement((12.0, 1.5), dip, G96, column_axis="+y", row_axis="+x")
+        with pytest.raises(StageError, match="plate 'probes'.*agitation"):
+            robot.set_placement("probes", shallow)
+    assert robot.placements["probes"] is PROBES
+    assert robot.current_well == WellRef("probes", "A1"), "a refused teach changes nothing"
+    robot.set_placement("probes", PlatePlacement((12.0, 1.5), 15.5, G96,
+                                                 column_axis="+y", row_axis="+x"))
+
+
+def test_check_travel_refuses_a_height_a_plates_agitation_stroke_reaches(sipper):
+    robot, service = sipper
+    before = len(service.log)
+    with pytest.raises(StageError, match="plate 'probes'.*50.00 mm.*5 mm agitation.*45.00 mm"):
+        robot.check_travel(45.0)              # probes: 50 - 5 = 45
+    robot.check_travel(44.5)
+    assert len(service.log) == before, "a check makes no move"

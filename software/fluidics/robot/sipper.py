@@ -7,7 +7,10 @@ so a draw interrupted there would start from the wrong depth); a park in
 the park well sets it, since the tip is wet there. Every plate's corners
 are checked against the stage's strokes when the sipper is built and when
 a placement is taught, so a plate the stage cannot reach fails bring-up
-with the plate and the well named, not a run hours in.
+with the plate and the well named, not a run hours in. So is its
+agitation stroke against travel height (the config's rule, here too so
+the verb that sets the witness never vouches for a tip in air), and a new
+travel height against every plate (check_travel).
 """
 
 from ..errors import StageError
@@ -36,8 +39,10 @@ class RobotSipper:
 
     def set_placement(self, name, placement):
         """Install (or replace, after teaching) a plate, once every corner
-        of it is within reach. Clears the witness: the taught depth or
-        corner may have moved the wells."""
+        of it is within reach and its agitation stroke stays below travel
+        height. Clears the witness: the taught depth or corner may have
+        moved the wells. A refused placement changes nothing."""
+        self._check_agitation(name, placement, self._stage.travel_z_mm)
         for well, (x, y) in placement.corners():
             try:
                 self._stage.check_reach(x, y, placement.dip_z_mm)
@@ -45,6 +50,23 @@ class RobotSipper:
                 raise StageError(f"plate {name!r}: well {well} is out of reach: {e}") from None
         self._placements[name] = placement
         self.current_well = None
+
+    def check_travel(self, travel_z_mm):
+        """StageError naming the first installed plate whose agitation
+        stroke would reach `travel_z_mm`; no motion. A new travel height
+        is checked here before it is set."""
+        for name, placement in self._placements.items():
+            self._check_agitation(name, placement, travel_z_mm)
+
+    def _check_agitation(self, name, placement, travel_z_mm):
+        """Z grows toward the deck: the top of the stroke, dip less the
+        amplitude, must be deeper than travel height, or agitate (and a
+        draw after it) runs with the tip in air."""
+        if not placement.dip_z_mm - self.agitate_amplitude_mm > travel_z_mm:
+            raise StageError(f"plate {name!r}: a dip depth of {placement.dip_z_mm:.2f} mm leaves "
+                             f"no room for the {self.agitate_amplitude_mm:g} mm agitation stroke "
+                             f"below travel height {travel_z_mm:.2f} mm (the tip would agitate "
+                             "in air)")
 
     def _placement(self, ref):
         try:

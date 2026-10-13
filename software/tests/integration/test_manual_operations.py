@@ -212,3 +212,37 @@ def test_teach_travel_refuses_a_height_homing_may_park_below(plate_sipper_config
     assert devices.robot._stage.travel_z_mm == 1.0
     assert gantry(plate_sipper_config).travel_z_mm == 1.0
     manual.teach_travel(MIN_TRAVEL_Z_MM)          # the floor itself is a travel height
+
+
+def test_teach_travel_refuses_a_height_a_plates_agitation_would_reach_and_changes_nothing(
+        plate_sipper_config, built):
+    """The config's rule (travel above every dip less the amplitude), with
+    the robot in a well: refused, the robot, its witness and the config
+    as they were."""
+    from fluidics.control.config import gantry
+    devices = built(plate_sipper_config, simulation=True, instant=True)
+    manual = ManualOperations(devices)
+    manual.go_to_well("ssct/A1")
+    with pytest.raises(ValueError, match="probes's agitation stroke"):
+        manual.teach_travel(45.0)                 # probes: dip 50 less 5
+    assert devices.robot._stage.travel_z_mm == 1.0
+    assert gantry(plate_sipper_config).travel_z_mm == 1.0
+    assert devices.robot.current_well is not None
+
+
+def test_teach_travel_rechecks_the_sippers_installed_placements(plate_sipper_config, built):
+    """The live placements are what go_to_well and agitate use: a plate
+    installed on the sipper shallower than the config has it (a library
+    caller's set_placement) is checked against the new travel height too,
+    before anything changes."""
+    from fluidics.control.config import gantry
+    from fluidics.errors import StageError
+    devices = built(plate_sipper_config, simulation=True, instant=True)
+    manual = ManualOperations(devices)
+    shallow = manual._vocabulary.placement("probes")
+    shallow.dip_z_mm = 20.0                       # agitates up to 15 mm
+    devices.robot.set_placement("probes", shallow)
+    with pytest.raises(StageError, match="plate 'probes'.*agitation"):
+        manual.teach_travel(16.0)                 # fine by the config (dip 50), not by the sipper
+    assert devices.robot._stage.travel_z_mm == 1.0
+    assert gantry(plate_sipper_config).travel_z_mm == 1.0

@@ -193,6 +193,8 @@ class ManualOperations:
                 raise ValueError(f"a travel height of {z:.2f} mm is not above {r.name}'s "
                                  f"agitation stroke (dip {r.dip_z_mm:.2f} less "
                                  f"{self._gantry.agitate_amplitude_mm:g})")
+        # The live placements too: they are what go_to_well and agitate use.
+        self.robot.check_travel(z)
         self.robot._stage.check_reach(z=z)
         self.robot._stage.travel_z_mm = z
         self.robot.current_well = None
