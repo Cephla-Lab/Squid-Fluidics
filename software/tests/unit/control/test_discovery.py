@@ -11,10 +11,15 @@ routes through it -- an unplugged device must read as an operator problem
 
 from types import SimpleNamespace
 
+import errno
+
 import pytest
+import serial
 
 from fluidics.control.controller import FluidController
-from fluidics.control.discovery import DeviceNotFoundError, find_serial_port
+from fluidics.errors import DeviceError
+from fluidics.control.discovery import (DeviceNotFoundError, find_serial_port,
+                                        open_serial_port)
 from fluidics.control.syringe_pump import SyringePump
 from fluidics.control.temperature_controller import TCMController
 
@@ -79,6 +84,58 @@ class TestDriversRouteThroughIt:
 def test_a_missing_device_is_a_device_error():
     """One family, one bring-up dialog: the entry points catch DeviceError
     and get the missing-device case with it."""
-    from fluidics.control.discovery import DeviceNotFoundError
-    from fluidics.errors import DeviceError
     assert issubclass(DeviceNotFoundError, DeviceError)
+
+
+class TestThePortIsClaimed:
+    """Two programs on one port split the frames between them and both get
+    corrupt data, so the second one is refused instead."""
+
+    def _serial_that_cannot_lock(self, monkeypatch):
+        def refuse(port, exclusive=None, **kwargs):
+            raise serial.SerialException(
+                11, f"Could not exclusively lock port {port}: [Errno 11] "
+                    "Resource temporarily unavailable")
+        monkeypatch.setattr("fluidics.control.discovery.serial.Serial", refuse)
+
+    def test_the_port_is_opened_for_this_process_alone(self, monkeypatch):
+        seen = {}
+        monkeypatch.setattr("fluidics.control.discovery.serial.Serial",
+                            lambda port, **kwargs: seen.update(kwargs) or object())
+        open_serial_port("/dev/ttyFAKE", "Widget", baudrate=9600)
+        assert seen["exclusive"] is True
+
+    def test_a_port_someone_else_holds_names_the_remedy(self, monkeypatch):
+        self._serial_that_cannot_lock(monkeypatch)
+        with pytest.raises(DeviceError, match="already open in another program"):
+            open_serial_port("/dev/ttyFAKE", "Widget", baudrate=9600)
+
+    def test_a_lock_failure_that_is_not_contention_keeps_its_own_error(
+            self, monkeypatch):
+        """pyserial prefixes every flock failure with "Could not exclusively
+        lock" -- ENOLCK on a filesystem that cannot lock, EINTR from a
+        signal. Reading those as "another program has it" would send the
+        operator hunting for a process that does not exist."""
+        def refuse(port, exclusive=None, **kwargs):
+            raise serial.SerialException(
+                errno.ENOLCK, f"Could not exclusively lock port {port}: "
+                              "[Errno 37] No locks available")
+        monkeypatch.setattr("fluidics.control.discovery.serial.Serial", refuse)
+        with pytest.raises(serial.SerialException, match="No locks available"):
+            open_serial_port("/dev/ttyFAKE", "Widget", baudrate=9600)
+
+    def test_the_mcu_goes_through_it(self, monkeypatch):
+        fake_ports(monkeypatch, [("/dev/ttyACM9", "AAA")])
+        self._serial_that_cannot_lock(monkeypatch)
+        controller = FluidController("AAA")
+        try:
+            with pytest.raises(DeviceError, match="Fluid controller"):
+                controller.begin()
+        finally:
+            controller.close()
+
+    def test_the_temperature_controller_goes_through_it(self, monkeypatch):
+        fake_ports(monkeypatch, [("/dev/ttyUSB9", "BBB")])
+        self._serial_that_cannot_lock(monkeypatch)
+        with pytest.raises(DeviceError, match="Temperature controller"):
+            TCMController(sn="BBB")

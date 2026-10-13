@@ -9,11 +9,14 @@ failure -- a cable, a renumbered rig, a stale config -- deserved better
 than a traceback, so the search and its error live here, once.
 """
 
+import errno
+
+import serial
 from serial.tools import list_ports
 
 # Re-exported: it was born here, and the drivers and entry points import it
 # from here; its family (DeviceError) lives in fluidics.errors now.
-from ..errors import DeviceNotFoundError  # noqa: F401
+from ..errors import DeviceError, DeviceNotFoundError  # noqa: F401
 
 
 def find_serial_port(serial_number, device_name):
@@ -35,3 +38,27 @@ def find_serial_port(serial_number, device_name):
         f"Serial devices present: {present}. Check the serial number in "
         f"the config file and the USB connection."
     )
+
+
+def open_serial_port(port, device_name, **kwargs):
+    """Open `port` for this process alone, refusing it if someone else has it.
+
+    Two programs on one port split the frames between them and both get
+    corrupt data. The lock is advisory, so it stops an opener that also
+    asks for it -- every open this package makes -- and not an unrelated
+    program. What it gives the operator is the sentence, in place of
+    pyserial's errno 11.
+    """
+    try:
+        return serial.Serial(port, exclusive=True, **kwargs)
+    except serial.SerialException as e:
+        # Only contention reads as "someone else has it": pyserial prefixes
+        # every flock failure alike (ENOLCK, EINTR), and errno 11 can also
+        # reach us from a plain open. Both halves have to agree.
+        if e.errno != errno.EWOULDBLOCK or "exclusively lock" not in str(e):
+            raise
+        raise DeviceError(
+            f"{device_name} on {port} is already open in another program. "
+            f"Close it and try again -- two programs on one port both get "
+            f"corrupt data."
+        ) from e
