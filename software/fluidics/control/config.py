@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Dict, List, Literal, Optional
+import re
+from typing import Dict, List, Literal, Optional, Tuple
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
@@ -59,6 +60,31 @@ class SelectorValvesConfig(_StrictModel):
     tubing_fluid_amount_to_valve_ul: Dict[int, int]
     name_mapping: Optional[Dict[str, str]] = None
     tubing_fluid_amount_ul: Dict[str, int]
+    # Optional per port: a bulk bottle the reservoir ledger tracks (spec D6)
+    # and what its tube end cannot reach. A port without an entry is not
+    # tracked, which is how every rig behaved before.
+    loaded_volume_ul: Optional[Dict[str, int]] = None
+    residual_volume_ul: Optional[Dict[str, int]] = None
+
+    @model_validator(mode='after')
+    def _check_tracked_bottles(self):
+        """A tracked bottle hangs on a plumbed port, holds more than its
+        tube end cannot reach, and a residual names a tracked bottle."""
+        loaded = self.loaded_volume_ul or {}
+        residual = self.residual_volume_ul or {}
+        for key in residual:
+            if key not in loaded:
+                raise ValueError(f"residual_volume_ul.{key}: no loaded_volume_ul for it")
+        for key, volume in loaded.items():
+            if not self.tubing_fluid_amount_ul.get(key):
+                raise ValueError(f"loaded_volume_ul.{key}: not a plumbed port "
+                                 "(no tubing_fluid_amount_ul entry)")
+            left = residual.get(key, 0)
+            if left < 0:
+                raise ValueError(f"residual_volume_ul.{key} must not be negative")
+            if volume <= left:
+                raise ValueError(f"loaded_volume_ul.{key} ({volume}) must exceed its residual ({left})")
+        return self
 
     @model_validator(mode='after')
     def _check_valve_id_consistency(self):
@@ -92,7 +118,8 @@ class SelectorValvesConfig(_StrictModel):
         """
         reach = sum(self.number_of_ports[v] - 1 for v in self.valve_ids) + 1
         allowed = {f"port_{port}" for port in range(1, reach + 1)}
-        for field_name in ('tubing_fluid_amount_ul', 'name_mapping'):
+        for field_name in ('tubing_fluid_amount_ul', 'name_mapping',
+                           'loaded_volume_ul', 'residual_volume_ul'):
             keys = getattr(self, field_name) or {}
             unknown = sorted(set(keys) - allowed)
             if unknown:
@@ -104,9 +131,107 @@ class SelectorValvesConfig(_StrictModel):
         return self
 
 
+PLATE_AXES = ("+x", "-x", "+y", "-y")
+
+
+class ReservoirConfig(_StrictModel):
+    """One plate the sipper serves (spec §3): where A1 was taught, how deep
+    the tip dips, which stage axis the columns and the rows run along, and
+    what every well holds."""
+    name: str
+    type: Literal["plate"]
+    number_of_wells: Literal[96]
+    well_spacing: int = Field(default=1, ge=1)       # pitch multiplier; 1 = every well
+    a1_xy_mm: Tuple[float, float]
+    dip_z_mm: float
+    # No default: the only deck runs its columns along +y and its rows along
+    # +x, so a block that leaves these out is refused at load rather than
+    # placed on a guess the corner reach check cannot catch.
+    column_axis: Literal["+x", "-x", "+y", "-y"]   # columns 1..12 run along this
+    row_axis: Literal["+x", "-x", "+y", "-y"]      # rows A..H run along this
+    loaded_ul: int = Field(gt=0)
+    residual_ul: int = Field(ge=0)
+    well_names: Optional[Dict[str, str]] = None
+    loaded_ul_by_well: Optional[Dict[str, int]] = None
+
+    @model_validator(mode='after')
+    def _check_wells_and_volumes(self):
+        from ..robot.labware import PlateGeometry
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", self.name):
+            raise ValueError(f"reservoir name {self.name!r}: letters, digits, _ and - only")
+        if self.name == "all" or re.fullmatch(r"port_\d+", self.name):
+            raise ValueError(f"reservoir name {self.name!r} is reserved (all, port_N)")
+        if self.column_axis[1] == self.row_axis[1]:
+            raise ValueError(f"{self.name}: column_axis and row_axis must be perpendicular")
+        geometry = PlateGeometry.from_well_count(self.number_of_wells)
+        for field_name in ('well_names', 'loaded_ul_by_well'):
+            for well in (getattr(self, field_name) or {}):
+                if not geometry.is_well(well):
+                    raise ValueError(f"{self.name}.{field_name}: {well} is not a well on this plate")
+        if self.loaded_ul <= self.residual_ul:
+            raise ValueError(f"{self.name}: loaded_ul must exceed residual_ul")
+        for well, loaded in (self.loaded_ul_by_well or {}).items():
+            if loaded <= self.residual_ul:
+                raise ValueError(f"{self.name}.loaded_ul_by_well.{well} must exceed residual_ul")
+        return self
+
+
+class GantryConfig(_StrictModel):
+    """The XYZ robot that carries the sipper (spec §3), keyed as You Yan
+    wrote it: `reagent_selection.nimotion_gantry_system`."""
+    selector_valve_port: int = Field(ge=1)
+    serial_number: Optional[str] = None
+    port: Optional[str] = None
+    baudrate: int = 115200
+    axes: Dict[Literal["x", "y", "z"], str]
+    travel_z_mm: float
+    xy_velocity_mm_s: float = Field(gt=0)
+    z_velocity_mm_s: float = Field(gt=0)
+    park_xy_mm: Optional[Tuple[float, float]] = None
+    default_reservoir: str
+    reservoirs: Dict[int, ReservoirConfig]
+    priming_well: str
+    clean_up_well: str
+    park_well: Optional[str] = None
+    agitate_amplitude_mm: float = Field(gt=0)
+
+    @model_validator(mode='after')
+    def _check_names_wells_and_strokes(self):
+        from ..robot.labware import PlateGeometry, parse_ref
+        if (self.serial_number is None) == (self.port is None):
+            raise ValueError("nimotion_gantry_system: give exactly one of serial_number or port")
+        if set(self.axes) != {"x", "y", "z"}:
+            raise ValueError("nimotion_gantry_system.axes needs x, y and z")
+        if len(set(self.axes.values())) != 3:
+            raise ValueError("nimotion_gantry_system.axes must map x, y and z to three distinct axes")
+        names = [r.name for r in self.reservoirs.values()]
+        if len(set(names)) != len(names):
+            raise ValueError("reservoir names must be unique")
+        by_name = {r.name: r for r in self.reservoirs.values()}
+        if self.default_reservoir not in by_name:
+            raise ValueError(f"default_reservoir {self.default_reservoir!r} names no reservoir")
+        for field_name in ('priming_well', 'clean_up_well', 'park_well'):
+            text = getattr(self, field_name)
+            if text is None:
+                continue
+            ref = parse_ref(text, self.default_reservoir)
+            if ref.reservoir not in by_name:
+                raise ValueError(f"{field_name}: no reservoir named {ref.reservoir!r}")
+            if not PlateGeometry.from_well_count(by_name[ref.reservoir].number_of_wells).is_well(ref.well):
+                raise ValueError(f"{field_name}: {ref.well} is not a well on {ref.reservoir}")
+        for r in by_name.values():
+            if self.travel_z_mm >= r.dip_z_mm - self.agitate_amplitude_mm:
+                raise ValueError(
+                    f"{r.name}: the agitation stroke must stay in the well: travel_z_mm "
+                    f"({self.travel_z_mm}) must be below dip_z_mm - agitate_amplitude_mm "
+                    f"({r.dip_z_mm} - {self.agitate_amplitude_mm})")
+        return self
+
+
 class ReagentSelectionConfig(_StrictModel):
     selector_valves: SelectorValvesConfig
     common_tubing_fluid_amount_ul: int
+    nimotion_gantry_system: Optional[GantryConfig] = None
 
 
 class SampleSelectionInletConfig(_StrictModel):
@@ -194,6 +319,22 @@ class FluidicsConfig(_StrictModel):
             )
         return self
 
+    @model_validator(mode='after')
+    def _check_gantry(self):
+        g = self.reagent_selection.nimotion_gantry_system
+        if g is None:
+            return self
+        if self.application != "Flow Cell":
+            raise ValueError("nimotion_gantry_system is only supported with the Flow Cell application")
+        if g.selector_valve_port not in available_ports(self):
+            raise ValueError(
+                f"selector_valve_port {g.selector_valve_port} is not a plumbed port: give it a "
+                f"tubing_fluid_amount_ul entry (the sipper's tip-to-valve volume)")
+        if port_key(g.selector_valve_port) in (self.reagent_selection.selector_valves.loaded_volume_ul or {}):
+            raise ValueError(f"selector_valve_port {g.selector_valve_port} is the sipper's: its wells "
+                             "are tracked by the plates, not by loaded_volume_ul")
+        return self
+
 
 # --- Legacy JSON to v2.0 YAML Conversion ---
 
@@ -273,6 +414,12 @@ def port_key(port: int) -> str:
     """The name_mapping key for fluidic port `port` -- the one spelling,
     read by the valve system and written by the GUI's rename dialog."""
     return f"port_{port}"
+
+
+def gantry(config):
+    """The gantry block, or None on a rig without one -- the one spelling
+    of where it lives."""
+    return config.reagent_selection.nimotion_gantry_system
 
 
 def save_config(config: FluidicsConfig, config_path: str = None) -> str:
