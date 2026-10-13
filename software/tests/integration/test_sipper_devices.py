@@ -5,7 +5,7 @@ from fluidics.devices import build_devices
 from fluidics.errors import DeviceError, ReservoirInUse
 
 
-def test_a_gantry_rig_builds_a_homed_parked_sipper_and_a_declared_ledger(plate_sipper_config, built, tmp_path):
+def test_a_gantry_rig_builds_a_homed_retracted_sipper_and_a_declared_ledger(plate_sipper_config, built, tmp_path):
     devices = built(plate_sipper_config, simulation=True, instant=True,
                     ledger_path=tmp_path / "ledger.json")
     assert devices.robot is not None and devices.robot.current_well is None

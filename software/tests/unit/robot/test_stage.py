@@ -345,7 +345,7 @@ class TestClose:
         assert verbs[-6:] == ["move_to", "engage_brake", "disable", "disable", "disable", "disconnect"]
 
     def test_a_quiescent_close_told_not_to_retract_makes_no_move_and_still_shuts_down(self, rig):
-        """What the sipper's close asks for after a park: the tip stays put."""
+        """What the sipper's close asks for: the tip stays put in its well."""
         stage, service, _ = rig
         stage.move_z(30.0)
         before = len(service.log)

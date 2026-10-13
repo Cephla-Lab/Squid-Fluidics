@@ -16,7 +16,7 @@ from qtpy.QtWidgets import QSizePolicy, QWidget
 from fluidics.robot.labware import AXIS_DIRECTIONS, WellRef
 
 # The colors: the named wells, and the tip in each of its states.
-ROLE_COLORS = {"priming": QColor("#4a90e2"), "clean-up": QColor("#9b9b9b"), "park": QColor("#3cb371")}
+ROLE_COLORS = {"priming": QColor("#4a90e2"), "clean-up": QColor("#9b9b9b")}
 TIP_RETRACTED = QColor("#2e8b57")
 TIP_LOWERED = QColor("#d0021b")
 TIP_UNKNOWN = QColor("#e0a800")
@@ -24,6 +24,7 @@ TIP_UNKNOWN = QColor("#e0a800")
 WELL_RADIUS_PITCH = 0.36       # a 6.4 mm well on a 9 mm pitch
 HIT_RADIUS_PITCH = 0.45        # a click this close to a centre is that well; farther is nothing
 TEXT_BAND_PX = 20              # the state line above the plates, the legend below
+TIP_RADIUS_PX = 3.0            # the tip's dot: small, so the well under it stays visible
 
 
 class DeckMapWidget(QWidget):
@@ -54,7 +55,7 @@ class DeckMapWidget(QWidget):
         self.update()
 
     def setNamedWells(self, named):
-        """{role: WellRef}: "priming", "clean-up", "park" (any may be absent)."""
+        """{role: WellRef}: "priming", "clean-up" (either may be absent)."""
         roles = {}
         for role, ref in named.items():
             if ref is not None:
@@ -239,7 +240,7 @@ class DeckMapWidget(QWidget):
         px, py = self.pixel(x, y)
         painter.setPen(QPen(QColor("#111"), 1))
         painter.setBrush(color)
-        painter.drawEllipse(QPointF(px, py), 5, 5)
+        painter.drawEllipse(QPointF(px, py), TIP_RADIUS_PX, TIP_RADIUS_PX)
 
     def _paintLegend(self, painter):
         entries = [(label, ROLE_COLORS[label.split(" well")[0].split(" + ")[0]]) for label in self.legend()]

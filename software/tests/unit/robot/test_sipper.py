@@ -15,14 +15,14 @@ PROBES = PlatePlacement((12.0, 1.5), 50.0, G96, column_axis="+y", row_axis="+x")
 SSCT = PlatePlacement((102.5, 1.5), 52.0, G96, column_axis="+y", row_axis="+x")
 
 
-def build(instant=True, park_xy_mm=None):
+def build(instant=True):
     control = RunControl()
     service = SimulatedService(AXES.values(), STROKES, instant=instant)
     stage = XYZStage(service, AXES, 0.0, 50.0, 20.0, control)
     stage.connect()
     stage.home()
     robot = RobotSipper(stage, {"probes": PROBES, "ssct": SSCT}, "probes",
-                        agitate_amplitude_mm=5.0, park_xy_mm=park_xy_mm)
+                        agitate_amplitude_mm=5.0)
     return robot, service, control
 
 
@@ -80,35 +80,17 @@ def test_agitate_needs_a_current_well(sipper):
         robot.agitate(1)
 
 
-def test_retract_park_halt_and_home_clear_the_current_well(sipper):
+def test_retract_halt_and_home_clear_the_current_well(sipper):
     robot, _ = sipper
     robot.go_to_well(WellRef("probes", "A1"))
     robot.retract()
     assert robot.current_well is None
     robot.go_to_well(WellRef("probes", "A1"))
-    robot.park()
-    assert robot.current_well is None
     robot.halt()
     assert robot.current_well is None
     robot.go_to_well(WellRef("probes", "A1"))
     robot.home()
     assert robot.current_well is None
-
-
-def test_park_is_a_dry_park_retract_then_the_park_position_if_there_is_one():
-    """No park well: the tip's resting place between steps is whichever
-    well the last step used. Park lifts it, and moves it only to a
-    configured park_xy_mm (You Yan's shape), else it stays over the well."""
-    robot, service, _ = build()
-    robot.go_to_well(WellRef("probes", "A1"))
-    before = len(service.log)
-    robot.park()
-    assert [axis for verb, axis in service.log[before:] if verb == "move_to"] == ["Z3"]
-    assert robot.position() == (12.0, 1.5, 0.0) and robot.current_well is None
-    robot, service, _ = build(park_xy_mm=(5.0, 5.0))
-    robot.go_to_well(WellRef("probes", "A1"))
-    robot.park()
-    assert robot.position() == (5.0, 5.0, 0.0) and robot.current_well is None
 
 
 def test_with_lower_tip_off_go_to_well_stops_over_the_well_and_sets_no_witness(sipper):
@@ -159,7 +141,7 @@ def test_teaching_replaces_the_live_placement_and_clears_the_witness(sipper):
 def test_a_quiescent_close_makes_no_move_and_leaves_the_tip_in_its_well_with_no_witness(sipper):
     """The tip waits wet in the last step's well between sessions (the
     lead screw holds Z unpowered; the next launch homes upward first), so
-    the close neither retracts nor parks; a closed robot vouches for no
+    the close does not retract; a closed robot vouches for no
     well."""
     robot, service = sipper
     robot.go_to_well(WellRef("probes", "A1"))

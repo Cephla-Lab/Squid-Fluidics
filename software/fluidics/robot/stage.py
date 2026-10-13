@@ -124,7 +124,7 @@ class XYZStage:
         """Quiescent: retract, brake, disable, disconnect. Under a job that
         did not stop in time: no moves at all, a halt instead. Returns the
         exceptions the steps raised, each shielded.
-        retract=False: a quiescent close makes no move (the sipper parked).
+        retract=False: a quiescent close makes no move (the tip rests in its well).
         Threading: that halt runs on the closer's thread while the stuck job
         may still poll this service; the vendored driver serializes each
         Modbus request with its response (the client's RLock in

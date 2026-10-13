@@ -191,7 +191,6 @@ class GantryConfig(_StrictModel):
     travel_z_mm: float = Field(ge=MIN_TRAVEL_Z_MM)      # homing parks Z up to 0.5 mm past 0
     xy_velocity_mm_s: float = Field(gt=0)
     z_velocity_mm_s: float = Field(gt=0)
-    park_xy_mm: Optional[Tuple[float, float]] = None
     default_reservoir: str
     reservoirs: Dict[int, ReservoirConfig]
     priming_well: str

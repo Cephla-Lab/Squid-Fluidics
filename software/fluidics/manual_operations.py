@@ -111,10 +111,6 @@ class ManualOperations:
         self._need_robot()
         self.robot.retract()
 
-    def park(self):
-        self._need_robot()
-        self.robot.park()
-
     def set_lower_tip(self, enabled):
         """"Do not lower tip" off (True) or on (False): with it on,
         go_to_well ends retracted over the well (no dip, no witness) and a

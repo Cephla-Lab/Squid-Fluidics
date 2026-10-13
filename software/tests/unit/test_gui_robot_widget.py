@@ -20,7 +20,7 @@ def widget(qapp, plate_sipper_config, tmp_path):
     w = RobotControlWidget(plate_sipper_config, system)
     yield w, system
     # Destroyed, not only closed: its subscriptions come off the system's
-    # channels on `destroyed`, so the close's park below posts into nothing.
+    # channels on `destroyed`, so the close below posts into nothing.
     w.deleteLater()
     QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
     assert system.close() == []

@@ -109,7 +109,6 @@ class RobotControlWidget(PostsToQtThread, QWidget):
         row.addWidget(self.primedLabel)
         self.homeButton = self._button(row, "Home", lambda: self._run(self.manual.home_robot))
         self.retractButton = self._button(row, "Retract", lambda: self._run(self.manual.retract))
-        self.parkButton = self._button(row, "Park", lambda: self._run(self.manual.park))
         self.resetFaultButton = self._button(row, "Reset fault", lambda: self._run(self.manual.reset_robot_faults))
         self.stopButton = QPushButton("STOP")
         connect_click(self.stopButton, self.stopMove)

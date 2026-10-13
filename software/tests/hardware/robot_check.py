@@ -1,7 +1,7 @@
 """Bench check for the sipper robot: python -m tests.hardware.robot_check --config ../config.yaml
 
 Home (watch Z go UP first), jog each axis, teach A1 and the dip depth on
-each plate, visit every corner, agitate in a full well, park. Run with the
+each plate, visit every corner, agitate in a full well, retract. Run with the
 deck clear of anything but the plates. Afterwards de-energize the Z drive
 and confirm the stage holds with the sipper and tubing mounted: Z3 has no
 brake and relies on its lead screw (nm-servo PR #6). Expect the Y stroke
@@ -17,8 +17,7 @@ TOLERANCE_MM (0.05 mm) off its target, while the driver's own wait,
 which the stage does not use, allows 1000 counts (0.076 mm), so settle
 errors between the two would fail moves the driver passes. The printed
 checklist says what a limit stop looks like; the script never provokes
-one. A failure or Ctrl+C closes without moving (a halt, no retract, no
-park).
+one. A failure or Ctrl+C closes without moving (a halt, no retract).
 
 Run from software/ as a module, so `fluidics` imports without the package
 being installed:
@@ -205,10 +204,9 @@ def main():
             manual.go_to_well(agitate_well)
             robot.agitate(2)
             settle.report(f"agitate in {agitate_well}")
-            park = "move over park_xy_mm" if g.park_xy_mm else "stay over the well"
-            input(f"Enter to park: retract, then {park}...")
-            manual.park()
-            settle.report("park")
+            input("Enter to retract...")
+            manual.retract()
+            settle.report("retract")
             print(settle.summary())
             for name, ((x, y), z) in taught.items():
                 print(f"  {name}: a1_xy_mm: [{x:.2f}, {y:.2f}]  dip_z_mm: {z:.2f}")

@@ -1,7 +1,7 @@
 """The sipper on the stage: the verbs the operations call (spec §2.3).
 
 current_well is the witness the no-air rule reads (spec D9): set only
-while the tip sits at dip depth in a well, cleared by retract, park, home,
+while the tip sits at dip depth in a well, cleared by retract, home,
 and for the length of an agitation (the tip leaves dip depth, so a draw
 interrupted there would start from the wrong depth). With `lower_tip` off
 (the Robot tab's "Do not lower tip"), go_to_well ends retracted over the
@@ -21,13 +21,11 @@ from .labware import WellRef  # noqa: F401  (the type callers hand in)
 
 
 class RobotSipper:
-    def __init__(self, stage, placements, default_reservoir, agitate_amplitude_mm,
-                 park_xy_mm=None):
+    def __init__(self, stage, placements, default_reservoir, agitate_amplitude_mm):
         self._stage = stage
         self._placements = {}
         self.default_reservoir = default_reservoir
         self.agitate_amplitude_mm = float(agitate_amplitude_mm)
-        self._park_xy = park_xy_mm
         self.current_well = None
         self.lower_tip = True          # off: go_to_well stops retracted over the well
         self.moves = stage.moves
@@ -107,14 +105,6 @@ class RobotSipper:
     def retract(self):
         self.current_well = None
         self._stage.retract()
-
-    def park(self):
-        """A dry park: retract, then to park_xy_mm when the config names
-        one, else stay over the well. The tip's resting place between
-        steps is the last step's well; Park lifts it out, for a plate swap."""
-        self.retract()
-        if self._park_xy is not None:
-            self._stage.move_xy(*self._park_xy)
 
     def home(self):
         self.current_well = None

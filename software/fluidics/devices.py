@@ -210,7 +210,7 @@ def _build_robot(config, simulation, run_control, instant):
                      g.z_velocity_mm_s, run_control,
                      poll_seconds=0.0 if instant else POLL_SECONDS)
     robot = RobotSipper(stage, vocabulary.placements(), g.default_reservoir,
-                        g.agitate_amplitude_mm, park_xy_mm=g.park_xy_mm)
+                        g.agitate_amplitude_mm)
     try:
         stage.connect()
         robot.home()

@@ -18,8 +18,7 @@ def deck(qapp):
     from fluidics.qt.deck_map import DeckMapWidget
     w = DeckMapWidget(EXTENTS)
     w.setPlacements({"probes": PROBES, "ssct": SSCT})
-    w.setNamedWells({"priming": WellRef("ssct", "H11"), "clean-up": WellRef("ssct", "H12"),
-                     "park": WellRef("ssct", "H11")})
+    w.setNamedWells({"priming": WellRef("ssct", "H11"), "clean-up": WellRef("ssct", "H12")})
     w.resize(640, 360)
     return w
 
@@ -73,7 +72,10 @@ def test_the_tip_is_painted_where_it_is_in_the_colour_of_its_state(deck):
 
 
 def test_a_well_with_two_roles_is_listed_once_with_both(deck):
-    assert deck.legend() == ["clean-up well", "priming + park well"]
+    deck.setNamedWells({"priming": WellRef("ssct", "H11"), "clean-up": WellRef("ssct", "H11")})
+    assert deck.legend() == ["priming + clean-up well"]
+    deck.setNamedWells({"priming": WellRef("ssct", "H11"), "clean-up": WellRef("ssct", "H12")})
+    assert deck.legend() == ["clean-up well", "priming well"]
 
 
 def test_a_mouse_press_on_a_well_emits_it_and_elsewhere_emits_nothing(deck):
