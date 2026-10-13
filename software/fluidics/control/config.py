@@ -67,26 +67,6 @@ class SelectorValvesConfig(_StrictModel):
     residual_volume_ul: Optional[Dict[str, int]] = None
 
     @model_validator(mode='after')
-    def _check_tracked_bottles(self):
-        """A tracked bottle hangs on a plumbed port, holds more than its
-        tube end cannot reach, and a residual names a tracked bottle."""
-        loaded = self.loaded_volume_ul or {}
-        residual = self.residual_volume_ul or {}
-        for key in residual:
-            if key not in loaded:
-                raise ValueError(f"residual_volume_ul.{key}: no loaded_volume_ul for it")
-        for key, volume in loaded.items():
-            if not self.tubing_fluid_amount_ul.get(key):
-                raise ValueError(f"loaded_volume_ul.{key}: not a plumbed port "
-                                 "(no tubing_fluid_amount_ul entry)")
-            left = residual.get(key, 0)
-            if left < 0:
-                raise ValueError(f"residual_volume_ul.{key} must not be negative")
-            if volume <= left:
-                raise ValueError(f"loaded_volume_ul.{key} ({volume}) must exceed its residual ({left})")
-        return self
-
-    @model_validator(mode='after')
     def _check_valve_id_consistency(self):
         ids = set(self.valve_ids)
         for field_name in ('number_of_ports', 'tubing_fluid_amount_to_valve_ul'):
@@ -128,6 +108,29 @@ class SelectorValvesConfig(_StrictModel):
                     f"cascade: {', '.join(unknown)}. Ports are spelled "
                     f"port_1..port_{reach}."
                 )
+        return self
+
+    @model_validator(mode='after')
+    def _check_tracked_bottles(self):
+        """A tracked bottle hangs on a plumbed port, holds more than its
+        tube end cannot reach, and a residual names a tracked bottle.
+
+        Defined after _check_port_keys so pydantic runs it second: a key
+        beyond the cascade's reach is reported as such, not as unplumbed."""
+        loaded = self.loaded_volume_ul or {}
+        residual = self.residual_volume_ul or {}
+        for key in residual:
+            if key not in loaded:
+                raise ValueError(f"residual_volume_ul.{key}: no loaded_volume_ul for it")
+        for key, volume in loaded.items():
+            if not self.tubing_fluid_amount_ul.get(key):
+                raise ValueError(f"loaded_volume_ul.{key}: not a plumbed port "
+                                 "(no tubing_fluid_amount_ul entry)")
+            left = residual.get(key, 0)
+            if left < 0:
+                raise ValueError(f"residual_volume_ul.{key} must not be negative")
+            if volume <= left:
+                raise ValueError(f"loaded_volume_ul.{key} ({volume}) must exceed its residual ({left})")
         return self
 
 
@@ -196,7 +199,7 @@ class GantryConfig(_StrictModel):
     agitate_amplitude_mm: float = Field(gt=0)
 
     @model_validator(mode='after')
-    def _check_names_wells_and_strokes(self):
+    def _check_names_and_wells(self):
         from ..robot.labware import PlateGeometry, parse_ref
         if (self.serial_number is None) == (self.port is None):
             raise ValueError("nimotion_gantry_system: give exactly one of serial_number or port")
@@ -471,9 +474,13 @@ def _update_yaml_node(node, values):
     for key in [k for k in node if k not in values]:
         del node[key]
     for key, value in values.items():
+        # model_dump gives a tuple field (a plate's a1_xy_mm) as a tuple, and
+        # the file holds it as a list: a list never equals a tuple, so compare
+        # it as the file has it or every save rewrites it.
+        as_loaded = list(value) if isinstance(value, tuple) else value
         if key in node and isinstance(value, dict) and isinstance(node[key], dict):
             _update_yaml_node(node[key], value)
-        elif key not in node or node[key] != value:
+        elif key not in node or node[key] != as_loaded:
             node[key] = _yaml_faithful(value)
 
 
@@ -494,6 +501,13 @@ def _yaml_faithful(value):
         return {key: _yaml_faithful(inner) for key, inner in value.items()}
     if isinstance(value, list):
         return [_yaml_faithful(inner) for inner in value]
+    if isinstance(value, tuple):
+        # A coordinate pair, written the way the configs spell it --
+        # `[12.0, 1.5]` -- so a comment after it stays on its own line.
+        from ruamel.yaml.comments import CommentedSeq
+        seq = CommentedSeq(_yaml_faithful(inner) for inner in value)
+        seq.fa.set_flow_style()
+        return seq
     return value
 
 

@@ -537,7 +537,8 @@ class TestGantryConfig:
         (lambda d: d["reagent_selection"]["nimotion_gantry_system"]["reservoirs"][1]["well_names"].__setitem__("Z9", "x"), "Z9"),
         (lambda d: d["reagent_selection"]["nimotion_gantry_system"].__setitem__("port", "COM5"), "exactly one"),
         (lambda d: d["reagent_selection"]["nimotion_gantry_system"]["axes"].__setitem__("y", "X1"), "distinct"),
-        (lambda d: d["reagent_selection"]["selector_valves"]["loaded_volume_ul"].__setitem__("port_99", 1), "port_99"),
+        (lambda d: d["reagent_selection"]["selector_valves"]["loaded_volume_ul"].__setitem__("port_99", 1),
+         "loaded_volume_ul has keys that name no port on this cascade: port_99"),
         (lambda d: d["reagent_selection"]["selector_valves"]["loaded_volume_ul"].__setitem__("port_2", 1000), "plumbed"),
         (lambda d: d["reagent_selection"]["selector_valves"]["loaded_volume_ul"].__setitem__("port_1", 1000), "sipper"),
         (lambda d: d["reagent_selection"]["selector_valves"]["residual_volume_ul"].__setitem__("port_25", 600000), "exceed"),
@@ -549,6 +550,9 @@ class TestGantryConfig:
          r"reservoirs\.1\.column_axis\n\s+Field required"),
         (lambda d: d["reagent_selection"]["nimotion_gantry_system"]["reservoirs"][2].pop("row_axis"),
          r"reservoirs\.2\.row_axis\n\s+Field required"),
+        (lambda d: [d["reagent_selection"]["nimotion_gantry_system"]["reservoirs"][1].pop(k)
+                    for k in ("column_axis", "row_axis")],
+         r"(?s)reservoirs\.1\.column_axis\n\s+Field required.*reservoirs\.1\.row_axis\n\s+Field required"),
     ])
     def test_each_rule_refuses_at_load(self, fixtures_dir, edit, message):
         data = _sipper_dict(fixtures_dir)
@@ -559,6 +563,38 @@ class TestGantryConfig:
     def test_the_block_is_optional_and_existing_configs_are_untouched(self, flow_cell_config):
         assert flow_cell_config.reagent_selection.nimotion_gantry_system is None
         assert flow_cell_config.reagent_selection.selector_valves.loaded_volume_ul is None
+
+    _CORNER = "        a1_xy_mm: [12.0, 1.5]\n"
+    _COMMENTED = "        a1_xy_mm: [12.0, 1.5]   # taught on the Robot tab\n"
+
+    def _commented_copy(self, fixtures_dir, tmp_path):
+        text = (fixtures_dir / "plate_sipper_config.yaml").read_text()
+        assert text.count(self._CORNER) == 1, "fixture changed; re-plant the comment"
+        path = tmp_path / "config.yaml"
+        path.write_text(text.replace(self._CORNER, self._COMMENTED))
+        return path
+
+    def test_a_save_leaves_an_untouched_corner_and_its_comment_alone(self, fixtures_dir, tmp_path):
+        """model_dump gives a1_xy_mm as a tuple and the file holds a list: a
+        save that compared the two rewrote every plate's corner in block
+        style and moved the comment after it onto the key line."""
+        from fluidics.control.config import load_config, save_config
+        path = self._commented_copy(fixtures_dir, tmp_path)
+        config = load_config(str(path))
+        sv = config.reagent_selection.selector_valves
+        sv.name_mapping = {**sv.name_mapping, "port_24": "wash"}
+        save_config(config)
+        saved = path.read_text()
+        assert self._COMMENTED in saved
+        assert "        a1_xy_mm: [102.5, 1.5]\n" in saved
+
+    def test_a_taught_corner_is_written_in_place_and_keeps_its_comment(self, fixtures_dir, tmp_path):
+        from fluidics.control.config import load_config, save_config
+        path = self._commented_copy(fixtures_dir, tmp_path)
+        config = load_config(str(path))
+        _gantry(config).reservoirs[1].a1_xy_mm = (13.0, 2.0)
+        save_config(config)
+        assert "        a1_xy_mm: [13.0, 2.0]   # taught on the Robot tab\n" in path.read_text()
 
     def test_teaching_values_round_trip_through_save_config(self, fixtures_dir, tmp_path):
         import shutil
