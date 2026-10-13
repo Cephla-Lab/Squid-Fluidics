@@ -170,9 +170,10 @@ def test_selective_priming_that_leaves_out_the_sipper_is_refused_at_time_zero(sy
     before the plan is replayed, and nothing is charged."""
     prime = {"type": "priming", "fluidic_port": 25, "flow_rate": 5000, "volume": 800,
              "use_ports": [25]}
+    reservoirs = system.devices.reservoirs
+    balances = {key: reservoirs.remaining(key) for key in ("port_25", "ssct/H11")}
     with pytest.raises(ValueError, match=r"^sequence 0 \(priming\): use_ports leaves out port 1 "
                                          r"\(the sipper\): priming and clean-up never skip the sipper$"):
         system.run([prime, HYB])
     assert not system.busy
-    assert system.devices.reservoirs.remaining("port_25") == 480000
-    assert system.devices.reservoirs.remaining("ssct/H11") == 1750
+    assert {key: reservoirs.remaining(key) for key in balances} == balances

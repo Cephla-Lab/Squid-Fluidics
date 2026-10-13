@@ -158,6 +158,8 @@ def test_selective_priming_that_leaves_out_the_sipper_is_refused_before_the_pump
     well it did not list; so is a use_ports that is not a list."""
     devices, ops = rig
     before = list(devices.syringe_pump.executed_ops)
+    balances = {key: devices.reservoirs.remaining(key)
+                for key in ("ssct/H11", "ssct/H12", "port_25")}
     opened = []
     open_port = devices.selector_valves.open_port
     devices.selector_valves.open_port = lambda port: opened.append(port) or open_port(port)
@@ -167,12 +169,12 @@ def test_selective_priming_that_leaves_out_the_sipper_is_refused_before_the_pump
     assert str(refused.value) == message
     assert devices.syringe_pump.executed_ops == before
     assert opened == []
-    assert devices.reservoirs.remaining("ssct/H11") == 1750       # the priming well
-    assert devices.reservoirs.remaining("ssct/H12") == 1750       # the clean-up well
-    assert devices.reservoirs.remaining("port_25") == 480000
+    assert {key: devices.reservoirs.remaining(key) for key in balances} == balances
 
 
 def test_selective_priming_that_lists_the_sipper_primes_it_from_the_priming_well(rig):
+    """Pins that a selective priming still primes the sipper from the priming
+    well (H11) and the listed bottle, and nothing else."""
     devices, ops = rig
     opened = []
     open_port = devices.selector_valves.open_port

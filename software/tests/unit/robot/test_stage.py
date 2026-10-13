@@ -190,9 +190,10 @@ class TestPolling:
     def test_an_axis_that_arrived_stays_watched_until_the_leg_ends(self):
         """Codex finding 2: X and Y are one leg, and X arrives first. A fault
         on X while Y still travels must end the leg, not let it succeed: the
-        next Z leg reads only Z and would dip a faulted stage. On the real
-        clock, X's 5 mm takes 2 or 3 polls and Y's 80 mm about 32, so X's
-        10th read from here (the pre-check is the first) lands in between."""
+        next Z leg reads only Z and would dip a faulted stage. With modelled
+        motion (instant=False) under the suite's fake clock, X's 5 mm takes
+        2 or 3 polls and Y's 80 mm about 32, so X's 10th read from here (the
+        pre-check is the first) lands in between."""
         stage, service, _ = build(instant=False)
         stage.connect()
         stage.home()

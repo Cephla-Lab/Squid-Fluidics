@@ -266,7 +266,8 @@ def use_ports_problem(use_ports, sipper_port) -> Optional[str]:
 
 def sequence_well_problems(seq: dict, vocabulary) -> list[str]:
     """The well complaints for one sequence under `vocabulary` (None on a
-    rig without a sipper), as messages; empty when there are none. Reads
+    rig without a sipper), as messages, a priming or clean-up row's
+    `use_ports` refusal among them (D7); empty when there are none. Reads
     the raw dict, so a value the models would refuse is named here too."""
     problems = []
     # The model forbids a field its type lacks; the raw row is not run

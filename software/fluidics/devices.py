@@ -292,8 +292,9 @@ def build_devices(config, simulation=False, on_issue=None, run_control=None,
         # to the pump (the real pump's constructor sends it commands, and a
         # pump that answers "not initialized" is initialized by the vendor
         # driver), clears the MCU, homes the robot (lifting the first
-        # session's tip out of its well) or homes the valves. A file it
-        # cannot read or lock fails the launch with nothing to release.
+        # session's tip out of its well) or homes the valves. A ledger it
+        # cannot lock fails the launch with nothing to release; a file it
+        # cannot read loads as undeclared and the launch goes on.
         reservoirs = _build_ledger(config, simulation, ledger_path)
 
         controller = controller_cls(config.microcontroller.serial_number)
