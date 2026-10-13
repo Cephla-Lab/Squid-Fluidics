@@ -218,7 +218,8 @@ class ManualOperations:
         if self.robot is None or self.robot.current_well is None:
             return
         well = self.robot.current_well
-        if key in ("all", well.reservoir, f"{well.reservoir}/{well.well}"):
+        if key == "all" or key == well.reservoir or key.startswith(f"{well.reservoir}/"):
+            # Any well of that plate: refilling one means the plate was lifted.
             raise RuntimeError(f"the sipper's tip is in {well.reservoir}/{well.well}: "
                                f"Retract before reloading {well.reservoir}")
 

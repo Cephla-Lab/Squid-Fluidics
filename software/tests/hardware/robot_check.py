@@ -4,8 +4,8 @@ Home (watch Z go UP first), jog each axis, teach A1 and the dip depth on
 each plate, visit every corner, agitate in a full well, retract. Run with the
 deck clear of anything but the plates. Afterwards de-energize the Z drive
 and confirm the stage holds with the sipper and tubing mounted: Z3 has no
-brake and relies on its lead screw (nm-servo PR #6). Expect the Y stroke
-to be tight: the 12 columns span 99 of Y2's 102 mm.
+brake and relies on its lead screw (nm-servo PR #6). The 12 columns span
+99 mm of Y2's 0.5 to 109 mm stroke.
 
 Nothing moves until Enter is pressed at this console, and the jogs are
 typed here: the script holds the robot's port and the reservoir ledger's
@@ -41,8 +41,9 @@ DRIVE_TOLERANCE_MM = 0.076     # the driver's own end-of-move check: 1000 counts
 
 CHECKLIST = f"""\
 Checklist -- watch for these as the script runs:
- 1. Homing: Z goes UP first, then X and Y. Z should then read 0.1 to 0.5 mm:
-    the drives park just past 0, which is why the travel height is 1 mm or more.
+ 1. Homing: Z goes UP first, then X and Y. Each axis then reads 0.5 mm: the
+    drives park 0.1 to 0.5 mm past the switch and the stage moves each axis to
+    its stroke's start, which is why the travel height is 1 mm or more.
  2. Settle: after each move, every axis's settle error (drive reading less
     target). The stage fails a move that ends more than {TOLERANCE_MM} mm off;
     the driver's own wait (unused here) allows {DRIVE_TOLERANCE_MM} mm. A move that fails with
@@ -57,7 +58,7 @@ Checklist -- watch for these as the script runs:
     table's stroke or the switch is off: note both figures. At a jog prompt,
     jog back away from it (Z up first if Z is low).
  4. Corners: at each, the tip centred over the well and at the V bottom.
-    The Y stroke is tight: the 12 columns span 99 of Y2's 102 mm.
+    The 12 columns span 99 mm of Y2's 0.5 to 109 mm stroke.
  5. At the end every drive is disabled: Z3 has no brake, so watch that its
     lead screw holds the stage with the sipper and tubing mounted.
 """

@@ -261,6 +261,8 @@ def test_a_reload_of_the_plate_the_tip_is_in_is_refused_until_retract(plate_sipp
         manual.refill("ssct")
     with pytest.raises(RuntimeError, match="tip is in ssct/A2.*Retract"):
         manual.refill("all")
+    with pytest.raises(RuntimeError, match="tip is in ssct/A2.*Retract"):
+        manual.refill("ssct/A1")                  # another well of that plate: it was lifted too
     assert "ssct/A2" in devices.reservoirs.undeclared, "nothing was declared"
     manual.refill("probes")
     assert "probes/A1" not in devices.reservoirs.undeclared
