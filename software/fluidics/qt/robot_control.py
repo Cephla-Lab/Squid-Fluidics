@@ -68,6 +68,9 @@ class RobotControlWidget(PostsToQtThread, QWidget):
         self.manual = system.manual
         self._vocabulary = sipper_vocabulary(config)
         self._controls = []
+        # The embedder's switch (setControlsEnabled), kept apart from the
+        # session's state so a job's end never lifts it.
+        self._externallyEnabled = True
         self._plan = ()
         detach = subscribe_until_detached(
             (system.devices.robot.moves, self._onMove),
@@ -78,7 +81,7 @@ class RobotControlWidget(PostsToQtThread, QWidget):
         self._paintPosition(system.devices.robot.position())
         self.refreshReservoirs()
         # Built while a job runs (an embedder's tab), it starts frozen.
-        self.setControlsEnabled(not self.session.busy)
+        self._paintControls()
 
     # --- layout ---
 
@@ -208,8 +211,9 @@ class RobotControlWidget(PostsToQtThread, QWidget):
         except RuntimeError as e:
             _logger.info("%s; the robot move was not started.", e)
             return
-        # Posted reports cannot be handled before this returns.
-        self.setControlsEnabled(False)
+        # Posted reports cannot be handled before this returns, so paint
+        # now: the session took the job before run_manual returned.
+        self._paintControls()
 
     def operationStopped(self):
         pass
@@ -220,7 +224,7 @@ class RobotControlWidget(PostsToQtThread, QWidget):
     def operationFinished(self):
         self._renderSession()
 
-    # --- the session: any job freezes this tab ---
+    # --- the session and the embedder: either freezes this tab ---
 
     def _onSessionState(self, kind):
         # On the session's thread; the paint crosses to Qt, and reads the
@@ -228,17 +232,28 @@ class RobotControlWidget(PostsToQtThread, QWidget):
         self._post_event("_renderSession")
 
     def _renderSession(self):
-        busy = self.session.busy
-        self.setControlsEnabled(not busy)
-        if not busy:
+        self._paintControls()
+        if not self.session.busy:
             # Whatever ran -- this tab's move, a manual draw, a run -- may
             # have drawn from a well or declared a refill.
             self.refreshReservoirs()
 
     def setControlsEnabled(self, enabled):
+        """The embedder's switch (spec §9): a protocol that runs fluidics
+        between imaging freezes the tab for all of it. Only this lifts it;
+        the controls come back once it allows them and the rig is idle."""
+        self._externallyEnabled = enabled
+        self._paintControls()
+
+    def _paintControls(self):
+        """The controls are live while the embedder allows them and no job
+        runs. STOP follows the session alone, never the embedder: live
+        while this tab's own job runs."""
+        busy = self.session.busy
+        enabled = self._externallyEnabled and not busy
         for control in self._controls:
             control.setEnabled(enabled)
-        self.stopButton.setEnabled(not enabled and self._ownsJob())
+        self.stopButton.setEnabled(busy and self._ownsJob())
 
     def _onRunEvent(self, event):
         # Completed, not started: a priming the operator aborted mid-way

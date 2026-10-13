@@ -95,6 +95,62 @@ def test_stop_is_live_for_this_tab_s_own_job_and_stops_it(widget, monkeypatch, r
     assert not w.stopButton.isEnabled() and w.goToWellButton.isEnabled()
 
 
+HYB_FROM_A1 = {"type": "flow_reagent", "fluidic_port": 1, "well": "A1", "flow_rate": 2000, "volume": 100}
+
+
+def _frozen(w):
+    return not any(control.isEnabled() for control in
+                   (w.goToWellButton, w.jogButtons[("x", 1.0)], w.setA1Button, w.plateReloadedButton))
+
+
+def test_an_embedders_freeze_outlasts_its_fluidics_run(widget):
+    """An embedding protocol freezes the tab for all of it, imaging too:
+    the end of a fluidics run inside it repaints the tab, and the freeze
+    stays (Codex finding 4)."""
+    w, system = widget
+    w.setControlsEnabled(False)
+    system.run([HYB_FROM_A1])
+    _settle(system)
+    drawn = [w.reservoirTable.item(r, 0).text() for r in range(w.reservoirTable.rowCount())]
+    assert drawn == ["probes/A1"], "the run's end repaints the tab"
+    assert _frozen(w) and not w.stopButton.isEnabled()
+
+
+def test_the_embedder_lifts_its_freeze_once_the_rig_is_idle(widget):
+    w, system = widget
+    w.setControlsEnabled(False)
+    system.run([HYB_FROM_A1])
+    _settle(system)
+    w.setControlsEnabled(True)
+    assert w.goToWellButton.isEnabled() and w.setA1Button.isEnabled() and w.plateReloadedButton.isEnabled()
+    assert not w.stopButton.isEnabled()
+
+
+@pytest.mark.parametrize("own", [False, True], ids=["another_tab_s_job", "this_tab_s_job"])
+def test_the_embedder_cannot_unfreeze_a_running_job_and_stop_follows_the_session(widget, real_clock, own):
+    """The embedder's switch gates the controls, never the session: while
+    a job runs they stay frozen whatever it says, and STOP is live for
+    this tab's own job whatever it says."""
+    import threading
+    w, system = widget
+    gate = threading.Event()
+    if own:
+        w._run(lambda: gate.wait(5))
+    else:
+        system.run_manual(lambda: gate.wait(5))
+    try:
+        assert wait_until(lambda: system.busy)
+        QApplication.processEvents()
+        w.setControlsEnabled(False)
+        assert _frozen(w) and w.stopButton.isEnabled() == own
+        w.setControlsEnabled(True)
+        assert _frozen(w) and w.stopButton.isEnabled() == own
+    finally:
+        gate.set()
+    _settle(system)
+    assert w.goToWellButton.isEnabled() and not w.stopButton.isEnabled()
+
+
 PRIMING = {"type": "priming", "fluidic_port": 25, "flow_rate": 5000, "volume": 800}
 
 
