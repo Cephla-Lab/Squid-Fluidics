@@ -273,6 +273,63 @@ def test_an_unknown_position_is_painted_as_such(widget):
     w, _ = widget
     w._paintPosition(None)
     assert "unknown" in w.positionLabel.text()
+    assert w.deckMap.stateText().startswith("sipper: position unknown")
+
+
+def test_the_deck_map_follows_the_sipper(widget):
+    """Lowered in the well after a go-to-well, with the well ringed; retracted
+    with no well after a retract -- from the stage's publish, not a poll."""
+    from fluidics.robot.labware import WellRef
+    w, system = widget
+    w.reservoirCombo.setCurrentIndex(w.reservoirCombo.findData("ssct"))
+    w.wellCombo.setCurrentText("A2")
+    w.goToWell()
+    _settle(system)
+    assert w.deckMap.currentWell == WellRef("ssct", "A2")
+    assert w.deckMap.stateText() == "sipper: lowered in ssct/A2   x 102.5  y 10.5  z 52.0 mm"
+    w._run(w.manual.retract)
+    _settle(system)
+    assert w.deckMap.currentWell is None
+    assert w.deckMap.stateText().startswith("sipper: retracted   x 102.5  y 10.5  z 1.0 mm")
+
+
+def test_a_click_on_a_well_of_the_map_goes_there_as_a_manual_job(widget):
+    from qtpy.QtCore import QPoint, Qt
+    from qtpy.QtTest import QTest
+    w, system = widget
+    w.deckMap.resize(640, 360)
+    placement = system.devices.robot.placements["ssct"]
+    px, py = w.deckMap.pixel(*placement.xy_mm("B3"))
+    QTest.mouseClick(w.deckMap, Qt.LeftButton, pos=QPoint(int(round(px)), int(round(py))))
+    _settle(system)
+    assert system.devices.robot.current_well.well == "B3"
+    assert system.devices.robot.current_well.reservoir == "ssct"
+    assert w.reservoirCombo.currentData() == "ssct" and w.wellCombo.value() == "B3"
+
+
+def test_the_map_shows_the_named_wells_and_freezes_with_the_controls(widget):
+    w, _ = widget
+    assert w.deckMap.legend() == ["clean-up well", "priming + park well"]
+    w.setControlsEnabled(False)
+    assert not w.deckMap.isEnabled()
+    w.setControlsEnabled(True)
+    assert w.deckMap.isEnabled()
+
+
+def test_teaching_moves_the_drawn_plate(widget, monkeypatch):
+    """The map re-reads the live placements when the teach job ends."""
+    w, system = widget
+    monkeypatch.setattr("fluidics.qt.robot_control._ask_yes_no", lambda *a, **k: True)
+    before = w.deckMap.pixel(*system.devices.robot.placements["probes"].xy_mm("A1"))
+    w.reservoirCombo.setCurrentIndex(w.reservoirCombo.findData("probes"))
+    w._run(w.manual.home_robot)
+    _settle(system)
+    w._run(lambda: w.manual.jog("x", 10.0))
+    _settle(system)
+    w.setA1Here()
+    _settle(system)
+    after = w.deckMap.pixel(*system.devices.robot.placements["probes"].xy_mm("A1"))
+    assert after[0] < before[0], "A1 taught 2 mm left of where it was moves the drawn plate"
 
 
 def test_one_job_on_the_rig_greys_the_other_tabs(qapp, plate_sipper_config, tmp_path, monkeypatch,

@@ -175,6 +175,12 @@ class XYZStage:
             if target is not None:
                 self._check_stroke(axis, target)
 
+    def strokes(self):
+        """{"x": (low, high), "y": ..., "z": ...} in mm, from the driver's
+        axis table (no bus traffic): the deck a map can draw."""
+        return {name: tuple(self._service.stroke(axis))
+                for name, axis in (("x", self._x), ("y", self._y), ("z", self._z))}
+
     # --- moves ---
 
     def retract(self):

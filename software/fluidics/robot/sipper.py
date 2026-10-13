@@ -116,6 +116,15 @@ class RobotSipper:
     def position(self):
         return self._stage.position()
 
+    @property
+    def is_retracted(self):
+        """The stage's reading of its last published position (no I/O)."""
+        return self._stage.is_retracted
+
+    def strokes(self):
+        """The stage's XYZ strokes in mm (no I/O): the deck a map draws."""
+        return self._stage.strokes()
+
     def halt(self):
         self.current_well = None
         self._stage.halt()

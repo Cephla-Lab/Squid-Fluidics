@@ -13,10 +13,11 @@ from qtpy.QtWidgets import (QComboBox, QGridLayout, QGroupBox, QHBoxLayout, QLab
                             QMessageBox, QPushButton, QTableWidget, QTableWidgetItem,
                             QVBoxLayout, QWidget)
 
-from fluidics.control.config import save_config
+from fluidics.control.config import gantry, save_config
 from fluidics.events import RunStarted, SequenceCompleted
 from fluidics.vocabulary import sipper_vocabulary
 
+from .deck_map import DeckMapWidget
 from .support import PostsToQtThread, _ask_yes_no, subscribe_until_detached
 
 _logger = logging.getLogger(__name__)
@@ -102,7 +103,23 @@ class RobotControlWidget(PostsToQtThread, QWidget):
         connect_click(self.stopButton, self.stopMove)
         self.stopButton.setEnabled(False)
         row.addWidget(self.stopButton)
-        status.setLayout(row)
+        column = QVBoxLayout()
+        column.addLayout(row)
+        # The deck map: the plates where they are taught, the tip where the
+        # stage last said it was. A click on a well is Go to well for that
+        # well, and nothing between wells; it freezes with the controls.
+        robot = self.system.devices.robot
+        g = gantry(self.config)
+        self.deckMap = DeckMapWidget(robot.strokes())
+        self.deckMap.setPlacements(robot.placements)
+        self.deckMap.setNamedWells({
+            "priming": self._vocabulary.resolve(g.priming_well),
+            "clean-up": self._vocabulary.resolve(g.clean_up_well),
+            "park": None if g.park_well is None else self._vocabulary.resolve(g.park_well)})
+        self.deckMap.wellClicked.connect(self._goToClickedWell)
+        column.addWidget(self.deckMap, 1)
+        self._controls.append(self.deckMap)
+        status.setLayout(column)
         layout.addWidget(status)
 
         jog = QGroupBox("Jog")
@@ -187,6 +204,13 @@ class RobotControlWidget(PostsToQtThread, QWidget):
         reference = well if "/" in well else f"{reservoir}/{well}"
         self._run(lambda: self.manual.go_to_well(reference))
 
+    def _goToClickedWell(self, reservoir, well):
+        """A click on the map: the pickers show the well, and the move is
+        the same manual job the button starts."""
+        self.reservoirCombo.setCurrentIndex(self.reservoirCombo.findData(reservoir))
+        self.wellCombo.setCurrentText(well)
+        self._run(lambda: self.manual.go_to_well(f"{reservoir}/{well}"))
+
     def stopMove(self):
         """The session's abort, for this tab's own move: a job from another
         tab is stopped from that tab."""
@@ -235,8 +259,13 @@ class RobotControlWidget(PostsToQtThread, QWidget):
         self._paintControls()
         if not self.session.busy:
             # Whatever ran -- this tab's move, a manual draw, a run -- may
-            # have drawn from a well or declared a refill.
+            # have drawn from a well or declared a refill, taught a plate,
+            # or left the tip in a well (the witness is final once the job
+            # is over; a move's own publish can land before it is set).
             self.refreshReservoirs()
+            robot = self.system.devices.robot
+            self.deckMap.setPlacements(robot.placements)
+            self._paintPosition(robot.position())
 
     def setControlsEnabled(self, enabled):
         """The embedder's switch (spec §9): a protocol that runs fluidics
@@ -273,6 +302,9 @@ class RobotControlWidget(PostsToQtThread, QWidget):
         self._post_event("_paintPosition", position)
 
     def _paintPosition(self, position):
+        robot = self.system.devices.robot
+        self.deckMap.setPosition(position, robot.is_retracted)
+        self.deckMap.setCurrentWell(robot.current_well)
         if position is None:
             self.positionLabel.setText("x --  y --  z --  (position unknown: home or retract)")
             return
