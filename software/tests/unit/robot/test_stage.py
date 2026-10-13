@@ -187,6 +187,32 @@ class TestPolling:
         stage.move_z(20.0)
         assert stage.position()[2] == 20.0
 
+    def test_an_axis_that_arrived_stays_watched_until_the_leg_ends(self):
+        """Codex finding 2: X and Y are one leg, and X arrives first. A fault
+        on X while Y still travels must end the leg, not let it succeed: the
+        next Z leg reads only Z and would dip a faulted stage. On the real
+        clock, X's 5 mm takes 2 or 3 polls and Y's 80 mm about 32, so X's
+        10th read from here (the pre-check is the first) lands in between."""
+        stage, service, _ = build(instant=False)
+        stage.connect()
+        stage.home()
+        service.fault("X1", after_polls=10, error_code=0x7331)
+        with pytest.raises(DeviceError, match="X1.*7331"):
+            stage.move_xy(5.0, 80.0)
+        assert ("stop", "X1") in service.log
+        assert ("stop", "Y2") in service.log
+        position = stage.position()
+        assert position is not None, "the axes were re-read after the halt"
+        assert position[0] == 5.0, "X had arrived when it faulted"
+        assert 0.0 < position[1] < 80.0, "Y was halted in flight"
+        sent = len(service.log)
+        with pytest.raises(DeviceError, match="X1.*7331"):
+            stage.move_xy(5.0, 80.0)               # still faulted: refused before dispatch
+        assert "move_to" not in [verb for verb, _ in service.log[sent:]]
+        stage.reset_faults()
+        stage.move_xy(5.0, 80.0)
+        assert stage.position() == (5.0, 80.0, 0.0)
+
     def test_a_cancel_during_a_leg_halts_every_started_axis(self):
         """Review focus 5: the poll raises the cancel on the job thread, the
         stage halts what it started, nothing is left to resume. On the real

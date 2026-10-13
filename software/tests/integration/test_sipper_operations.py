@@ -109,3 +109,34 @@ def test_a_stage_fault_becomes_an_operation_error_until_reset(rig):
                               "flow_rate": 2000, "volume": 100})
     assert devices.robot.current_well is None
     devices.robot._stage.reset_faults()            # the Robot tab's verb; the rig closes clean
+
+
+def test_a_fault_on_an_axis_that_arrived_stops_the_step_before_the_dip_and_the_draw(rig):
+    """Codex finding 2: on the way to probes/H12 (75, 100.5) X arrives
+    first, then faults while Y still travels. The step must fail there: the
+    tip never dips, no well is set under it, the pump draws nothing. Motion
+    is modelled, not instant, so the XY leg spans polls, and the stage
+    polls at 0.05 s so each poll advances the suite's fake clock."""
+    devices, ops = rig
+    stage = devices.robot._stage
+    service = stage._service
+    service.instant = False
+    stage._poll = 0.05
+    read = service.read
+    planted = []
+
+    def read_planting_the_fault(axis):
+        reading = read(axis)
+        if axis == "Y2" and reading.position_mm >= 90.0 and not planted:
+            planted.append(service.position_of("X1"))
+            service.fault("X1", after_polls=0, error_code=0x7331)
+        return reading
+    service.read = read_planting_the_fault
+    with pytest.raises(OperationError, match="X1.*7331"):
+        ops.process_sequence({"type": "flow_reagent", "fluidic_port": 1, "well": "H12",
+                              "flow_rate": 2000, "volume": 100})
+    assert planted == [75.0], "X had arrived when it faulted"
+    assert stage.is_retracted, "the tip stayed at travel height"
+    assert devices.robot.current_well is None
+    assert [op for op in devices.syringe_pump.executed_ops if op[0] == "extract"] == []
+    stage.reset_faults()                           # the Robot tab's verb; the rig closes clean

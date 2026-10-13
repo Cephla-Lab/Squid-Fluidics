@@ -235,8 +235,13 @@ class XYZStage:
 
     def _leg(self, targets):
         """Dispatch every axis in `targets` ({axis: (mm, mm/s)}), then poll
-        them together to completion. Any early end halts every axis that
-        may have started, re-reads the position, and goes on raising."""
+        them together to completion. Every axis of the leg stays monitored
+        until the leg ends, read on every poll even once it has arrived: X
+        arriving before Y must not leave a fault on X unseen while Y still
+        travels. An axis outside the leg is not read; one that faults holds
+        its position, and the next leg that uses it refuses before dispatch.
+        Any early end halts every axis that may have started, re-reads the
+        position, and goes on raising."""
         self._control.checkpoint()
         longest = 0.0
         for axis, (target, velocity) in targets.items():
@@ -256,14 +261,15 @@ class XYZStage:
             in_flight = set()          # axes seen with the bit clear: the move has started
             while pending:
                 self._control.sleep(self._poll)
-                for axis in list(pending):
+                for axis, (target, _) in targets.items():
                     reading = self._service.read(axis)
                     if reading.fault or not reading.enabled:
                         raise DeviceError(self._describe(axis, reading))
-                    target = pending[axis][0]
                     if reading.error_code == LIMIT_SWITCH_ALARM:
                         raise DeviceError(f"axis {_label(axis)}: move to {target:.2f} mm stopped by a "
                                           f"limit switch at {reading.position_mm:.2f} mm")
+                    if axis not in pending:
+                        continue       # arrived, and still watched until the leg ends
                     if not reading.target_reached:
                         in_flight.add(axis)
                     elif abs(reading.position_mm - target) <= TOLERANCE_MM:
