@@ -316,6 +316,21 @@ def test_the_map_shows_the_named_wells_and_freezes_with_the_controls(widget):
     assert w.deckMap.isEnabled()
 
 
+def test_the_deck_map_lives_in_its_own_window_opened_from_the_stage_row(widget):
+    """Not on the tab: a window the operator opens, keeps beside the main
+    window, and closes; opening it is allowed while a job runs (a look,
+    not a move), though its clicks are frozen like every control."""
+    w, _ = widget
+    assert w.deckMapWindow.isVisible() is False
+    assert w.deckMap.window() is w.deckMapWindow and w.deckMapWindow is not w.window()
+    w.deckMapButton.click()
+    assert w.deckMapWindow.isVisible() and w.deckMapWindow.windowTitle() == "Deck map"
+    w.deckMapWindow.close()
+    assert w.deckMapWindow.isVisible() is False
+    w.setControlsEnabled(False)
+    assert w.deckMapButton.isEnabled() and not w.deckMap.isEnabled()
+
+
 def test_teaching_moves_the_drawn_plate(widget, monkeypatch):
     """The map re-reads the live placements when the teach job ends."""
     w, system = widget

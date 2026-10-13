@@ -17,7 +17,7 @@ from fluidics.control.config import gantry, save_config
 from fluidics.events import RunStarted, SequenceCompleted
 from fluidics.vocabulary import sipper_vocabulary
 
-from .deck_map import DeckMapWidget
+from .deck_map import DeckMapWidget, DeckMapWindow
 from .support import PostsToQtThread, _ask_yes_no, subscribe_until_detached
 
 _logger = logging.getLogger(__name__)
@@ -103,11 +103,11 @@ class RobotControlWidget(PostsToQtThread, QWidget):
         connect_click(self.stopButton, self.stopMove)
         self.stopButton.setEnabled(False)
         row.addWidget(self.stopButton)
-        column = QVBoxLayout()
-        column.addLayout(row)
-        # The deck map: the plates where they are taught, the tip where the
-        # stage last said it was. A click on a well is Go to well for that
-        # well, and nothing between wells; it freezes with the controls.
+        # The deck map, in its own window so the tab keeps its room: the
+        # plates where they are taught, the tip where the stage last said
+        # it was. A click on a well is Go to well for that well, and
+        # nothing between wells; the map freezes with the controls, the
+        # button that opens it does not (a look is not a move).
         robot = self.system.devices.robot
         g = gantry(self.config)
         self.deckMap = DeckMapWidget(robot.strokes())
@@ -117,9 +117,12 @@ class RobotControlWidget(PostsToQtThread, QWidget):
             "clean-up": self._vocabulary.resolve(g.clean_up_well),
             "park": None if g.park_well is None else self._vocabulary.resolve(g.park_well)})
         self.deckMap.wellClicked.connect(self._goToClickedWell)
-        column.addWidget(self.deckMap, 1)
         self._controls.append(self.deckMap)
-        status.setLayout(column)
+        self.deckMapWindow = DeckMapWindow(self.deckMap, parent=self)
+        self.deckMapButton = QPushButton("Deck map…")
+        connect_click(self.deckMapButton, self.showDeckMap)
+        row.addWidget(self.deckMapButton)
+        status.setLayout(row)
         layout.addWidget(status)
 
         jog = QGroupBox("Jog")
@@ -203,6 +206,12 @@ class RobotControlWidget(PostsToQtThread, QWidget):
         well = self.wellCombo.value()
         reference = well if "/" in well else f"{reservoir}/{well}"
         self._run(lambda: self.manual.go_to_well(reference))
+
+    def showDeckMap(self):
+        """Open the map's window, or bring it back to the front."""
+        self.deckMapWindow.show()
+        self.deckMapWindow.raise_()
+        self.deckMapWindow.activateWindow()
 
     def _goToClickedWell(self, reservoir, well):
         """A click on the map: the pickers show the well, and the move is
