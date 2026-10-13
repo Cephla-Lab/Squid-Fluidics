@@ -170,10 +170,10 @@ def check_reservoirs(entries, config, snapshot):
     never raises (spec §7)."""
     from .errors import (OperationError, ReservoirError, ReservoirOverdraw, ReservoirShortfall,
                          ReservoirUndeclared)
+    from .reservoirs import undeclared_message
     if snapshot.get("undeclared"):
-        raise ReservoirUndeclared(
-            "the reservoir ledger is undeclared for " + ", ".join(snapshot["undeclared"])
-            + ": declare refills (Plate reloaded / Bottle refilled, or --refilled) first")
+        raise ReservoirUndeclared(undeclared_message(snapshot["undeclared"],
+                                                     snapshot.get("definitions", {})))
     config = config.model_copy(update={"flow_sensors": None})
     devices = build_devices(config, simulation=True, run_control=_MeteredRunControl(),
                             instant=True)

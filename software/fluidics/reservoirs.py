@@ -135,9 +135,7 @@ class ReservoirLedger:
         if volume_ul == 0:
             return      # not a draw: no liquid moves, so there is nothing to refuse
         if self._undeclared:
-            raise ReservoirUndeclared(
-                "the reservoir ledger is undeclared for " + ", ".join(sorted(self._undeclared))
-                + ": declare refills (Plate reloaded / Bottle refilled, or --refilled) first")
+            raise ReservoirUndeclared(undeclared_message(self._undeclared, self._defs))
         d = self._defs[key]
         usable = d["loaded_ul"] - d["residual_ul"]
         if volume_ul > usable:
@@ -243,7 +241,8 @@ class ReservoirLedger:
         self._undeclared -= declared
         if self._undeclared:
             _logger.warning("The reservoir ledger at %s does not cover %s: undeclared until "
-                            "their refills are declared.", path, ", ".join(sorted(self._undeclared)))
+                            "their refills are declared.", path,
+                            describe_keys(self._undeclared, self._defs))
 
     def _entries_from(self, on_disk):
         """(balances, declared) from a parsed ledger file: a balance for
@@ -287,6 +286,34 @@ class ReservoirLedger:
         handle, self._lockfile = self._lockfile, None
         if handle is not None:
             _release_lock(handle)
+
+
+def describe_keys(keys, defined):
+    """`keys` as a message names them: a plate every one of whose wells is
+    among them as "every well of <plate>", every other key as it is (a
+    bottle, the wells of a plate partly among them), in key order.
+    `defined` is every key the ledger tracks: it says what a plate's wells
+    are."""
+    keys = set(keys)
+    plates = {}
+    for key in defined:
+        plate, slash, _ = key.partition("/")
+        if slash:
+            plates.setdefault(plate, set()).add(key)
+    named = []
+    for plate, wells in plates.items():
+        if wells <= keys:
+            keys -= wells
+            named.append((plate, f"every well of {plate}"))
+    named.extend((key, key) for key in keys)
+    return ", ".join(text for _, text in sorted(named))
+
+
+def undeclared_message(undeclared, defined):
+    """The refusal of a draw, or of a run at time zero, while anything
+    tracked is undeclared."""
+    return ("the reservoir ledger is undeclared for " + describe_keys(undeclared, defined)
+            + ": declare refills (Plate reloaded / Bottle refilled, or --refilled) first")
 
 
 def _sync_directory(directory):

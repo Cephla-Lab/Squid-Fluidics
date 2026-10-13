@@ -61,7 +61,9 @@ def test_an_undeclared_ledger_refuses_the_run(plate_sipper_config, instant_devic
         sensor.close()
     system = FluidicsSystem(plate_sipper_config, devices, report_dir=tmp_path)
     try:
-        with pytest.raises(ReservoirUndeclared):
+        # every entry undeclared: the plates named once each, not 192 wells
+        with pytest.raises(ReservoirUndeclared,
+                           match="undeclared for port_25, every well of probes, every well of ssct: "):
             system.run([HYB])
         system.refill("all")
         system.run([HYB])

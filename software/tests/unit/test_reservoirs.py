@@ -296,3 +296,18 @@ def test_snapshot_round_trips_through_restore():
     assert ledger.remaining("ssct/A1") == 1050
     assert ledger.undeclared == ["port_25"]
     assert ledger.snapshot()["reservoirs"]["ssct/A1"]["dispatched_ul"] == 700
+
+
+def test_the_undeclared_refusal_names_a_wholly_undeclared_plate_once():
+    """A first run has every well undeclared (193 entries on the sample
+    rig): a plate none of whose wells is declared is named once, a plate
+    partly declared by its undeclared wells, a bottle by its key."""
+    defs = dict(DEFS, **{"probes/A1": {"loaded_ul": 110, "residual_ul": 5},
+                         "probes/A2": {"loaded_ul": 110, "residual_ul": 5}})
+    ledger = ReservoirLedger(defs)
+    ledger.restore({"undeclared": ["port_25", "probes/A1", "probes/A2", "ssct/A2"]})
+    with pytest.raises(ReservoirUndeclared) as refused:
+        ledger.check("ssct/A1", 100)
+    assert str(refused.value) == (
+        "the reservoir ledger is undeclared for port_25, every well of probes, ssct/A2: "
+        "declare refills (Plate reloaded / Bottle refilled, or --refilled) first")
