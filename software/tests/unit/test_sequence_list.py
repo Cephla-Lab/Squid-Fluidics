@@ -199,3 +199,17 @@ def test_the_model_needs_no_qt():
         "'fluidic_port': 1, 'flow_rate': 1, 'volume': 1}]).validated(); "
         "print([n for n in sys.modules if 'qt' in n.lower()])")
     assert loaded == "[]", f"Qt was imported: {loaded}"
+
+
+def test_a_sipper_row_is_titled_by_its_well_and_validated_with_the_sipper(plate_sipper_config):
+    from fluidics.control.config import available_ports
+    from fluidics.vocabulary import sipper_vocabulary
+    rows = SequenceList("Flow Cell", available_ports(plate_sipper_config),
+                        [{"type": "flow_reagent", "fluidic_port": 1, "well": "A1",
+                          "flow_rate": 2000, "volume": 100, "name": "hyb"},
+                         {"type": "flow_reagent", "fluidic_port": 1,
+                          "flow_rate": 2000, "volume": 100}],
+                        sipper=sipper_vocabulary(plate_sipper_config))
+    assert rows.title(0) == "hyb: A1"
+    assert rows.problem(0) is None
+    assert rows.problem(1) == "fluidic_port=1 is the sipper: name a well"

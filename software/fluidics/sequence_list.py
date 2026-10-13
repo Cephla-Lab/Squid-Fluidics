@@ -46,9 +46,10 @@ class SequenceList:
     for the life of the list -- every verdict is reached under them.
     """
 
-    def __init__(self, application, ports, sequences=()):
+    def __init__(self, application, ports, sequences=(), sipper=None):
         self._application = application
         self._ports = ports
+        self._sipper = sipper          # the SipperVocabulary, or None
         self._rows = []
         self._problems = {}
         self.replace(sequences)
@@ -154,7 +155,9 @@ class SequenceList:
         The one place that rule is spelled -- a renderer and an edit both
         ask it rather than each composing the fallback."""
         seq = self._rows[row]
-        return seq.get("name") or label_for_type(seq.get("type", ""))
+        title = seq.get("name") or label_for_type(seq.get("type", ""))
+        well = seq.get("well")
+        return f"{title}: {well}" if well else title
 
     def set_name(self, row, name):
         """Name the row, or unname it: blank, or the type's own label typed
@@ -181,7 +184,7 @@ class SequenceList:
 
     def _validate_row(self, row):
         problem = sequence_problem(self._rows[row], self._application,
-                                   self._ports)
+                                   self._ports, sipper=self._sipper)
         if problem is None:
             self._problems.pop(row, None)
         else:

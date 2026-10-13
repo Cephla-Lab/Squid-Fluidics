@@ -329,3 +329,79 @@ class TestRoundLabel:
             [{"type": "flow_reagent", "fluidic_port": 1, "flow_rate": 500, "volume": 500}]
         )[0]
         assert row.round is None
+
+
+# --- wells on a sipper rig (spec §6, Task B6) ---
+
+from fluidics.sequences import (sequence_problem as _sequence_problem,
+                                sequence_well_problems, validate_sequences as _validate)
+from fluidics.vocabulary import sipper_vocabulary as _vocabulary
+
+HYB = {"type": "flow_reagent", "fluidic_port": 1, "well": "A1", "flow_rate": 2000, "volume": 100}
+
+
+class TestWellFields:
+    def test_the_fields_are_optional_and_default(self):
+        [seq] = SequenceListAdapter.validate_python([{"type": "flow_reagent", "fluidic_port": 2,
+                                                      "flow_rate": 500, "volume": 500}])
+        assert seq.well is None and seq.dip_cycles == 0
+
+    def test_a_file_without_them_is_written_without_them(self, tmp_path):
+        path = tmp_path / "s.yaml"
+        save_sequences_yaml([{"type": "flow_reagent", "fluidic_port": 2, "flow_rate": 500,
+                              "volume": 500}], str(path))
+        assert "well" not in path.read_text() and "dip_cycles" not in path.read_text()
+        assert load_sequences(str(path))[0]["well"] is None
+
+    def test_every_port_or_well_valued_field_is_registered(self):
+        from fluidics.sequences import PORT_FIELDS, SEQUENCE_TYPES, WELL_FIELDS
+        for model in SEQUENCE_TYPES.values():
+            for name in model.model_fields:
+                if name.endswith("port") or name.endswith("_with") or "well" in name:
+                    assert name in PORT_FIELDS or name in WELL_FIELDS, name
+
+
+class TestPairingRules:
+    def test_a_well_on_a_rig_without_a_sipper_is_refused(self, flow_cell_config):
+        """Review focus 1."""
+        with pytest.raises(ValueError, match="no sipper"):
+            _validate([HYB], flow_cell_config)
+
+    def test_a_well_needs_the_sipper_port_and_the_sipper_port_needs_a_well(self, plate_sipper_config):
+        v = _vocabulary(plate_sipper_config)
+        assert sequence_well_problems(dict(HYB, fluidic_port=2), v) == ["well=A1 needs fluidic_port=1 (the sipper)"]
+        assert sequence_well_problems({**HYB, "well": None}, v) == ["fluidic_port=1 is the sipper: name a well"]
+        assert sequence_well_problems(HYB, v) == []
+
+    def test_a_sipper_row_carries_no_fill(self, plate_sipper_config):
+        v = _vocabulary(plate_sipper_config)
+        assert sequence_well_problems(dict(HYB, fill_tubing_with=25), v) == [
+            "a sipper row cannot fill tubing: add a flow_reagent row from the paired well"]
+        assert sequence_well_problems({"type": "flow_reagent", "fluidic_port": 25, "flow_rate": 500,
+                                       "volume": 500, "fill_tubing_with": 1}, v) == [
+            "fill_tubing_with=1 is the sipper: the sipper cannot fill tubing"]
+
+    def test_dips_need_a_well_and_a_whole_number_and_references_must_resolve(self, plate_sipper_config):
+        v = _vocabulary(plate_sipper_config)
+        assert sequence_well_problems({"type": "flow_reagent", "fluidic_port": 25, "flow_rate": 500,
+                                       "volume": 500, "dip_cycles": 2}, v) == ["dip_cycles needs a well"]
+        assert sequence_well_problems(dict(HYB, dip_cycles=-1), v)[0].startswith("dip_cycles=-1")
+        assert sequence_well_problems(dict(HYB, dip_cycles="2"), v)[0].startswith("dip_cycles='2'")
+        assert sequence_well_problems(dict(HYB, well="water/A1"), v)[0].startswith("well=water/A1:")
+
+    def test_priming_may_name_the_sipper_well(self, plate_sipper_config):
+        v = _vocabulary(plate_sipper_config)
+        prime = {"type": "priming", "fluidic_port": 25, "flow_rate": 5000, "volume": 800,
+                 "sipper_well": "ssct/H10"}
+        assert sequence_well_problems(prime, v) == []
+        assert _sequence_problem(prime, "Flow Cell", (1, 25), sipper=v) is None
+        assert _sequence_problem(dict(HYB, fluidic_port=25), "Flow Cell", (1, 25), sipper=v) \
+            == "well=A1 needs fluidic_port=1 (the sipper)"
+
+    def test_the_gate_names_the_row(self, plate_sipper_config):
+        with pytest.raises(ValueError, match=r"sequence 0 \(hyb\).*needs fluidic_port=1"):
+            _validate([dict(HYB, name="hyb", fluidic_port=24)], plate_sipper_config)
+
+    def test_a_file_with_no_well_fields_validates_as_before(self, flow_cell_config):
+        _validate([{"type": "flow_reagent", "fluidic_port": 2, "flow_rate": 500, "volume": 500,
+                    "fill_tubing_with": 25}], flow_cell_config)
