@@ -101,3 +101,24 @@ class TestQuickstartRunsEndToEnd:
         assert worker.outcome == "finished", worker.message
         assert len(completed) == len(plan)
         assert len(plan) == sum(s.get("repeat", 1) for s in included)
+
+
+def test_the_plate_sipper_samples_load_validate_and_run(tmp_path):
+    """The documented pairing runs end to end on an instant simulated rig
+    under the fake clock (the round has a 20-minute incubation)."""
+    from fluidics.devices import build_devices
+    from fluidics.sequences import validate_sequences
+    from fluidics.system import FluidicsSystem
+    from ..conftest import wait_until
+    config = load_config(str(SOFTWARE / "sample_config" / "plate_sipper_config.yaml"))
+    sequences = get_included_sequences(load_sequences(
+        str(SOFTWARE / "sample_sequences" / "seqfish-plate-sipper.yaml")))
+    validate_sequences(sequences, config)
+    devices = build_devices(config, simulation=True, instant=True)
+    for sensor in devices.flow_sensors:
+        sensor.close()
+    with FluidicsSystem(config, devices, report_dir=tmp_path) as system:
+        system.run(sequences)
+        assert wait_until(lambda: not system.busy, timeout=30)
+        assert system.devices.reservoirs.remaining("ssct/A1") == 1750 - 490 - 1000
+        assert system.devices.reservoirs.remaining("probes/A1") == 5

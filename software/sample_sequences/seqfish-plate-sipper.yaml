@@ -1,0 +1,17 @@
+# One seqFISH+ round on the plate-sipper rig (spec section 6). Port 1 is the
+# sipper; plate 1 (probes) holds one hyb mix per round, plate 2 (ssct) the
+# paired 4x SSCT well. The push row's 490 uL is the tip-to-flow-cell volume
+# (sample_config/plate_sipper_config.yaml); bulk rows that incubate are
+# pushed to the flow cell with 4x SSC (port 25) the way Flow Cell rows always
+# were; washes draw more than the tubing holds, so they reach the cell.
+sequences:
+  - {type: priming,      round: setup, fluidic_port: 25, flow_rate: 5000, volume: 800}
+  - {type: flow_reagent, round: R01, name: hyb,         fluidic_port: 1,  well: A1,      flow_rate: 2000, volume: 100}
+  - {type: flow_reagent, round: R01, name: push,        fluidic_port: 1,  well: ssct/A1, flow_rate: 2000, volume: 490, incubation_time: 20}
+  - {type: flow_reagent, round: R01, name: ssct,        fluidic_port: 1,  well: ssct/A1, flow_rate: 5000, volume: 1000, dip_cycles: 3}
+  - {type: flow_reagent, round: R01, name: wash 12.5%,  fluidic_port: 24, flow_rate: 5000, volume: 1000}
+  - {type: flow_reagent, round: R01, name: 4x SSC,      fluidic_port: 25, flow_rate: 5000, volume: 1000}
+  - {type: flow_reagent, round: R01, name: dapi,        fluidic_port: 26, flow_rate: 5000, volume: 300, incubation_time: 0.5, fill_tubing_with: 25}
+  - {type: flow_reagent, round: R01, name: anti-bleach, fluidic_port: 27, flow_rate: 5000, volume: 1000}
+  - {type: flow_reagent, round: R01, name: strip 55%,   fluidic_port: 28, flow_rate: 1000, volume: 1000, incubation_time: 1}
+  - {type: flow_reagent, round: R01, name: rinse,       fluidic_port: 25, flow_rate: 5000, volume: 1000}
