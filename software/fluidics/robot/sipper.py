@@ -113,11 +113,6 @@ class RobotSipper:
     def position(self):
         return self._stage.position()
 
-    @property
-    def is_retracted(self):
-        """The stage's reading of its last published position (no I/O)."""
-        return self._stage.is_retracted
-
     def retracted_at(self, position):
         """Whether a published position counts as retracted (no I/O)."""
         return self._stage.retracted_at(position)

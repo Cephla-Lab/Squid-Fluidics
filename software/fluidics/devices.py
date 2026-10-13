@@ -31,7 +31,6 @@ from .experiment_worker import ExperimentWorker
 from .merfish_operations import MERFISHOperations
 from .open_chamber_operations import OpenChamberOperations
 from .reservoirs import ReservoirLedger, default_ledger_path, reservoir_definitions
-from .robot.labware import parse_ref
 from .robot.sipper import RobotSipper
 from .robot.stage import POLL_SECONDS, XYZStage
 from .vocabulary import sipper_vocabulary

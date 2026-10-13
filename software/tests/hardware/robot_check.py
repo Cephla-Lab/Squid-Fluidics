@@ -1,7 +1,7 @@
 """Bench check for the sipper robot: python -m tests.hardware.robot_check --config ../config.yaml
 
 Home (watch Z go UP first), jog each axis, teach A1 and the dip depth on
-each plate, visit every corner, agitate in a full well, retract. Run with the
+each plate, visit every corner, agitate in a full well and stay there. Run with the
 deck clear of anything but the plates. Afterwards de-energize the Z drive
 and confirm the stage holds with the sipper and tubing mounted: Z3 has no
 brake and relies on its lead screw (nm-servo PR #6). The 12 columns span
@@ -205,9 +205,6 @@ def main():
             manual.go_to_well(agitate_well)
             robot.agitate(2)
             settle.report(f"agitate in {agitate_well}")
-            input("Enter to retract...")
-            manual.retract()
-            settle.report("retract")
             print(settle.summary())
             for name, ((x, y), z) in taught.items():
                 print(f"  {name}: a1_xy_mm: [{x:.2f}, {y:.2f}]  dip_z_mm: {z:.2f}")
@@ -216,11 +213,14 @@ def main():
                 print("Simulation: the taught values are not saved.")
             elif input(f"Write the taught values into {config.source_path}? [y/N] ").strip().lower() == "y":
                 print("written to", save_config(config))
-            input("Enter to close: no move (the tip stays where it is), "
-                  "then every drive is disabled...")
+            input(f"Enter to close: no move (the tip stays in {agitate_well}, as it does between "
+                  "sessions), then every drive is disabled. Then check that Z holds there "
+                  "unpowered, and that X and Y hold under the tubing...")
         except BaseException as e:
             # A failure or Ctrl+C: the stage halted any leg it was in. Close
-            # without a move, as the with's close would also do.
+            # without a move -- the with's quiescent close would also clear
+            # the abort latch and, on a Flow Cell rig, park the syringe to
+            # waste, a pump move.
             print("Stopped: closing without moving.")
             system.devices.close(quiescent=False)
             if isinstance(e, KeyboardInterrupt):

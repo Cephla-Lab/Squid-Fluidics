@@ -1,14 +1,17 @@
-"""The Robot tab: jog, home, teach, go to well, reset a fault, and the
-reservoir table. Every verb is a manual job through the session (one job on
-the rig); the controls freeze while ANY job runs (the session's state, not
-only this tab's); position is painted from the stage's publish; STOP is the
-session's abort -- the ManualControlWidget's contract, applied to the
-sipper (spec §9). Teaching goes through the manual verbs, which change the
-live robot and the config together, or neither; Save writes the config.
+"""The Robot tab, the run-time view: home, retract, reset a fault, STOP,
+"Do not lower tip", the deck map, go to well, and the reservoir table.
+Teaching, with the jog it needs, is a tool window opened from the Stage
+row. Every verb is a manual job through the session (one job on the rig);
+the controls freeze while ANY job runs (the session's state, not only this
+tab's); position is painted from the stage's publish; STOP is the session's
+abort -- the ManualControlWidget's contract, applied to the sipper (spec
+§9). Teaching goes through the manual verbs, which change the live robot
+and the config together, or neither; Save writes the config.
 """
 
 import logging
 
+from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (QCheckBox, QComboBox, QGridLayout, QGroupBox, QHBoxLayout,
                             QHeaderView, QLabel, QMessageBox, QPushButton, QTableWidget,
                             QTableWidgetItem, QVBoxLayout, QWidget)
@@ -16,8 +19,6 @@ from qtpy.QtWidgets import (QCheckBox, QComboBox, QGridLayout, QGroupBox, QHBoxL
 from fluidics.control.config import gantry, save_config
 from fluidics.events import RunStarted, SequenceCompleted
 from fluidics.vocabulary import sipper_vocabulary
-
-from qtpy.QtCore import Qt
 
 from .deck_map import DeckMapWidget
 from .support import PostsToQtThread, _ask_yes_no, subscribe_until_detached
@@ -91,6 +92,13 @@ class RobotControlWidget(PostsToQtThread, QWidget):
             (system.session.events, self._onRunEvent))
         self.destroyed.connect(detach)
         self.initUI()
+        # The teach window's plate follows the Wells row's pick (a Go to well
+        # or a map click), so "Set A1 here" after visiting a well teaches
+        # that well's plate; and the switch shows the robot's state, which
+        # an embedder's earlier tab may have set.
+        self.reservoirCombo.currentIndexChanged.connect(self._followReservoir)
+        self._followReservoir()
+        self.lowerTipBox.setChecked(not system.devices.robot.lower_tip)
         self._paintPosition(system.devices.robot.position())
         self.refreshReservoirs()
         # Built while a job runs (an embedder's tab), it starts frozen.
@@ -130,8 +138,8 @@ class RobotControlWidget(PostsToQtThread, QWidget):
         self.lowerTipBox.toggled.connect(lambda checked: self.manual.set_lower_tip(not checked))
         row.addWidget(self.lowerTipBox)
         self._controls.append(self.lowerTipBox)
-        column = QVBoxLayout()
-        column.addLayout(row)
+        stage_column = QVBoxLayout()
+        stage_column.addLayout(row)
         # The deck map: the plates where they are taught, the tip where the
         # stage last said it was. A click on a well is Go to well for that
         # well, and nothing between wells; it freezes with the controls.
@@ -143,9 +151,9 @@ class RobotControlWidget(PostsToQtThread, QWidget):
             "priming": self._vocabulary.resolve(g.priming_well),
             "clean-up": self._vocabulary.resolve(g.clean_up_well)})
         self.deckMap.wellClicked.connect(self._goToClickedWell)
-        column.addWidget(self.deckMap, 1)
+        stage_column.addWidget(self.deckMap, 1)
         self._controls.append(self.deckMap)
-        status.setLayout(column)
+        status.setLayout(stage_column)
         layout.addWidget(status)
 
         # --- the teach window: jog, then the teach row ---
@@ -199,7 +207,7 @@ class RobotControlWidget(PostsToQtThread, QWidget):
         self.teachWindow = _ToolWindow("Teach", teaching, parent=self)
 
         ledger = QGroupBox("Reservoirs")
-        column = QVBoxLayout()
+        ledger_column = QVBoxLayout()
         self.reservoirTable = QTableWidget(0, 3)
         self.reservoirTable.setHorizontalHeaderLabels(["Reservoir", "Dispatched (µL)", "Remaining (µL)"])
         # The numeric columns size to their contents (the header's label
@@ -211,14 +219,14 @@ class RobotControlWidget(PostsToQtThread, QWidget):
         header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self.reservoirTable.verticalHeader().setVisible(False)
         self.reservoirTable.setEditTriggers(QTableWidget.NoEditTriggers)
-        column.addWidget(self.reservoirTable)
+        ledger_column.addWidget(self.reservoirTable)
         row = QHBoxLayout()
         self.undeclaredLabel = QLabel("")
         self.undeclaredLabel.setWordWrap(True)
         row.addWidget(self.undeclaredLabel, 1)
         self.plateReloadedButton = self._button(row, "Plate reloaded…", self.plateReloaded)
-        column.addLayout(row)
-        ledger.setLayout(column)
+        ledger_column.addLayout(row)
+        ledger.setLayout(ledger_column)
         layout.addWidget(ledger)
 
         self.setLayout(layout)
@@ -251,6 +259,10 @@ class RobotControlWidget(PostsToQtThread, QWidget):
         self.teachWindow.show()
         self.teachWindow.raise_()
         self.teachWindow.activateWindow()
+
+    def _followReservoir(self):
+        self.teachPlateCombo.setCurrentIndex(
+            self.teachPlateCombo.findData(self.reservoirCombo.currentData()))
 
     def _goToClickedWell(self, reservoir, well):
         """A click on the map: the pickers show the well, and the move is

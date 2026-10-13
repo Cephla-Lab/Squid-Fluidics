@@ -105,8 +105,15 @@ class DeckMapWidget(QWidget):
 
     def legend(self):
         """The roles present, a well with two roles listed once with both."""
-        combos = sorted({" + ".join(roles) for roles in self._roles.values()})
-        return [f"{combo} well" for combo in combos]
+        return [label for label, _ in self._legendEntries()]
+
+    def _legendEntries(self):
+        """(label, color) per distinct role combination, in label order;
+        the color is the first role's, the one that fills the well."""
+        combos = {}
+        for roles in self._roles.values():
+            combos.setdefault(" + ".join(roles), ROLE_COLORS[roles[0]])
+        return [(f"{combo} well", combos[combo]) for combo in sorted(combos)]
 
     def pixel(self, x_mm, y_mm):
         """Deck mm to widget pixels: X to the right, Y up (the deck seen
@@ -118,15 +125,13 @@ class DeckMapWidget(QWidget):
     def wellAt(self, point):
         """The well whose centre is within the hit radius of `point` (a
         QPoint in widget pixels), or None: between wells is nowhere."""
-        scale, _, _ = self._frame()
-        px, py = float(point.x()), float(point.y())
-        for name, placement in self._placements.items():
-            radius = HIT_RADIUS_PITCH * placement.pitch_mm * scale
-            for well in placement.geometry.wells():
-                wx, wy = self.pixel(*placement.xy_mm(well))
-                if (wx - px) ** 2 + (wy - py) ** 2 <= radius ** 2:
-                    return WellRef(name, well)
-        return None
+        return self.wellAtXY(*self._mm(point.x(), point.y()))
+
+    def _mm(self, px, py):
+        """Widget pixels back to deck mm (the inverse of pixel())."""
+        scale, left, bottom = self._frame()
+        (x0, _), (y0, _) = self._box()
+        return x0 + (px - left) / scale, y0 + (bottom - py) / scale
 
     # --- clicks ---
 
@@ -230,7 +235,11 @@ class DeckMapWidget(QWidget):
             return
         x, y, _ = self._position
         color = TIP_RETRACTED if self._retracted else TIP_LOWERED
-        if self._current_well is not None and self._current_well.reservoir in self._placements:
+        # The ring only when the dot is over its well: the witness is read
+        # live while the position is the last publish, so a paint that lands
+        # between the two must not ring a well the dot has left.
+        if (self._current_well is not None and self._current_well.reservoir in self._placements
+                and self.wellAtXY(x, y) == self._current_well):
             placement = self._placements[self._current_well.reservoir]
             wx, wy = self.pixel(*placement.xy_mm(self._current_well.well))
             ring = WELL_RADIUS_PITCH * placement.pitch_mm * scale + 4
@@ -244,8 +253,7 @@ class DeckMapWidget(QWidget):
 
     def _paintLegend(self, painter):
         # A well's swatch is well-sized, the tip's is the dot's own size.
-        entries = [(label, ROLE_COLORS[label.split(" well")[0].split(" + ")[0]], 4.5)
-                   for label in self.legend()]
+        entries = [(label, color, 4.5) for label, color in self._legendEntries()]
         entries += [("tip retracted", TIP_RETRACTED, TIP_RADIUS_PX), ("tip lowered", TIP_LOWERED, TIP_RADIUS_PX)]
         painter.setFont(QFont("Helvetica", 8))
         x = 6.0

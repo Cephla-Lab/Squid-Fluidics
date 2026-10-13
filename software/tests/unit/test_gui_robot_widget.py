@@ -405,10 +405,48 @@ def test_teaching_and_jog_live_in_their_own_window_and_the_map_on_the_tab(widget
     assert w.teachButton.isEnabled() and _frozen(w) and not w.teachPlateCombo.isEnabled()
 
 
-def test_teaching_moves_the_drawn_plate(widget, monkeypatch):
+def test_the_teach_plates_picker_follows_the_wells_picker_and_a_map_click(widget, monkeypatch):
+    """Visit a well on ssct (a map click), open Teach…, jog, Set A1 here: it
+    is ssct's A1 that is taught, not the first plate in the list."""
+    from qtpy.QtCore import QPoint, Qt
+    from qtpy.QtTest import QTest
+    w, system = widget
+    said = []
+    monkeypatch.setattr(w, "handleError", said.append)     # a refusal is a dialog: record it, never block
+    assert w.teachPlateCombo.currentData() == w.reservoirCombo.currentData() == "probes"
+    w.deckMap.resize(640, 360)
+    px, py = w.deckMap.pixel(*system.devices.robot.placements["ssct"].xy_mm("A1"))
+    QTest.mouseClick(w.deckMap, Qt.LeftButton, pos=QPoint(int(round(px)), int(round(py))))
+    _settle(system)
+    assert w.teachPlateCombo.currentData() == "ssct"
+    w._run(w.manual.retract)
+    _settle(system)
+    w._run(lambda: w.manual.jog("x", 1.0))
+    _settle(system)
+    probes_before = system.devices.robot.placements["probes"].a1_xy_mm
+    w.setA1Here()
+    _settle(system)
+    assert said == []
+    assert system.devices.robot.placements["ssct"].a1_xy_mm == system.devices.robot.position()[:2]
+    assert system.devices.robot.placements["probes"].a1_xy_mm == probes_before
+
+
+def test_the_do_not_lower_tip_box_shows_the_robots_state_when_built(widget):
+    from fluidics.qt.robot_control import RobotControlWidget
+    w, system = widget
+    system.devices.robot.lower_tip = False
+    second = RobotControlWidget(w.config, system)
+    try:
+        assert second.lowerTipBox.isChecked()
+    finally:
+        second.deleteLater()
+        QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    system.devices.robot.lower_tip = True
+
+
+def test_teaching_moves_the_drawn_plate(widget):
     """The map re-reads the live placements when the teach job ends."""
     w, system = widget
-    monkeypatch.setattr("fluidics.qt.robot_control._ask_yes_no", lambda *a, **k: True)
     before = w.deckMap.pixel(*system.devices.robot.placements["probes"].xy_mm("A1"))
     w.teachPlateCombo.setCurrentIndex(w.teachPlateCombo.findData("probes"))
     w._run(w.manual.home_robot)
