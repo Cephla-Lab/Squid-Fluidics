@@ -121,6 +121,7 @@ def test_the_embedder_lifts_its_freeze_once_the_rig_is_idle(widget):
     w.setControlsEnabled(False)
     system.run([HYB_FROM_A1])
     _settle(system)
+    assert _frozen(w)                  # the freeze held through the run's end
     w.setControlsEnabled(True)
     assert w.goToWellButton.isEnabled() and w.setA1Button.isEnabled() and w.plateReloadedButton.isEnabled()
     assert not w.stopButton.isEnabled()
@@ -136,6 +137,8 @@ def test_the_embedder_cannot_unfreeze_a_running_job_and_stop_follows_the_session
     gate = threading.Event()
     if own:
         w._run(lambda: gate.wait(5))
+        # The start's own repaint, before the session's posted one lands.
+        assert _frozen(w) and w.stopButton.isEnabled()
     else:
         system.run_manual(lambda: gate.wait(5))
     try:
