@@ -43,10 +43,10 @@ def test_the_robot_comes_up_before_the_valves_and_is_not_survivable(plate_sipper
 
 
 def test_a_second_launch_on_a_held_ledger_touches_no_device(plate_sipper_config, built, tmp_path, monkeypatch):
-    """The ledger's lock comes before any device is touched: a second
-    launch on a rig already in use stops there, before it clears the MCU,
-    homes the robot (lifting the first session's tip out of its well) or
-    homes the valves. What it had constructed is still released."""
+    """The ledger's lock comes before any device is constructed: a second
+    launch on a rig already in use stops there, before it opens or clears
+    the MCU, homes the robot (lifting the first session's tip out of its
+    well) or homes the valves."""
     import fluidics.devices as devices_module
     from fluidics.control.controller import FluidControllerSimulation
     from fluidics.robot import simulation as robot_simulation
@@ -56,16 +56,6 @@ def test_a_second_launch_on_a_held_ledger_touches_no_device(plate_sipper_config,
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             controllers.append(self)
-            self.begun = False
-            self.closes = 0
-
-        def begin(self):
-            self.begun = True
-            return super().begin()
-
-        def close(self):
-            self.closes += 1
-            return super().close()
 
     class RecordingService(robot_simulation.SimulatedService):
         def __init__(self, *args, **kwargs):
@@ -86,13 +76,103 @@ def test_a_second_launch_on_a_held_ledger_touches_no_device(plate_sipper_config,
     assert len(controllers) == len(services) == len(valves) == 1
     with pytest.raises(ReservoirInUse):
         build_devices(plate_sipper_config, simulation=True, instant=True, ledger_path=path)
-    second = controllers[1]
-    assert not second.begun and second.sent == [], "the MCU was neither begun nor cleared"
+    assert len(controllers) == 1, "no controller was constructed: the MCU was neither opened nor cleared"
     assert len(services) == 1, "no stage service was opened: nothing connected, homed or moved"
     assert len(valves) == 1, "the valves were not homed"
-    assert second.closes == 1, "what the failed launch had constructed is released"
     assert first.close() == []
     built(plate_sipper_config, simulation=True, instant=True, ledger_path=path)   # the lock was the first set's
+
+
+def _record_the_real_pump(monkeypatch, not_initialized=False):
+    """The real SyringePump, its port found and its Tecan transport replaced
+    by a recorder: returns the list every command sent to the pump lands in.
+    The real constructor talks to the pump (the microstep command N0R, then
+    the speed, plunger and port queries), so a recorded command is one a
+    second launch would have sent to the first session's pump.
+
+    not_initialized: the first start-speed query (?1) is answered "device
+    not initialized" (status 00100111), which sends the vendor driver into
+    its recovery: a plunger and valve initialization, a Z...R command."""
+    from fluidics.control import syringe_pump
+    commands = []
+    answers = {"?": "0", "?1": "50", "?2": "500", "?3": "50", "?6": "2"}
+
+    class RecordedTransport:
+        def __init__(self, **kwargs):
+            pass
+
+        def sendRcv(self, command):
+            commands.append(command)
+            if not_initialized and command == "?1" and commands.count("?1") == 1:
+                return {"status_byte": "00100111", "data": "0"}
+            return {"status_byte": "00100000", "data": answers.get(command, "0")}
+
+    monkeypatch.setattr(syringe_pump, "find_serial_port", lambda *args: "fake-pump-port")
+    monkeypatch.setattr(syringe_pump.tecancavro, "TecanAPISerial", RecordedTransport)
+    return commands
+
+
+def test_a_second_launch_sends_the_real_pump_nothing_before_the_lock_refuses_it(
+        plate_sipper_config, tmp_path, monkeypatch):
+    """The real pump's constructor talks to the pump, so the lock comes
+    before it: a second launch on a rig in use sends the first session's
+    pump no command at all."""
+    from fluidics.reservoirs import ReservoirLedger, reservoir_definitions
+    commands = _record_the_real_pump(monkeypatch)
+    path = tmp_path / "ledger.json"
+    first = ReservoirLedger.load(path, reservoir_definitions(plate_sipper_config))
+    try:
+        with pytest.raises(ReservoirInUse):
+            build_devices(plate_sipper_config, simulation=False, ledger_path=path)
+        assert commands == [], f"sent to the pump before the lock refused the launch: {commands}"
+    finally:
+        first.close()
+
+
+def test_a_second_launch_cannot_initialize_the_real_pump_before_the_lock_refuses_it(
+        plate_sipper_config, tmp_path, monkeypatch):
+    """A pump that answers "not initialized" sends the vendor driver into
+    its recovery, a plunger and valve initialization -- on a rig in use,
+    of the first session's pump, perhaps mid-run. The second launch never
+    gets that far: the lock refuses it, and the refusal is the lock's, not
+    the TypeError the recovery leaves its interrupted query with."""
+    from fluidics.reservoirs import ReservoirLedger, reservoir_definitions
+    commands = _record_the_real_pump(monkeypatch, not_initialized=True)
+    path = tmp_path / "ledger.json"
+    first = ReservoirLedger.load(path, reservoir_definitions(plate_sipper_config))
+    try:
+        with pytest.raises((ReservoirInUse, TypeError)) as refused:
+            build_devices(plate_sipper_config, simulation=False, ledger_path=path)
+        initializations = [c for c in commands if c.startswith("Z") and c.endswith("R")]
+        assert initializations == [], f"the pump was initialized before the lock refused: {commands}"
+        assert refused.type is ReservoirInUse
+    finally:
+        first.close()
+
+
+def test_a_pump_that_cannot_be_found_fails_the_launch_and_frees_the_ledger(
+        plate_sipper_config, tmp_path, monkeypatch):
+    """The lock is taken before the devices are constructed, so a
+    constructor that raises (here the pump's port search) unwinds through
+    the bring-up's cleanup and releases it: the next launch can take it."""
+    from fluidics.control import syringe_pump
+    from fluidics.errors import DeviceNotFoundError
+    from fluidics.reservoirs import ReservoirLedger, reservoir_definitions
+
+    def not_found(serial_number, device_name):
+        raise DeviceNotFoundError(f"{device_name} with serial number {serial_number!r} not found")
+
+    monkeypatch.setattr(syringe_pump, "find_serial_port", not_found)
+    path = tmp_path / "ledger.json"
+    with pytest.raises(DeviceNotFoundError, match="Syringe pump") as failed:
+        build_devices(plate_sipper_config, simulation=False, ledger_path=path)
+    # The failed launch's frames live on in `failed`, so the lock is free
+    # here only if the launch released it, not the garbage collector.
+    second = ReservoirLedger.load(path, reservoir_definitions(plate_sipper_config))
+    try:
+        assert failed.value is not None
+    finally:
+        second.close()
 
 
 def test_a_failure_after_the_robot_is_up_closes_it_without_moves_and_frees_the_ledger(plate_sipper_config, tmp_path, monkeypatch):

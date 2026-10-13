@@ -239,15 +239,15 @@ def build_devices(config, simulation=False, on_issue=None, run_control=None,
                   instant=False, ledger_path=None):
     """Construct and start the full stack for `config`. Returns a DeviceSet.
 
-    Mirrors what the two entry points did, once: construct controller, syringe
-    pump, and (optionally) temperature controller; take the reservoir
-    ledger's lock (before any device is touched, so a second launch on a
-    rig in use stops there); begin() the controller and CLEAR the MCU; start
-    the flow sensors; build the robot when the config has a gantry
-    (connected, homed, retracted: after the sensors, before the valves);
-    build the selector valves (which homes them, today a constructor side
-    effect); attach the disc pump for Open Chamber; attach the ledger to
-    the pump's draws.
+    Mirrors what the two entry points did, once: take the reservoir
+    ledger's lock (before any device is constructed, so a second launch on
+    a rig in use stops there); construct controller, syringe pump, and
+    (optionally) temperature controller; begin() the controller and CLEAR
+    the MCU; start the flow sensors; build the robot when the config has a
+    gantry (connected, homed, retracted: after the sensors, before the
+    valves); build the selector valves (which homes them, today a
+    constructor side effect); attach the disc pump for Open Chamber; attach
+    the ledger to the pump's draws.
 
     Degradation policy is the GUI's: a temperature controller that fails to
     come up on hardware, or flow sensors that fail in either mode, are
@@ -279,48 +279,53 @@ def build_devices(config, simulation=False, on_issue=None, run_control=None,
 
     # One cancellation signal for the whole run -- see RunControl.
     run_control = run_control if run_control is not None else RunControl()
-    controller = controller_cls(config.microcontroller.serial_number)
-    syringe_pump = pump_cls(
-        sn=config.syringe_pump.serial_number,
-        syringe_ul=config.syringe_pump.volume_ul,
-        speed_code_limit=config.syringe_pump.speed_code_limit,
-        waste_port=config.syringe_pump.waste_port,
-        run_control=run_control)
-    if instant:
-        # On the instances, before bring-up -- the valves' homing waits are
-        # paced too -- so a concurrently simulated rig keeps its own pacing.
-        controller.COMMAND_SECONDS = 0
-        syringe_pump.ESTIMATE_SECONDS = 0
 
+    controller = None
+    syringe_pump = None
     temperature_controller = None
-    if config.temperature_controller is not None:
-        tc_cfg = config.temperature_controller
-        try:
-            temperature_controller = tc_cls(
-                sn=tc_cfg.serial_number,
-                channels=tc_cfg.channels,
-                tolerance_celsius=tc_cfg.tolerance_celsius,
-                stabilization_timeout_seconds=tc_cfg.stabilization_timeout_seconds,
-            )
-        except Exception as e:
-            # Survivable only on hardware, where the usual cause is a flaky
-            # port or serial-number mismatch. In simulation there is no port
-            # to be flaky: a failure is a real bug and raises.
-            if simulation:
-                raise
-            on_issue(ISSUE_TEMPERATURE_CONTROLLER,
-                     f"Failed to initialize temperature controller: {e}")
-
     flow_sensors = []
     robot = None
     reservoirs = None
     try:
-        # The ledger's lock first, before any device is touched: a second
-        # launch on a rig already in use stops here, before it clears the
-        # MCU, homes the robot (lifting the first session's tip out of its
-        # well) or homes the valves. A file it cannot read or lock fails the
-        # launch with what was constructed above released.
+        # The ledger's lock first, before any device is constructed: a
+        # second launch on a rig already in use stops here, before it talks
+        # to the pump (the real pump's constructor sends it commands, and a
+        # pump that answers "not initialized" is initialized by the vendor
+        # driver), clears the MCU, homes the robot (lifting the first
+        # session's tip out of its well) or homes the valves. A file it
+        # cannot read or lock fails the launch with nothing to release.
         reservoirs = _build_ledger(config, simulation, ledger_path)
+
+        controller = controller_cls(config.microcontroller.serial_number)
+        syringe_pump = pump_cls(
+            sn=config.syringe_pump.serial_number,
+            syringe_ul=config.syringe_pump.volume_ul,
+            speed_code_limit=config.syringe_pump.speed_code_limit,
+            waste_port=config.syringe_pump.waste_port,
+            run_control=run_control)
+        if instant:
+            # On the instances, before bring-up -- the valves' homing waits are
+            # paced too -- so a concurrently simulated rig keeps its own pacing.
+            controller.COMMAND_SECONDS = 0
+            syringe_pump.ESTIMATE_SECONDS = 0
+
+        if config.temperature_controller is not None:
+            tc_cfg = config.temperature_controller
+            try:
+                temperature_controller = tc_cls(
+                    sn=tc_cfg.serial_number,
+                    channels=tc_cfg.channels,
+                    tolerance_celsius=tc_cfg.tolerance_celsius,
+                    stabilization_timeout_seconds=tc_cfg.stabilization_timeout_seconds,
+                )
+            except Exception as e:
+                # Survivable only on hardware, where the usual cause is a flaky
+                # port or serial-number mismatch. In simulation there is no port
+                # to be flaky: a failure is a real bug and raises.
+                if simulation:
+                    raise
+                on_issue(ISSUE_TEMPERATURE_CONTROLLER,
+                         f"Failed to initialize temperature controller: {e}")
 
         controller.begin()
         controller.send_command(CMD_SET.CLEAR)
@@ -355,21 +360,24 @@ def build_devices(config, simulation=False, on_issue=None, run_control=None,
                 (lambda: None if robot.current_well is None
                  else f"{robot.current_well.reservoir}/{robot.current_well.well}"))
     except BaseException:
-        # A dead controller, a stuck valve, or a Ctrl+C (an operator
-        # watching Z home) is not survivable, but the pieces
-        # already running must not outlive the failed launch: the controller's
-        # reader thread holds the MCU port, and a sensor left subscribed would
-        # keep a handler on a stream nobody owns. Shielded per step, so one
-        # close failure cannot strand the rest or replace the bring-up error
-        # this block re-raises. (The syringe pump is deliberately absent:
-        # SyringePump.close() only drops a reference, so calling it here would
-        # release nothing -- the port lives until the object is collected.)
+        # A pump that is not found, a dead controller, a stuck valve, or a
+        # Ctrl+C (an operator watching Z home) is not survivable, but the
+        # pieces already running must not outlive the failed launch: the
+        # controller's reader thread holds the MCU port, and a sensor left
+        # subscribed would keep a handler on a stream nobody owns. Only what
+        # was constructed is closed, since a constructor can be what failed.
+        # Shielded per step, so one close failure cannot strand the rest or
+        # replace the bring-up error this block re-raises. (The syringe pump
+        # is deliberately absent: SyringePump.close() only drops a reference,
+        # so calling it here would release nothing -- the port lives until
+        # the object is collected.)
         cleanups = [sensor.close for sensor in flow_sensors]
         if temperature_controller is not None:
             cleanups.append(temperature_controller.close)
         if robot is not None:
             cleanups.append(lambda: robot.close(quiescent=False))
-        cleanups.append(controller.close)
+        if controller is not None:
+            cleanups.append(controller.close)
         if reservoirs is not None:
             # The lock last, as DeviceSet.close releases it: the rig stays
             # held until every port this launch opened is released.
