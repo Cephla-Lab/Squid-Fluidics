@@ -44,7 +44,8 @@ class FluidicsSystem:
         # rolling log; built before any widget subscribes (RunSession.events
         # states the order rule).
         self.reports = RunReports(self.session.events, self.usage,
-                                  self.warnings, directory=report_dir)
+                                  self.warnings, directory=report_dir,
+                                  reservoirs=devices.reservoirs)
 
     @classmethod
     def build(cls, config, simulation=False, on_issue=None, report_dir=None, ledger_path=None):

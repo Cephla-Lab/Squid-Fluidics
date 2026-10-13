@@ -57,12 +57,14 @@ def _utc(seconds):
 
 
 class RunReports:
-    def __init__(self, run_events, usage, warnings, directory=None):
+    def __init__(self, run_events, usage, warnings, directory=None, reservoirs=None):
         """directory: where the reports go; None resolves to
         default_report_directory() at each write, so construction never
-        touches the disk."""
+        touches the disk. reservoirs: the ledger whose rows the report
+        carries, or None."""
         self._directory = directory
         self._usage = usage
+        self._reservoirs = reservoirs
         self._lock = threading.Lock()
         self._run = None                 # the run in flight, else None
         self._writers = []
@@ -145,6 +147,9 @@ class RunReports:
             "reagent_used_ul": [
                 {"port": port, "reagent": name, "volume_ul": used}
                 for port, name, used in self._usage.rows()],
+            "reservoirs": [] if self._reservoirs is None else [
+                {"key": key, "dispatched_ul": dispatched, "remaining_ul": remaining}
+                for key, dispatched, remaining in self._reservoirs.rows()],
             "warnings": run["warnings"],
         }
 
