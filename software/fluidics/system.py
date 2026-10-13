@@ -70,7 +70,8 @@ class FluidicsSystem:
         through session.events; `plan` from plan() rides along so the run
         is not priced twice, and is what gets checked when it is there --
         it is what the session executes. Gated by validate_sequences,
-        which says who else checks and why.
+        which says who else checks and why, and then by the reservoir gate
+        (check_reservoirs), before the session starts.
         """
         if plan is None:
             if not sequences:
@@ -81,16 +82,18 @@ class FluidicsSystem:
             # A list, not a generator: validate_sequences walks it twice.
             validate_sequences([entry.sequence for entry in plan],
                                self.devices.config)
-        # The reservoir gate (spec §7): the plan replayed against the live
-        # ledger, so a run that would draw from an emptied well or bottle
-        # -- a fresh list or a resumed tail alike -- is refused here, not
-        # at the pump hours in.
+        # The reservoir gate (spec §7): the plan replayed on a simulated
+        # twin restored from the live ledger's snapshot (the live ledger is
+        # only read), so a run that would draw from an emptied well or
+        # bottle -- a fresh list or a resumed tail alike -- is refused
+        # here, not at the pump hours in.
         self.check_reservoirs(plan)
         self.session.start(sequences, self.operations, plan=plan)
 
     def check_reservoirs(self, plan):
-        """The per-reservoir report for `plan` against the live ledger, or
-        ReservoirShortfall / ReservoirUndeclared. Empty on a rig with no
+        """The per-reservoir report for `plan`, replayed on a twin restored
+        from the live ledger's snapshot, which is only read; or the refusal
+        time_estimate.check_reservoirs raises. Empty on a rig with no
         ledger."""
         ledger = self.devices.reservoirs
         if ledger is None:

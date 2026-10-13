@@ -161,10 +161,15 @@ def _replay(config, sequences):
 def check_reservoirs(entries, config, snapshot):
     """Replay `entries` (PlanEntry, each once) on an instant simulated twin
     whose ledger starts from `snapshot`; the per-reservoir report when every
-    draw fits, else ReservoirShortfall naming the step, or ReservoirUndeclared
-    when anything tracked is undeclared. Separate from plan_run, which prices
-    on a full ledger and never raises (spec §7)."""
-    from .errors import ReservoirError, ReservoirShortfall, ReservoirUndeclared
+    draw fits. Otherwise it raises, naming the step: ReservoirShortfall for
+    a draw a refill would make fit; the reservoir's own error, its type and
+    remedy kept, for any other refusal (a draw no full well can give, no
+    well under the tip); OperationError for a step the twin cannot replay;
+    ReservoirUndeclared, before any replay, when anything tracked is
+    undeclared. Separate from plan_run, which prices on a full ledger and
+    never raises (spec §7)."""
+    from .errors import (OperationError, ReservoirError, ReservoirOverdraw, ReservoirShortfall,
+                         ReservoirUndeclared)
     if snapshot.get("undeclared"):
         raise ReservoirUndeclared(
             "the reservoir ledger is undeclared for " + ", ".join(snapshot["undeclared"])
@@ -180,12 +185,26 @@ def check_reservoirs(entries, config, snapshot):
                 continue
             try:
                 ops.process_sequence(entry.sequence)
+            except ReservoirOverdraw as e:
+                d = snapshot["definitions"][e.key]
+                raise ReservoirShortfall(e.key, e.needed_ul, e.remaining_ul,
+                                         d["loaded_ul"] - d["residual_ul"], entry.label) from e
             except ReservoirError as e:
-                key = getattr(e, "key", "?")
-                needed = getattr(e, "needed_ul", getattr(e, "volume_ul", 0))
-                remaining = devices.reservoirs.remaining(key) if key != "?" else 0
-                usable = getattr(e, "usable_ul", remaining)
-                raise ReservoirShortfall(key, needed, remaining, usable, entry.label) from e
+                # A refill would not help: its own words and remedy, and
+                # the step that met it.
+                _at_step(e, entry.label)
+                raise
+            except Exception as e:
+                raise OperationError(f"{entry.label}: the reservoir check could not replay "
+                                     f"this step ({e})") from e
         return devices.reservoirs.rows()
     finally:
         devices.close()
+
+
+def _at_step(error, label):
+    """Put the step's label before `error`'s message and on it as
+    `step_label`, its type and figures kept. In place: it is the twin's,
+    raised once, so nothing else holds it."""
+    error.args = (f"{label}: {error}",)
+    error.step_label = label

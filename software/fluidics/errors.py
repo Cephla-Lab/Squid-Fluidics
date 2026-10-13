@@ -82,12 +82,14 @@ class ReservoirUndeclared(ReservoirError):
 
 
 class ReservoirShortfall(ReservoirError):
-    """The reservoir gate's verdict: which step, which reservoir, how much."""
+    """The reservoir gate's verdict: which step, which reservoir, how much.
+    remaining_ul is the projection -- what the reservoir would hold when the
+    step comes round -- and usable_ul what a full one gives."""
 
     def __init__(self, key, needed_ul, remaining_ul, usable_ul, step_label):
         super().__init__(f"{step_label}: {key} cannot supply {needed_ul:.0f} uL "
-                         f"({remaining_ul:.0f} uL left of {usable_ul:.0f} usable); "
-                         "refill or reload before starting")
+                         f"(it would have {remaining_ul:.0f} uL left of {usable_ul:.0f} usable "
+                         "at this step); refill or reload before starting")
         self.key, self.needed_ul = key, needed_ul
         self.remaining_ul, self.usable_ul, self.step_label = remaining_ul, usable_ul, step_label
 
