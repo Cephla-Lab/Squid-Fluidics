@@ -246,6 +246,24 @@ PORT_FIELDS = {"fluidic_port": False, "fill_tubing_with": True}
 WELL_FIELDS = {"well": False, "sipper_well": True}
 
 
+def use_ports_problem(use_ports, sipper_port) -> Optional[str]:
+    """The refusal for a priming or clean-up row's use_ports on a rig whose
+    sipper is on `sipper_port`, or None. The sipper's port is never skipped
+    (D7): its line would hold air at the first draw, so a row that leaves it
+    out is refused rather than given a draw it did not list. With no sipper
+    (None) there is nothing to skip and selective priming stands. The
+    models do not know the field, so the time-zero gate and the operation
+    each ask this, and refuse in its words."""
+    if sipper_port is None or use_ports is None:
+        return None
+    if not isinstance(use_ports, (list, tuple)):
+        return f"use_ports={use_ports!r}: a list of ports"
+    if sipper_port not in use_ports:
+        return (f"use_ports leaves out port {sipper_port} (the sipper): "
+                "priming and clean-up never skip the sipper")
+    return None
+
+
 def sequence_well_problems(seq: dict, vocabulary) -> list[str]:
     """The well complaints for one sequence under `vocabulary` (None on a
     rig without a sipper), as messages; empty when there are none. Reads
@@ -288,14 +306,19 @@ def sequence_well_problems(seq: dict, vocabulary) -> list[str]:
         problems.append(f"fill_tubing_with={vocabulary.sipper_port} is the sipper: the sipper cannot fill tubing")
     if dips and well is None:
         problems.append("dip_cycles needs a well")
+    if seq.get("type") in ("priming", "clean_up"):
+        problem = use_ports_problem(seq.get("use_ports"), vocabulary.sipper_port)
+        if problem is not None:
+            problems.append(problem)
     return problems
 
 
 def check_wells_against_config(sequences: list[dict], config) -> None:
     """Raise ValueError if a sequence's well fields do not fit this rig:
     a well without the sipper's port, the sipper's port without a well, a
-    well on a rig with no sipper (spec §6). Reached through
-    validate_sequences, like the port and type checks."""
+    well on a rig with no sipper (spec §6), a priming or clean-up row whose
+    use_ports skips the sipper (D7). Reached through validate_sequences,
+    like the port and type checks."""
     from .vocabulary import sipper_vocabulary
     vocabulary = sipper_vocabulary(config)
     problems = []

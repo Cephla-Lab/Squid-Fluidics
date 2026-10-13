@@ -140,3 +140,45 @@ def test_a_fault_on_an_axis_that_arrived_stops_the_step_before_the_dip_and_the_d
     assert devices.robot.current_well is None
     assert [op for op in devices.syringe_pump.executed_ops if op[0] == "extract"] == []
     stage.reset_faults()                           # the Robot tab's verb; the rig closes clean
+
+
+SKIPS_THE_SIPPER = "use_ports leaves out port 1 (the sipper): priming and clean-up never skip the sipper"
+
+
+@pytest.mark.parametrize("seq_type, use_ports, message", [
+    ("priming", [25], SKIPS_THE_SIPPER),
+    ("clean_up", [25], SKIPS_THE_SIPPER),
+    ("priming", 25, "use_ports=25: a list of ports"),
+], ids=["priming", "clean_up", "not_a_list"])
+def test_selective_priming_that_leaves_out_the_sipper_is_refused_before_the_pump_moves(
+        rig, seq_type, use_ports, message):
+    """Codex finding 3: the sipper's port is never skipped (D7), or its
+    line holds air at the first draw. A row whose use_ports leaves it out
+    is refused before any pump or valve action, not given a draw from a
+    well it did not list; so is a use_ports that is not a list."""
+    devices, ops = rig
+    before = list(devices.syringe_pump.executed_ops)
+    opened = []
+    open_port = devices.selector_valves.open_port
+    devices.selector_valves.open_port = lambda port: opened.append(port) or open_port(port)
+    with pytest.raises(OperationError) as refused:
+        ops.process_sequence({"type": seq_type, "fluidic_port": 25, "flow_rate": 5000,
+                              "volume": 800, "use_ports": use_ports})
+    assert str(refused.value) == message
+    assert devices.syringe_pump.executed_ops == before
+    assert opened == []
+    assert devices.reservoirs.remaining("ssct/H11") == 1750       # the priming well
+    assert devices.reservoirs.remaining("ssct/H12") == 1750       # the clean-up well
+    assert devices.reservoirs.remaining("port_25") == 480000
+
+
+def test_selective_priming_that_lists_the_sipper_primes_it_from_the_priming_well(rig):
+    devices, ops = rig
+    opened = []
+    open_port = devices.selector_valves.open_port
+    devices.selector_valves.open_port = lambda port: opened.append(port) or open_port(port)
+    ops.process_sequence({"type": "priming", "fluidic_port": 25, "flow_rate": 5000,
+                          "volume": 800, "use_ports": [1, 25]})
+    assert opened == [1, 25, 25], "the sipper's port, port 25, then the final draw: no other bottle"
+    assert devices.reservoirs.remaining("ssct/H11") == 1750 - 250   # the sipper port's tip-to-valve volume
+    assert devices.reservoirs.remaining("port_25") == 480000 - 700 - 800

@@ -434,3 +434,39 @@ class TestPairingRules:
             _validate([row], plate_sipper_config)
         assert _sequence_problem(row, plate_sipper_config.application,
                                  available_ports(plate_sipper_config), sipper=v) is not None
+
+
+PRIME = {"type": "priming", "fluidic_port": 25, "flow_rate": 5000, "volume": 800}
+SKIPS_THE_SIPPER = "use_ports leaves out port 1 (the sipper): priming and clean-up never skip the sipper"
+
+
+class TestSelectivePriming:
+    """Codex finding 3: use_ports, a raw-dict option the models do not
+    know, may not leave out the sipper's port, whose line would then hold
+    air at the first draw (D7). Such a row is refused, not given a draw
+    from a well it did not list."""
+
+    @pytest.mark.parametrize("seq_type", ["priming", "clean_up"])
+    def test_a_row_that_leaves_out_the_sipper_is_refused(self, plate_sipper_config, seq_type):
+        v = _vocabulary(plate_sipper_config)
+        row = dict(PRIME, type=seq_type)
+        assert sequence_well_problems(dict(row, use_ports=[25]), v) == [SKIPS_THE_SIPPER]
+        assert sequence_well_problems(dict(row, use_ports=[1, 25]), v) == []
+        assert sequence_well_problems(dict(row, use_ports=(25, 1)), v) == []
+        assert sequence_well_problems(dict(row, use_ports=None), v) == []
+
+    def test_use_ports_must_be_a_list(self, plate_sipper_config):
+        v = _vocabulary(plate_sipper_config)
+        assert sequence_well_problems(dict(PRIME, use_ports=25), v) == ["use_ports=25: a list of ports"]
+        assert sequence_well_problems(dict(PRIME, use_ports="1,25"), v) == [
+            "use_ports='1,25': a list of ports"]
+
+    def test_a_rig_without_a_sipper_keeps_selective_priming(self, flow_cell_config):
+        assert sequence_well_problems(dict(PRIME, use_ports=[25]), None) == []
+        assert sequence_well_problems(dict(PRIME, use_ports=25), None) == []
+        _validate([dict(PRIME, use_ports=[25])], flow_cell_config)
+
+    def test_the_gate_names_the_row(self, plate_sipper_config):
+        with pytest.raises(ValueError, match=r"sequence 0 \(prime\): use_ports leaves out port 1 "
+                                             r"\(the sipper\): priming and clean-up never skip"):
+            _validate([dict(PRIME, name="prime", use_ports=[25])], plate_sipper_config)

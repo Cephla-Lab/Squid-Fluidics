@@ -2,6 +2,7 @@ import logging
 from .control.config import gantry
 from .errors import Cancelled, OperationError, ReservoirError
 from .flow_monitor import DrawGuard
+from .sequences import use_ports_problem
 from .vocabulary import sipper_vocabulary
 from . import sequence_utils
 
@@ -157,6 +158,12 @@ class MERFISHOperations():
         This method should work for both priming and cleaning. For priming, use a wash buffer for {port}; for cleaning, use water
         for all ports.
         """
+        # A use_ports that leaves out the sipper's port is refused here, as
+        # at time zero, before the pump or a valve moves: the sipper is never
+        # skipped (D7), and the row is not given a draw it did not list.
+        problem = use_ports_problem(use_ports, self.sipper_port)
+        if problem is not None:
+            raise OperationError(problem)
         speed_code = self.sp.flow_rate_to_speed_code(flow_rate)
         try:
             self.sp.reset_chain()

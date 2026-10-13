@@ -162,3 +162,17 @@ def test_a_step_the_check_cannot_replay_refuses_the_run_naming_the_step(system, 
     assert str(refused.value) == "hyb: the reservoir check could not replay this step (no such thing)"
     assert type(refused.value.__cause__) is type(make_error())
     assert not system.busy
+
+
+def test_selective_priming_that_leaves_out_the_sipper_is_refused_at_time_zero(system):
+    """Codex finding 3: the raw-dict run path took a priming row whose
+    use_ports skipped the sipper's port (D7). validate_sequences refuses it,
+    before the plan is replayed, and nothing is charged."""
+    prime = {"type": "priming", "fluidic_port": 25, "flow_rate": 5000, "volume": 800,
+             "use_ports": [25]}
+    with pytest.raises(ValueError, match=r"^sequence 0 \(priming\): use_ports leaves out port 1 "
+                                         r"\(the sipper\): priming and clean-up never skip the sipper$"):
+        system.run([prime, HYB])
+    assert not system.busy
+    assert system.devices.reservoirs.remaining("port_25") == 480000
+    assert system.devices.reservoirs.remaining("ssct/H11") == 1750
