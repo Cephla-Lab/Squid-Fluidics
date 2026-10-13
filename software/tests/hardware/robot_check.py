@@ -36,6 +36,7 @@ from fluidics.errors import DeviceError
 from fluidics.robot.stage import LIMIT_SWITCH_ALARM, TOLERANCE_MM
 from fluidics.run_log import configure_console
 from fluidics.system import FluidicsSystem
+from fluidics.vocabulary import sipper_vocabulary
 
 DRIVE_TOLERANCE_MM = 0.076     # the driver's own end-of-move check: 1000 counts at 13107.2 counts/mm
 
@@ -101,16 +102,15 @@ class Settle:
                 + f" (the stage accepts {TOLERANCE_MM}, the driver's own wait {DRIVE_TOLERANCE_MM})")
 
 
-def jog_until_enter(manual, robot, settle, prompt):
+def jog_until_enter(manual, robot, settle, prompt, on_enter):
     """Jogs typed at the console until an empty line: `x 1.5` or `z -0.2`
     (mm from where the axis is; X and Y only with Z at travel height),
     `retract`, or `home`. A refused or failed jog is printed and the
-    prompt returns."""
+    prompt returns. `on_enter` says what the empty line sets moving."""
     print(prompt)
-    print("  Type `x 1.5`, `y -0.2`, `z 0.1` (mm, relative), `retract` or `home`; "
-          "an empty line when there.")
+    print("  Type `x 1.5`, `y -0.2`, `z 0.1` (mm, relative), `retract` or `home`.")
     while True:
-        line = input(f"  [{fmt(robot.position())}] jog> ").strip().lower()
+        line = input(f"  [{fmt(robot.position())}] jog, or Enter to {on_enter}> ").strip().lower()
         if not line:
             return
         try:
@@ -142,9 +142,17 @@ def main():
     g = gantry(config)
     if g is None:
         sys.exit(f"{args.config} has no nimotion_gantry_system block: there is no robot to check")
+    vocabulary = sipper_vocabulary(config)
     agitate_well = args.agitate_well or g.park_well
     if agitate_well is None:
         sys.exit("the config names no park_well: give --agitate-well")
+    try:
+        # Here, before anything moves: a typo found after the teaching
+        # would end the script and lose the taught values unsaved.
+        ref = vocabulary.resolve(agitate_well)
+    except ValueError as e:
+        sys.exit(f"--agitate-well {agitate_well}: {e}")
+    agitate_well = f"{ref.reservoir}/{ref.well}"
     if args.simulation:
         # A self-check of the script: the valves' one-second commands and the
         # pump's moves need not be waited out. The stage keeps its pacing.
@@ -166,10 +174,15 @@ def main():
                 manual.jog(axis, -mm)
                 settle.report(f"jog {axis} {-mm:+g}")
             taught = {}
-            for name in sorted(manual._vocabulary.reservoirs):
+            corners = ("A1", "A12", "H1", "H12")
+            for name in sorted(vocabulary.reservoirs):
                 while True:
-                    jog_until_enter(manual, robot, settle,
-                                    f"Jog the tip to {name} A1 at the V bottom.")
+                    jog_until_enter(
+                        manual, robot, settle,
+                        f"Jog the tip to {name} A1 at the V bottom. An empty line teaches the "
+                        f"position there as the A1 and dip depth of {name}, then tours its "
+                        f"corners: {', '.join(corners)}, each a retract, a move and a re-dip.",
+                        f"teach here and tour the {name} corners")
                     position = robot.position()
                     if position is None:
                         print("  the position is unknown: type `home`")
@@ -184,23 +197,31 @@ def main():
                     break
                 taught[name] = ((x, y), z)
                 print("taught", name, "A1 at", (x, y), "dip", z)
-                for well in ("A1", "A12", "H1", "H12"):
+                for i, well in enumerate(corners):
                     manual.go_to_well(f"{name}/{well}")
                     settle.report(f"{name}/{well}")
-                    input(f"At {name}/{well}: is the tip centred and at the V bottom? Enter to go on...")
+                    following = (f"retract and go to {name}/{corners[i + 1]}" if i + 1 < len(corners)
+                                 else "go on (nothing moves)")
+                    input(f"At {name}/{well}: is the tip centred and at the V bottom? Enter to {following}...")
             input(f"Enter to go to {agitate_well} (it must be full) and agitate twice...")
             manual.go_to_well(agitate_well)
             robot.agitate(2)
             settle.report(f"agitate in {agitate_well}")
-            park = g.park_well or ("retracted over park_xy_mm" if g.park_xy_mm else "retracted in place")
-            input(f"Enter to park ({park}); closing parks once more, then disables every drive...")
+            park = (f"dip into {g.park_well}" if g.park_well else
+                    "move over park_xy_mm" if g.park_xy_mm else "stay there")
+            input(f"Enter to park: retract, then {park}...")
             manual.park()
             settle.report("park")
             print(settle.summary())
             for name, ((x, y), z) in taught.items():
                 print(f"  {name}: a1_xy_mm: [{x:.2f}, {y:.2f}]  dip_z_mm: {z:.2f}")
-            if input(f"Write the taught values into {config.source_path}? [y/N] ").strip().lower() == "y":
+            if args.simulation:
+                # The docstring's own example runs the committed sample.
+                print("Simulation: the taught values are not saved.")
+            elif input(f"Write the taught values into {config.source_path}? [y/N] ").strip().lower() == "y":
                 print("written to", save_config(config))
+            input(f"Enter to close: the sipper parks once more (retract, then {park}), "
+                  "then every drive is disabled...")
         except BaseException as e:
             # A failure or Ctrl+C: the stage halted any leg it was in. Close
             # without a move -- the with's close would retract and park.

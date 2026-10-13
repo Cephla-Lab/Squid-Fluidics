@@ -173,6 +173,62 @@ def test_a_robot_that_cannot_home_fails_the_launch_closed_without_moves(plate_si
     assert [c.closes for c in controllers] == [1]
 
 
+def test_a_ctrl_c_while_z_homes_closes_the_launch_without_moves(plate_sipper_config, tmp_path, monkeypatch):
+    """A KeyboardInterrupt while Z homes -- the bench's likeliest moment
+    for one -- unwinds like any bring-up failure: the stage is closed
+    without a move (halt, brake, disable, disconnect), everything started
+    before it is released, the ledger's lock too, and the interrupt goes
+    on."""
+    import fluidics.devices as devices_module
+    from fluidics.control.controller import FluidControllerSimulation
+    from fluidics.reservoirs import ReservoirLedger, reservoir_definitions
+    from fluidics.robot import simulation as robot_simulation
+    services, controllers, started = [], [], []
+
+    class InterruptedService(robot_simulation.SimulatedService):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.on_poll = self._interrupt_once
+            services.append(self)
+
+        def _interrupt_once(self):
+            self.on_poll = None        # the halt's re-read must not be interrupted too
+            raise KeyboardInterrupt
+
+    class RecordingController(FluidControllerSimulation):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            controllers.append(self)
+            self.closes = 0
+
+        def close(self):
+            self.closes += 1
+            return super().close()
+
+    original = devices_module.start_flow_sensors
+
+    def spying_start(controller, config, simulation):
+        sensors = original(controller, config, simulation)
+        started.extend(sensors)
+        return sensors
+
+    monkeypatch.setattr(robot_simulation, "SimulatedService", InterruptedService)
+    monkeypatch.setattr(devices_module, "FluidControllerSimulation", RecordingController)
+    monkeypatch.setattr(devices_module, "start_flow_sensors", spying_start)
+    path = tmp_path / "ledger.json"
+    with pytest.raises(KeyboardInterrupt):
+        build_devices(plate_sipper_config, simulation=True, instant=True, ledger_path=path)
+    (service,) = services
+    assert ("home", "Z3") in service.log and ("home", "X1") not in service.log, "Z was homing"
+    assert "move_to" not in [verb for verb, _ in service.log], "nothing moved"
+    assert service.log[-5:] == [("engage_brake", "Z3"), ("disable", "X1"), ("disable", "Y2"),
+                                ("disable", "Z3"), ("disconnect", None)]
+    assert not service.connected
+    assert len(started) == 1 and all(s._stop_reading.is_set() for s in started)
+    assert [c.closes for c in controllers] == [1]
+    ReservoirLedger.load(path, reservoir_definitions(plate_sipper_config)).close()
+
+
 def test_close_runs_the_robot_after_the_reset_and_before_the_syringe(plate_sipper_config, built, tmp_path):
     devices = built(plate_sipper_config, simulation=True, instant=True,
                     ledger_path=tmp_path / "ledger.json")

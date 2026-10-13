@@ -203,7 +203,8 @@ def _build_robot(config, simulation, run_control, instant):
     try:
         stage.connect()
         robot.home()
-    except Exception:
+    except BaseException:
+        # A Ctrl+C while Z homes too: the drives must not stay enabled.
         stage.close(quiescent=False)
         raise
     return robot
@@ -332,8 +333,9 @@ def build_devices(config, simulation=False, on_issue=None, run_control=None,
                 (lambda: None) if robot is None else
                 (lambda: None if robot.current_well is None
                  else f"{robot.current_well.reservoir}/{robot.current_well.well}"))
-    except Exception:
-        # A dead controller or a stuck valve is not survivable, but the pieces
+    except BaseException:
+        # A dead controller, a stuck valve, or a Ctrl+C (an operator
+        # watching Z home) is not survivable, but the pieces
         # already running must not outlive the failed launch: the controller's
         # reader thread holds the MCU port, and a sensor left subscribed would
         # keep a handler on a stream nobody owns. Shielded per step, so one

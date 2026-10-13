@@ -40,6 +40,9 @@ reagent_selection:
       port_26: 700
       port_27: 900
       port_28: 900
+    # Port 25's bottle is tracked by the reservoir ledger, like every well:
+    # after refilling it, declare it with --refilled port_25 or the manual
+    # tab's Bottle refilled.
     loaded_volume_ul:
       port_25: 500000
     residual_volume_ul:
@@ -85,6 +88,10 @@ reagent_selection:
         row_axis: "+x"
         loaded_ul: 1800
         residual_ul: 50
+    # Dedicated wells: the sipper primes from priming_well, is cleaned from
+    # clean_up_well and parks wet in park_well. Keep them out of sequences
+    # and keep them full. park_well (H11) is also the default agitation
+    # well of tests/hardware/robot_check.py.
     priming_well: ssct/H11
     clean_up_well: ssct/H12
     park_well: ssct/H11

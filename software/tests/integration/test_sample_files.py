@@ -107,9 +107,10 @@ def test_the_plate_sipper_samples_load_validate_and_run(tmp_path):
     """The documented pairing runs end to end on an instant simulated rig
     under the fake clock (the round has a 20-minute incubation)."""
     from fluidics.devices import build_devices
+    from fluidics.events import RunEnded, SequenceCompleted
     from fluidics.sequences import validate_sequences
     from fluidics.system import FluidicsSystem
-    from ..conftest import wait_until
+    from ..conftest import hears
     config = load_config(str(SOFTWARE / "sample_config" / "plate_sipper_config.yaml"))
     sequences = get_included_sequences(load_sequences(
         str(SOFTWARE / "sample_sequences" / "seqfish-plate-sipper.yaml")))
@@ -118,7 +119,18 @@ def test_the_plate_sipper_samples_load_validate_and_run(tmp_path):
     for sensor in devices.flow_sensors:
         sensor.close()
     with FluidicsSystem(config, devices, report_dir=tmp_path) as system:
+        ended = hears(system.session.events, RunEnded)
+        completed = hears(system.session.events, SequenceCompleted)
         system.run(sequences)
-        assert wait_until(lambda: not system.busy, timeout=30)
-        assert system.devices.reservoirs.remaining("ssct/A1") == 1750 - 490 - 1000
-        assert system.devices.reservoirs.remaining("probes/A1") == 5
+        # Untimed: the incubation advances the fake clock by 20 minutes, so
+        # a timed wait could expire under a run still going.
+        assert system.session.wait()
+        assert [e.outcome for e in ended] == ["finished"], ended
+        assert len(completed) == len(sequences)
+        ledger = system.devices.reservoirs
+        assert ledger.remaining("ssct/A1") == 1750 - 490 - 1000
+        assert ledger.remaining("probes/A1") == 5
+        # Port 25's draws: its own priming (700) and the priming volume
+        # (800), the 4x SSC row (1000), DAPI's tubing fill (240 + 340), the
+        # rinse (1000).
+        assert ledger.remaining("port_25") == 480000 - (700 + 800 + 1000 + 580 + 1000)

@@ -15,8 +15,9 @@ python gui.py    # --config <yaml|json>; defaults to ./config.yaml then ./config
 # CLI experiment runner
 python run_sequences.py --path sample_sequences/merfish-experiment.yaml --config sample_config/flow_cell_config.yaml
 python run_sequences.py --path sample_sequences/merfish-experiment.yaml --config sample_config/flow_cell_config.yaml --simulation
-# Plate sipper rig: declare reservoirs full before the run (a port key, a plate name, or all; repeatable)
-python run_sequences.py --path sample_sequences/seqfish-plate-sipper.yaml --config sample_config/plate_sipper_config.yaml --refilled all
+# Plate sipper rig. Only after reloading a plate or refilling a bottle, add --refilled <port_25 | plate name | all>
+# (repeatable) to declare that reservoir full; on every other run the ledger's own count stands
+python run_sequences.py --path sample_sequences/seqfish-plate-sipper.yaml --config sample_config/plate_sipper_config.yaml
 
 # Config conversion (legacy JSON → YAML v2.0)
 python convert_config.py path/to/legacy_config.json
@@ -149,7 +150,7 @@ A Flow Cell rig may carry an XYZ robot that moves a sipper on one selector-valve
 - **No air through the sipper.** `RobotSipper.current_well` is set only while the tip sits at dip depth in a well; retract, home, a halt and an agitation in progress clear it. A row with `well` moves the sipper in before the valve opens its port, `dip_cycles` dips run before the draw, and the ledger refuses a draw through the sipper's port with no well under the tip (`ReservoirNoWell`). A quiescent close parks the sipper, wet when `park_well` is configured; a close under a job that did not stop makes no move.
 - **Sequences.** `well`, `dip_cycles` and `sipper_well` are optional fields on the existing types, not new types; `validate_sequences` checks them against the rig's vocabulary.
 - **The Robot tab** (`fluidics/qt/robot_control.py`, on a rig with a robot only): jog, home, teach A1, dip depth and travel height, go to a well, reset a fault, the reservoir table, and Save, which writes the taught values through `save_config`. One job on the rig greys every other tab: the session records a manual job's `source`, so the main window tells the Robot tab's jobs from the manual tab's.
-- **Commands.** `run_sequences.py --refilled KEY` declares a reservoir full before the run; `--ledger PATH` places the ledger file (default: beside the run reports, named after the config). `tests/hardware/robot_check.py` is the bench check: it teaches each plate at the console and reports every axis's settle error against `TOLERANCE_MM`.
+- **Commands.** `run_sequences.py --refilled KEY` is for the run after a reload or a refill: it declares that reservoir full before the run, so passing it routinely would erase what the ledger knows. `--ledger PATH` places the ledger file (default: beside the run reports, named after the config). `tests/hardware/robot_check.py` is the bench check: it teaches each plate at the console and reports every axis's settle error against `TOLERANCE_MM`.
 
 ### GUI Structure
 
