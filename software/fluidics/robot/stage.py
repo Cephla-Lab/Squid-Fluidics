@@ -41,11 +41,12 @@ TOLERANCE_MM = 0.05
 MIN_TRAVEL_Z_MM = 1.0
 LIMIT_SWITCH_ALARM = 0x8614   # 603Fh while a limit switch holds the axis (NiMotion B06 table 8-1)
 # After homing attained the axis is still creeping (nm-servo #14 measured 50-90 um over up
-# to 4 s on X1): the position must hold within the window for the hold time before it is
-# read or moved; past the budget the stage goes on with a warning.
-SETTLE_WINDOW_MM = 0.005
+# to 4 s on X1). The driver's blocking home() waits until the position stays within the
+# drive's target window of a reference for 0.3 s, giving up after 5 s; the stage's polled
+# homing does the same with its own tolerance as the window.
+SETTLE_WINDOW_MM = TOLERANCE_MM
 SETTLE_HOLD_S = 0.3
-SETTLE_BUDGET_S = 6.0
+SETTLE_BUDGET_S = 5.0
 
 
 def _label(axis):
@@ -147,26 +148,32 @@ class XYZStage:
     def _settle_after_homing(self, axis):
         """The attained bit comes on at the switch edge with the axis still
         creeping (nm-servo #14): a set-point sent then would switch the
-        drive's mode mid-motion, and a read would be stale. Poll until the
-        position holds within SETTLE_WINDOW_MM for SETTLE_HOLD_S -- counted
-        in polls, so an instant simulation needs no clock -- and give up
-        with a warning after SETTLE_BUDGET_S. A fault seen meanwhile ends
-        the homing like one seen before."""
+        drive's mode mid-motion, and a read would be stale. The driver's
+        rule, polled: the position must stay within SETTLE_WINDOW_MM of a
+        reference for SETTLE_HOLD_S, the reference moving (and the hold
+        restarting) whenever the position leaves the window -- so a slow
+        creep keeps the wait going until it stops, and a read that merely
+        changes from the last one does not. Counted in polls, so an
+        instant simulation needs no clock; past SETTLE_BUDGET_S the stage
+        goes on with a warning, as the driver does. A fault seen meanwhile
+        ends the homing like one seen before."""
         needed = max(3, int(round(SETTLE_HOLD_S / self._poll))) if self._poll > 0 else 3
         budget = needed * int(SETTLE_BUDGET_S / SETTLE_HOLD_S)
-        last = self._service.read(axis).position_mm
-        steady = 0
+        reference = self._service.read(axis).position_mm
+        held = 0
         for _ in range(budget):
             self._control.sleep(self._poll)
             reading = self._service.read(axis)
             if reading.fault or not reading.enabled:
                 raise DeviceError(self._describe(axis, reading))
-            steady = steady + 1 if abs(reading.position_mm - last) <= SETTLE_WINDOW_MM else 0
-            last = reading.position_mm
-            if steady >= needed:
+            if abs(reading.position_mm - reference) > SETTLE_WINDOW_MM:
+                reference, held = reading.position_mm, 0
+            else:
+                held += 1
+            if held >= needed:
                 return
         _logger.warning("axis %s: still moving %.0f s after homing attained (last read %.3f mm); going on",
-                        _label(axis), SETTLE_BUDGET_S, last)
+                        _label(axis), SETTLE_BUDGET_S, reference)
 
     def close(self, quiescent=True, retract=True):
         """Quiescent: retract, brake, disable, disconnect. Under a job that

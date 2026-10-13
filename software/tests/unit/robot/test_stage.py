@@ -116,14 +116,18 @@ class TestRules:
 
     def test_homing_waits_for_the_axis_to_settle_before_reading_or_moving(self):
         """Attained comes on with the axis still creeping (nm-servo #14): the
-        position is read, and the clearing leg sent, only once it holds."""
+        position is read, and the clearing leg sent, only once it holds
+        within the window of a reference. The creep here is 0.02 mm a read,
+        under the window read to read but over it every third read, so a
+        last-read comparison would settle at once and the reference does
+        not until the creep ends."""
         strokes = {"X1": (0.0, 200.0), "Y2": (0.0, 109.0), "Z3": (0.0, 58.5)}
         service = SimulatedService(AXES.values(), strokes, instant=True)
         stage = XYZStage(service, AXES, 1.0, 50.0, 20.0, RunControl())
         stage.connect()
-        service.creep("X1", 0.01, reads=8)            # 0.08 mm over the next eight reads
+        service.creep("X1", 0.02, reads=10)           # 0.2 mm over the next ten reads
         stage.home()
-        assert stage.position()[0] == pytest.approx(0.08)
+        assert stage.position()[0] == pytest.approx(0.2)
         assert "move_to" not in [verb for verb, _ in service.log]
 
     def test_a_homing_that_never_settles_goes_on_with_a_warning(self, caplog):
@@ -131,7 +135,7 @@ class TestRules:
         service = SimulatedService(AXES.values(), strokes, instant=True)
         stage = XYZStage(service, AXES, 1.0, 50.0, 20.0, RunControl())
         stage.connect()
-        service.creep("Y2", 0.01)                     # for ever
+        service.creep("Y2", 0.02)                     # for ever
         stage.home()
         assert stage.is_homed
         assert any("Y2: still moving" in record.message for record in caplog.records)
