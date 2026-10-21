@@ -53,9 +53,12 @@ class Interruptible:
         self._chain = []
         # What the pump tells whoever listens (fire-and-forget; no
         # subscriber, no effect): draws carries (pump_port, volume_ul) for
-        # every dispatched extract -- the reagent ledger's feed; held_volume
-        # carries the held uL whenever the pump takes a reading, so a
-        # display never has to poll the serial line for it.
+        # every dispatched extract, published after the dispatch -- the
+        # probe for observers and tests, not the tally's feed: the reservoir
+        # ledger authorizes and charges before the dispatch, through
+        # draw_authorizers below; held_volume carries the held uL whenever
+        # the pump takes a reading, so a display never has to poll the
+        # serial line for it.
         self.draws = Subscribers("syringe draws")
         # Called with (port, volume_ul) before an extract is dispatched; one
         # raising refuses the draw, and nothing has moved (the reservoir
@@ -160,11 +163,12 @@ class Interruptible:
             for authorize in list(self.draw_authorizers):
                 authorize(op[1], op[2])     # raises: the draw is refused, undispatched
         estimate = self._start(op)
-        # A dispatched extract is charged in full, here, once: a failed
-        # dispatch (raised from _start) was never charged, and whatever
-        # happens after it -- pauses, a cancel mid-draw, a driver fault --
-        # keeps the charge. Generous on a cut-short draw by design: a total
-        # that reads slightly high beats one that silently undercounts.
+        # A dispatched extract is published in full, here, once (the ledger
+        # charged it above, before the dispatch): a failed dispatch (raised
+        # from _start) is never published, and whatever happens after it --
+        # pauses, a cancel mid-draw, a driver fault -- keeps the figure.
+        # Generous on a cut-short draw by design: a total that reads
+        # slightly high beats one that silently undercounts.
         if op[0] == "extract":
             self.draws.notify(op[1], op[2])
         self.moving = True

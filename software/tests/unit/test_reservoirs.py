@@ -1,11 +1,14 @@
-"""ReservoirLedger: authorizes the pump's draws, persists first, never guesses."""
+"""ReservoirLedger: counts every draw, authorizes the pump's, persists first, never guesses."""
 import json
+import logging
 import re
+from types import SimpleNamespace
 
 import pytest
 
 from fluidics.errors import (ReservoirDrawTooLarge, ReservoirError, ReservoirInUse, ReservoirNoWell,
                              ReservoirOverdraw, ReservoirUndeclared, ReservoirWriteError)
+from fluidics.events import RunEnded, RunStarted
 from fluidics.reservoirs import ReservoirLedger
 
 DEFS = {"port_25": {"loaded_ul": 5000, "residual_ul": 200},
@@ -36,11 +39,34 @@ def rig(tmp_path):
     return ledger, pump, state
 
 
+@pytest.fixture
+def tally():
+    """A rig that tracks nothing: the ledger is the tally alone, in memory
+    (no file, no lock), with the valves' names for its ports; the run's
+    boundary events reach it as the system delivers them."""
+    pump = FakePump()
+    state = {"port": 3}
+    names = {3: "DAPI"}
+    ledger = ReservoirLedger({})
+    ledger.attach(pump, SIPPER_PORT, EXTRACT_PORT, current_port=lambda: state["port"],
+                  current_well=lambda: None, port_to_reagent=names.get)
+
+    def started():
+        ledger.on_run_event(RunStarted("run-1", ()))
+
+    def ended():
+        ledger.on_run_event(RunEnded("run-1", "finished", None, 0.0, None))
+
+    return SimpleNamespace(ledger=ledger, pump=pump, state=state, names=names,
+                           run_started=started, run_ended=ended)
+
+
 class TestCharging:
     def test_a_bulk_draw_charges_the_open_ports_bottle(self, rig):
         ledger, pump, _ = rig
         pump.extract(EXTRACT_PORT, 500)
         assert ledger.remaining("port_25") == 5000 - 200 - 500
+        assert ledger.used_rows() == [(25, None, 500.0)], "one charge keeps both figures"
         assert pump.started == [(EXTRACT_PORT, 500)]
 
     def test_a_sipper_draw_charges_the_current_well(self, rig):
@@ -68,13 +94,48 @@ class TestCharging:
             pump.extract(EXTRACT_PORT, 100)
         assert pump.started == []
 
-    def test_untracked_bottles_and_other_syringe_ports_are_ignored(self, rig):
+    def test_an_untracked_bottles_draw_is_counted_never_refused_never_written(self, rig, tmp_path):
+        """No declared volume, so nothing to overdraw: the draw goes to the
+        per-run figure and nowhere else -- not to rows(), not to the file."""
         ledger, pump, state = rig
         state["port"] = 26
         pump.extract(EXTRACT_PORT, 500)
-        pump.extract(1, 500)
+        pump.extract(EXTRACT_PORT, 10 ** 9)
+        assert ledger.used_rows() == [(26, None, 500.0 + 10 ** 9)]
         assert ledger.rows() == []
+        assert not (tmp_path / "ledger.json").exists(), "an untracked draw is not the file's"
         assert len(pump.started) == 2
+
+    def test_a_draw_through_another_syringe_port_is_ignored_everywhere(self, rig, tmp_path):
+        """A chamber draw, air: not reagent, so neither figure moves."""
+        ledger, pump, _ = rig
+        pump.extract(1, 500)
+        assert ledger.used_rows() == [] and ledger.rows() == []
+        assert not (tmp_path / "ledger.json").exists()
+        assert pump.started == [(1, 500)]
+
+    def test_a_well_draw_is_counted_under_the_sippers_port(self, rig):
+        """The file knows wells; the per-run figure knows ports, the thing
+        the valves name, so every well's draw is the sipper port's."""
+        ledger, pump, state = rig
+        state["port"], state["well"] = SIPPER_PORT, "ssct/A1"
+        pump.extract(EXTRACT_PORT, 1000)
+        state["well"] = "ssct/A2"
+        pump.extract(EXTRACT_PORT, 200)
+        assert ledger.used_rows() == [(SIPPER_PORT, None, 1200.0)]
+        assert ledger.rows() == [("ssct/A1", 1000.0, 750.0), ("ssct/A2", 200.0, 1550.0)]
+
+    @pytest.mark.parametrize("volume", [float("nan"), -100], ids=["nan", "negative"])
+    def test_a_draw_that_is_not_a_volume_is_refused_on_an_untracked_port_too(self, rig, volume):
+        """The volume check comes before the untracked return: counted, a
+        NaN would poison that port's per-run figure as it would a balance."""
+        ledger, pump, state = rig
+        state["port"] = 26
+        refused = re.escape(f"port_26: {volume!r} uL is not a volume")
+        with pytest.raises(ReservoirError, match=refused):
+            pump.extract(EXTRACT_PORT, volume)
+        assert ledger.used_rows() == []
+        assert pump.started == []
 
     def test_an_overdraw_is_refused_before_the_pump_starts_and_charges_nothing(self, rig):
         ledger, pump, state = rig
@@ -125,6 +186,7 @@ class TestCharging:
         with pytest.raises(ReservoirError, match=refused):
             ledger.authorize(EXTRACT_PORT, volume)
         assert ledger.remaining("port_25") == 4800
+        assert ledger.used_rows() == []
         assert not (tmp_path / "ledger.json").exists(), "nothing was charged, nothing written"
         with pytest.raises(ReservoirError, match=refused):
             ledger.check("port_25", volume)
@@ -139,7 +201,7 @@ class TestCharging:
         ledger.check("port_25", 0)
         assert pump.started == [(EXTRACT_PORT, 0)]
         assert ledger.remaining("port_25") == 4800
-        assert ledger.rows() == []
+        assert ledger.rows() == [] and ledger.used_rows() == []
         assert not (tmp_path / "ledger.json").exists(), "nothing was charged, nothing written"
 
 
@@ -161,6 +223,7 @@ class TestPersistence:
         with pytest.raises(ReservoirWriteError, match="not started"):
             pump.extract(EXTRACT_PORT, 500)
         assert ledger.remaining("port_25") == 4800
+        assert ledger.used_rows() == [], "a draw that never started is in no figure"
         assert pump.started == []
 
     def test_a_matching_file_restores(self, rig, tmp_path):
@@ -287,6 +350,76 @@ class TestPersistence:
             assert pump.started == []
         finally:
             ledger.close()
+
+
+class TestTheRunTally:
+    """The per-run figure (used_rows): every draw through the reagent path,
+    under the port the valves had open, declared volumes or not."""
+
+    def test_a_reagent_draw_is_counted_under_the_open_port(self, tally):
+        tally.state["port"] = 5      # port 5 first: the rows come in port order, not draw order
+        tally.pump.extract(EXTRACT_PORT, 250)
+        tally.pump.extract(EXTRACT_PORT, 250)
+        tally.state["port"] = 3
+        tally.pump.extract(EXTRACT_PORT, 500)
+        assert tally.ledger.used_rows() == [(3, "DAPI", 500.0), (5, None, 500.0)]
+        assert len(tally.pump.started) == 3, "a rig that tracks nothing refuses nothing"
+
+    def test_a_run_start_resets_the_view(self, tally):
+        tally.pump.extract(EXTRACT_PORT, 500)     # a manual draw between runs stays visible
+        assert tally.ledger.used_rows() == [(3, "DAPI", 500.0)]
+        tally.run_started()
+        assert tally.ledger.used_rows() == [], "the experiment did not start clean"
+
+    def test_a_runs_totals_reach_the_log_at_its_end_with_its_id(self, tally, caplog):
+        tally.run_started()
+        tally.state["port"] = 5      # port 5 first: the line is in port order too
+        tally.pump.extract(EXTRACT_PORT, 40)
+        tally.state["port"] = 3
+        tally.pump.extract(EXTRACT_PORT, 1500)
+        with caplog.at_level(logging.INFO, logger="fluidics.reservoirs"):
+            tally.run_ended()
+        assert "Reagent used (run-1): port 3 (DAPI): 1500 uL; port 5: 40 uL." in caplog.text
+
+    def test_a_run_that_drew_nothing_says_so_at_its_end(self, tally, caplog):
+        tally.run_started()
+        with caplog.at_level(logging.INFO, logger="fluidics.reservoirs"):
+            tally.run_ended()
+        assert "Reagent used (run-1): none drawn." in caplog.text
+
+    def test_names_are_read_when_the_rows_are_not_when_the_draw_was(self, tally):
+        """The valves own the names: a port renamed after its draw shows the
+        new name on the next paint."""
+        tally.pump.extract(EXTRACT_PORT, 500)
+        tally.names[3] = "Hoechst"
+        assert tally.ledger.used_rows() == [(3, "Hoechst", 500.0)]
+
+    def test_the_rows_are_a_copy(self, tally):
+        """The report takes its rows in the RunEnded dispatch, and a later
+        subscriber may chain the next run, whose start zeroes the figure:
+        what was handed out must stand."""
+        tally.pump.extract(EXTRACT_PORT, 500)
+        rows = tally.ledger.used_rows()
+        tally.run_started()
+        assert rows == [(3, "DAPI", 500.0)]
+
+    def test_the_per_run_figure_rides_on_no_snapshot(self, tally):
+        """snapshot() is the file and the gate's twin: balances and the
+        undeclared set, nothing of the run; and no restore touches the run."""
+        tally.pump.extract(EXTRACT_PORT, 500)
+        snapshot = tally.ledger.snapshot()
+        assert set(snapshot) == {"format", "definitions", "reservoirs", "undeclared"}
+        assert snapshot["reservoirs"] == {}
+        tally.ledger.restore(snapshot)
+        assert tally.ledger.used_rows() == [(3, "DAPI", 500.0)]
+
+
+def test_tracked_names_every_declared_key_in_order():
+    """What the system asks before the gate and the manual verb before a
+    refill: a declared volume is a limit, and none declared, there is
+    nothing to refuse or refill."""
+    assert ReservoirLedger(DEFS).tracked == ("port_25", "ssct/A1", "ssct/A2")
+    assert ReservoirLedger({}).tracked == ()
 
 
 def test_snapshot_round_trips_through_restore():

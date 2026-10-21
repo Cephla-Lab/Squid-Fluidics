@@ -100,12 +100,12 @@ class ManualControlWidget(PostsToQtThread, QWidget):
         self.session = system.session
         self.manual = system.manual
         self._controls = []         # everything _run disables while a move runs
-        # The tracked bottles (a declared loaded volume), on a rig with a
-        # ledger, robot or not: their remaining volumes show here and their
-        # refills are declared here (spec §7, §9). None: the tab as it was.
+        # The tracked bottles (a declared loaded volume), robot or not:
+        # their remaining volumes show here and their refills are declared
+        # here (spec §7, §9). None declared: the tab as it was.
         self._ledger = system.devices.reservoirs
         loaded = config.reagent_selection.selector_valves.loaded_volume_ul or {}
-        self._bottles = sorted(loaded) if self._ledger is not None else []
+        self._bottles = sorted(loaded)
         self._bottleNameLabels = {}
         self._remainingLabels = {}
 

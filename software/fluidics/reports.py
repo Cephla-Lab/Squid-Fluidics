@@ -1,13 +1,13 @@
 """The written record of each run: one JSON file per run_id.
 
-`RunReports` is a subscriber beside the usage ledger and nothing more --
-no operation writes into it, so dropping it (or never building it)
+`RunReports` is a subscriber beside the reservoir ledger and nothing more
+-- no operation writes into it, so dropping it (or never building it)
 changes no operations code. It pairs RunStarted's plan with RunEnded by
-run_id, reads the ledger's totals at the ending, and writes what a
-post-mortem or a lab notebook wants -- outcome, elapsed time, the plan
-with its estimates, the sequences as run, per-port reagent use, the
-run's warnings -- to `<reports directory>/<run_id>.json`, beside the
-rolling log.
+run_id, reads the ledger's per-run figures and balances at the ending,
+and writes what a post-mortem or a lab notebook wants -- outcome, elapsed
+time, the plan with its estimates, the sequences as run, per-port reagent
+use, what each tracked reservoir has left, the run's warnings -- to
+`<reports directory>/<run_id>.json`, beside the rolling log.
 
 Everything is collected synchronously in the event dispatch, where the
 facts still hold: RunEnded arrives inside the session's end transition,
@@ -57,13 +57,12 @@ def _utc(seconds):
 
 
 class RunReports:
-    def __init__(self, run_events, usage, warnings, directory=None, reservoirs=None):
-        """directory: where the reports go; None resolves to
-        default_report_directory() at each write, so construction never
-        touches the disk. reservoirs: the ledger whose rows the report
-        carries, or None."""
+    def __init__(self, run_events, reservoirs, warnings, directory=None):
+        """reservoirs: the ledger whose per-run figures (used_rows) and
+        balances (rows) the report carries. directory: where the reports
+        go; None resolves to default_report_directory() at each write, so
+        construction never touches the disk."""
         self._directory = directory
-        self._usage = usage
         self._reservoirs = reservoirs
         self._lock = threading.Lock()
         self._run = None                 # the run in flight, else None
@@ -146,8 +145,8 @@ class RunReports:
                 "repeats": at.repeats},
             "reagent_used_ul": [
                 {"port": port, "reagent": name, "volume_ul": used}
-                for port, name, used in self._usage.rows()],
-            "reservoirs": [] if self._reservoirs is None else [
+                for port, name, used in self._reservoirs.used_rows()],
+            "reservoirs": [
                 {"key": key, "dispatched_ul": dispatched, "remaining_ul": remaining}
                 for key, dispatched, remaining in self._reservoirs.rows()],
             "warnings": run["warnings"],

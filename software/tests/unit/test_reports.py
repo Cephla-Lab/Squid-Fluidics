@@ -15,13 +15,15 @@ from fluidics.subscribers import Subscribers
 from ..worker_helpers import plan_for
 
 def rig(directory):
-    """A RunReports on real channels, the ledger canned."""
+    """A RunReports on real channels, the ledger canned: its per-run
+    figures (used_rows) and its balances (rows)."""
     events = Subscribers("test run events")
     warnings = Subscribers("test warnings")
-    usage = SimpleNamespace(
-        rows=lambda: [(2, "wash buffer", 300.0), (5, None, 40.0)])
-    reports = RunReports(events, usage, warnings, directory=directory)
-    return SimpleNamespace(events=events, warnings=warnings, usage=usage,
+    reservoirs = SimpleNamespace(
+        used_rows=lambda: [(2, "wash buffer", 300.0), (5, None, 40.0)],
+        rows=lambda: [("port_25", 340.0, 4460.0), ("ssct/A1", 200.0, 1550.0)])
+    reports = RunReports(events, reservoirs, warnings, directory=directory)
+    return SimpleNamespace(events=events, warnings=warnings, reservoirs=reservoirs,
                            reports=reports)
 
 
@@ -53,6 +55,9 @@ class TestTheRecord:
         assert report["reagent_used_ul"] == [
             {"port": 2, "reagent": "wash buffer", "volume_ul": 300.0},
             {"port": 5, "reagent": None, "volume_ul": 40.0}]
+        assert report["reservoirs"] == [
+            {"key": "port_25", "dispatched_ul": 340.0, "remaining_ul": 4460.0},
+            {"key": "ssct/A1", "dispatched_ul": 200.0, "remaining_ul": 1550.0}]
         assert [w["message"] for w in report["warnings"]] == \
             ["flow low on syringe_draw"]
         assert report["started"] and report["ended"], "wall times belong in a record"
@@ -85,10 +90,18 @@ class TestTheCollectionMoment:
         moves on -- on this thread, exactly once."""
         r = rig(tmp_path)
         calls = []
-        r.usage.rows = lambda: calls.append(threading.current_thread()) or []
+
+        def read(figure):
+            return lambda: calls.append((figure, threading.current_thread())) or []
+
+        r.reservoirs.used_rows = read("used_rows")
+        r.reservoirs.rows = read("rows")
         r.events.notify(RunStarted("run-4", ()))
         r.events.notify(RunEnded("run-4", "finished", None, 1.0, None))
-        assert calls == [threading.current_thread()]
+        here = threading.current_thread()
+        assert sorted(calls, key=lambda call: call[0]) == \
+            [("rows", here), ("used_rows", here)], \
+            "each figure read once, on the dispatching thread"
         assert r.reports.wait(5)
 
     def test_warnings_outside_a_run_stay_out_of_the_record(self, tmp_path):

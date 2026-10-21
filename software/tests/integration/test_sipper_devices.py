@@ -10,8 +10,8 @@ def test_a_gantry_rig_builds_a_homed_retracted_sipper_and_a_declared_ledger(plat
                     ledger_path=tmp_path / "ledger.json")
     assert devices.robot is not None and devices.robot.current_well is None
     assert devices.robot.position() == (0.5, 0.5, 0.5)           # every axis read after homing, cleared into its stroke
-    assert devices.reservoirs is not None and devices.reservoirs.undeclared == sorted(
-        devices.reservoirs._defs), "no file yet: undeclared until declared"
+    assert devices.reservoirs.undeclared == sorted(devices.reservoirs._defs), \
+        "no file yet: undeclared until declared"
     devices.reservoirs.refill("all")
     assert devices.reservoirs.remaining("ssct/A1") == 1750
 
@@ -21,9 +21,23 @@ def test_a_simulated_rig_without_a_path_starts_declared(plate_sipper_config, bui
     assert devices.reservoirs.declared
 
 
-def test_a_rig_without_a_gantry_or_volumes_has_neither(flow_cell_config, built):
-    devices = built(flow_cell_config, simulation=True, instant=True)
-    assert devices.robot is None and devices.reservoirs is None
+def test_a_rig_without_a_gantry_or_volumes_has_no_robot_and_a_ledger_that_is_the_tally_alone(
+        flow_cell_config, built, tmp_path):
+    """The ledger is on every rig; with no volume declared it only counts:
+    in memory even where a path is given, so no file and no lock, nothing
+    to refuse or refill, and every draw counted under the valves' port."""
+    devices = built(flow_cell_config, simulation=True, instant=True,
+                    ledger_path=tmp_path / "ledger.json")
+    assert devices.robot is None
+    assert devices.reservoirs.tracked == ()
+    devices.selector_valves.open_port(3)
+    sp = devices.syringe_pump
+    sp.reset_chain()
+    sp.extract(flow_cell_config.syringe_pump.extract_port, 100, 10)
+    sp.execute()
+    assert devices.reservoirs.used_rows() == [(3, "z", 100)]
+    assert devices.reservoirs.rows() == [], "nothing is tracked, so nothing has a balance"
+    assert list(tmp_path.iterdir()) == [], "a ledger that tracks nothing wrote a file or took a lock"
 
 
 def test_the_robot_comes_up_before_the_valves_and_is_not_survivable(plate_sipper_config, monkeypatch):

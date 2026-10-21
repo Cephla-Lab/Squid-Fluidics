@@ -419,12 +419,12 @@ class RobotControlWidget(PostsToQtThread, QWidget):
 
     def refreshReservoirs(self):
         ledger = self.system.devices.reservoirs
-        rows = ledger.rows() if ledger is not None else []
+        rows = ledger.rows()
         self.reservoirTable.setRowCount(len(rows))
         for r, (key, dispatched, remaining) in enumerate(rows):
             for c, text in enumerate((key, f"{dispatched:.0f}", f"{remaining:.0f}")):
                 self.reservoirTable.setItem(r, c, QTableWidgetItem(text))
-        undeclared = ledger.undeclared if ledger is not None else []
+        undeclared = ledger.undeclared
         self.undeclaredLabel.setText(
             "" if not undeclared else
             f"Ledger undeclared for {len(undeclared)} reservoirs ({', '.join(undeclared[:4])}"

@@ -31,6 +31,7 @@ from .experiment_worker import ExperimentWorker
 from .merfish_operations import MERFISHOperations
 from .open_chamber_operations import OpenChamberOperations
 from .reservoirs import ReservoirLedger, default_ledger_path, reservoir_definitions
+from .robot.labware import well_key
 from .robot.sipper import RobotSipper
 from .robot.stage import POLL_SECONDS, XYZStage
 from .vocabulary import sipper_vocabulary
@@ -79,7 +80,8 @@ class DeviceSet:
     syringe_pump, selector_valves, disc_pump (None outside Open Chamber),
     temperature_controller (None when absent or failed), flow_sensors (possibly
     empty), robot (the RobotSipper, None without a gantry), reservoirs (the
-    ReservoirLedger, None when the config tracks no volume), and run_control
+    ReservoirLedger, on every rig; persisted and limited where a volume is
+    declared), and run_control
     -- the one cancellation signal every waiting device shares; RunSession
     drives it (cancel, pause, reset), so an abort from anywhere reaches every
     device. Built by build_devices(); nothing else should construct one.
@@ -97,7 +99,7 @@ class DeviceSet:
         self.temperature_controller = temperature_controller
         self.flow_sensors = flow_sensors
         self.robot = robot                  # RobotSipper, or None without a gantry
-        self.reservoirs = reservoirs        # ReservoirLedger, or None when nothing is tracked
+        self.reservoirs = reservoirs        # ReservoirLedger; None only in a set built by hand
         self._closed = False
 
     def make_safe(self):
@@ -221,13 +223,10 @@ def _build_robot(config, simulation, run_control, instant):
 
 
 def _build_ledger(config, simulation, ledger_path):
-    """The ledger for everything this config tracks, or None when it tracks
-    nothing. A simulated rig gets a fresh in-memory ledger unless a path
-    is given (the tests', the CLI's --ledger)."""
+    """The ledger for everything this config tracks, placed as build_devices'
+    note on ledger_path says: on disk under its lock, or in memory."""
     definitions = reservoir_definitions(config)
-    if not definitions:
-        return None
-    if simulation and ledger_path is None:
+    if not definitions or (simulation and ledger_path is None):
         return ReservoirLedger(definitions)
     path = ledger_path or default_ledger_path(config.source_path or "in-memory")
     return ReservoirLedger.load(path, definitions)
@@ -237,15 +236,16 @@ def build_devices(config, simulation=False, on_issue=None, run_control=None,
                   instant=False, ledger_path=None):
     """Construct and start the full stack for `config`. Returns a DeviceSet.
 
-    Mirrors what the two entry points did, once: take the reservoir
-    ledger's lock (before any device is constructed, so a second launch on
-    a rig in use stops there); construct controller, syringe pump, and
-    (optionally) temperature controller; begin() the controller and CLEAR
-    the MCU; start the flow sensors; build the robot when the config has a
-    gantry (connected, homed, retracted: after the sensors, before the
-    valves); build the selector valves (which homes them, today a
-    constructor side effect); attach the disc pump for Open Chamber; attach
-    the ledger to the pump's draws.
+    Mirrors what the two entry points did, once: build the reservoir
+    ledger and, where the config declares a volume, take its lock (before
+    any device is constructed, so a second launch on a rig in use stops
+    there); construct controller, syringe pump, and (optionally)
+    temperature controller; begin() the controller and CLEAR the MCU;
+    start the flow sensors; build the robot when the config has a gantry
+    (connected, homed, retracted: after the sensors, before the valves);
+    build the selector valves (which homes them, today a constructor side
+    effect); attach the disc pump for Open Chamber; attach the ledger to
+    the pump's draws, on every rig.
 
     Degradation policy is the GUI's: a temperature controller that fails to
     come up on hardware, or flow sensors that fail in either mode, are
@@ -258,7 +258,9 @@ def build_devices(config, simulation=False, on_issue=None, run_control=None,
 
     ledger_path: where the reservoir ledger lives. None: beside the run
     reports, named after the config; on a simulated rig, a fresh ledger in
-    memory, every reservoir declared full.
+    memory, every reservoir declared full. A rig that declares no volume
+    keeps its ledger -- the tally alone -- in memory either way, with no
+    file and no lock.
 
     instant: switch the simulated rig's pacing off -- the controller's
     one-second commands and the pump's five-second moves take no time. For
@@ -285,14 +287,15 @@ def build_devices(config, simulation=False, on_issue=None, run_control=None,
     robot = None
     reservoirs = None
     try:
-        # The ledger's lock first, before any device is constructed: a
-        # second launch on a rig already in use stops here, before it talks
-        # to the pump (the real pump's constructor sends it commands, and a
-        # pump that answers "not initialized" is initialized by the vendor
-        # driver), clears the MCU, homes the robot (lifting the first
-        # session's tip out of its well) or homes the valves. A ledger it
-        # cannot lock fails the launch with nothing to release; a file it
-        # cannot read loads as undeclared and the launch goes on.
+        # The ledger first, its lock (where a volume is declared) before
+        # any device is constructed: a second launch on a rig already in
+        # use stops here, before it talks to the pump (the real pump's
+        # constructor sends it commands, and a pump that answers "not
+        # initialized" is initialized by the vendor driver), clears the
+        # MCU, homes the robot (lifting the first session's tip out of its
+        # well) or homes the valves. A ledger it cannot lock fails the
+        # launch with nothing to release; a file it cannot read loads as
+        # undeclared and the launch goes on.
         reservoirs = _build_ledger(config, simulation, ledger_path)
 
         controller = controller_cls(config.microcontroller.serial_number)
@@ -349,15 +352,16 @@ def build_devices(config, simulation=False, on_issue=None, run_control=None,
         disc_pump = (DiscPump(controller, run_control)
                      if config.application == "Open Chamber" else None)
 
-        # Attached once the draws it authorizes can be routed: it reads the
-        # valves' port and the sipper's well.
-        if reservoirs is not None:
-            reservoirs.attach(
-                syringe_pump, None if robot is None else gantry(config).selector_valve_port,
-                config.syringe_pump.extract_port, selector_valves.get_current_port,
-                (lambda: None) if robot is None else
-                (lambda: None if robot.current_well is None
-                 else f"{robot.current_well.reservoir}/{robot.current_well.well}"))
+        # Attached once the draws it counts can be routed: it reads the
+        # valves' port and the sipper's well, and names a port's reagent
+        # as the valves do.
+        reservoirs.attach(
+            syringe_pump, None if robot is None else gantry(config).selector_valve_port,
+            config.syringe_pump.extract_port, selector_valves.get_current_port,
+            (lambda: None) if robot is None else
+            (lambda: None if robot.current_well is None
+             else well_key(robot.current_well)),
+            port_to_reagent=selector_valves.port_to_reagent)
     except BaseException:
         # A pump that is not found, a dead controller, a stuck valve, or a
         # Ctrl+C (an operator watching Z home) is not survivable, but the

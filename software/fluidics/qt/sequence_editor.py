@@ -829,9 +829,10 @@ class SequencesWidget(PostsToQtThread, QWidget):
         self._renderUsage()
 
     def _renderUsage(self):
-        """The per-port totals as they stand; the ledger's rows carry the
-        names, read fresh per call, so a rename shows on the next tick."""
-        rows = self.system.usage.rows()
+        """The per-port figures as they stand; the ledger's per-run rows
+        carry the names, read fresh per call, so a rename shows on the
+        next tick."""
+        rows = self.system.devices.reservoirs.used_rows()
         self.usageTable.setVisible(bool(rows))
         self.usageTable.setRowCount(len(rows))
         for index, (port, name, used) in enumerate(rows):

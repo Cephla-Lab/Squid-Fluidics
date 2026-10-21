@@ -1,9 +1,13 @@
 """The reservoir gate: a run that would draw air is refused at time zero."""
+import logging
+
 import pytest
 
 from fluidics.errors import (OperationError, ReservoirDrawTooLarge, ReservoirNoWell,
                             ReservoirShortfall, ReservoirUndeclared)
 from fluidics.system import FluidicsSystem
+
+from .conftest import FLOW_CELL_STEP
 
 HYB = {"type": "flow_reagent", "fluidic_port": 1, "well": "A1", "flow_rate": 2000, "volume": 100}
 PUSH = {"type": "flow_reagent", "fluidic_port": 1, "well": "ssct/A1", "flow_rate": 2000, "volume": 490}
@@ -72,13 +76,40 @@ def test_an_undeclared_ledger_refuses_the_run(plate_sipper_config, instant_devic
         assert system.close() == []
 
 
-def test_a_rig_without_a_ledger_skips_the_gate(flow_cell_config, instant_devices, tmp_path):
+def test_a_rig_that_tracks_nothing_skips_the_gate(flow_cell_config, instant_devices, tmp_path,
+                                                  monkeypatch, caplog):
+    """Its ledger is the tally alone, with nothing to refuse, so no twin is
+    built, no step is replayed and nothing is said: a step the twin could
+    not replay must not become a refusal here, where plan_run deliberately
+    falls back."""
+    import fluidics.time_estimate as time_estimate
     system = FluidicsSystem(flow_cell_config, instant_devices(flow_cell_config), report_dir=tmp_path)
     try:
-        assert system.check_reservoirs(system.plan([{"type": "flow_reagent", "fluidic_port": 2,
-                                                     "flow_rate": 500, "volume": 500}])) == []
+        plan = system.plan([FLOW_CELL_STEP])         # priced by replay, before the twin is taken away
+
+        def no_twin(*args, **kwargs):
+            raise AssertionError("the gate built a twin on a rig that tracks nothing")
+
+        monkeypatch.setattr(time_estimate, "build_devices", no_twin)
+        with caplog.at_level(logging.INFO, logger="fluidics.system"):
+            assert system.check_reservoirs(plan) == []
+        assert not [record for record in caplog.records
+                    if record.getMessage().startswith("Reservoirs after this run")]
     finally:
         assert system.close() == []
+
+
+def test_a_run_start_logs_the_projected_balances(system, caplog):
+    """The general notice at the start of a run, once, at INFO: what the
+    gate's replay says each touched reservoir has left when the run is
+    done."""
+    with caplog.at_level(logging.INFO, logger="fluidics.system"):
+        system.run([HYB, PUSH, WASH])
+        assert system.wait()
+    assert [record.getMessage() for record in caplog.records
+            if record.name == "fluidics.system"
+            and record.getMessage().startswith("Reservoirs after this run")] == \
+        ["Reservoirs after this run: probes/A1 5 uL left; ssct/A1 260 uL left."]
 
 
 def test_the_plan_prices_the_robots_travel(plate_sipper_config):

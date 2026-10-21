@@ -1,18 +1,36 @@
-"""What every reagent source has left, on disk (spec §2.4, D6).
+"""Every reagent draw, counted once; what every declared reservoir has
+left, on disk (spec §2.4, D6).
 
-One entry per reservoir with a declared volume: a bulk bottle on a valve
-port (`port_25`) or a plate well (`ssct/A1`). The pump asks the ledger
-before every extract it dispatches (SyringePump.draw_authorizers): the
-ledger refuses a draw that would not fit, charges the one that does and
-writes the file, all before the plunger moves, so a crash or a write that
-fails can only leave the file reading high, never low. The key is the
-routed valve port's bottle, or the sipper's current well when the sipper's
-port is the one routed; a draw through the sipper's port with the tip in
-no well is refused here too, the last line of the no-air rule. Restored
+The ledger is built on every rig, declared volumes or not, and is the one
+tally of the pump's draws: the pump asks it before every extract it
+dispatches (SyringePump.draw_authorizers), and only draws through the
+syringe's reagent path (the configured extract port) count -- a chamber
+draw, air and every dispense are not reagent consumption. The key is the
+routed valve port's bottle (`port_25`), or the sipper's current well
+(`ssct/A1`) when the sipper's port is the one routed; a draw through the
+sipper's port with the tip in no well is refused here, the last line of
+the no-air rule. The join of the pump's volume with the valves' port is
+sound by structure, not convention: the pump asks synchronously on the
+job thread, the only thread that moves valves, and the session admits one
+job at a time, so the port cannot change between the question and the
+dispatch. One charge keeps two figures: what each port has drawn since
+the run started (`used_rows`: the editor's Used table, the report's
+per-port block and the run-end log line; zeroed when a run starts, so a
+manual draw between runs stays in view until then), and what each tracked
+reservoir has dispatched since its refill (`rows`: the file's own rows).
+
+A declared volume -- a key under `loaded_volume_ul`, or every well of a
+gantry's plates -- adds only a limit. For such a tracked key the ledger
+refuses a draw that would not fit, charges the one that does and writes
+the file, all before the plunger moves, so a crash or a write that fails
+can only leave the file reading high, never low; an untracked key is
+counted, never refused and never written. Tracked entries are restored
 at bring-up entry by entry: an entry whose definition matches the file
 keeps its balance; one that changed, is new, or has no file is undeclared,
 and nothing tracked is drawn until its refill is declared -- a ledger
-never guesses. One process at a time holds a rig's ledger (a lock file).
+never guesses. One process at a time holds a rig's ledger (a lock file),
+where there is a file at all: build_devices decides that, and gives a rig
+that tracks nothing an in-memory ledger.
 """
 
 import hashlib
@@ -24,8 +42,10 @@ import os
 import threading
 from pathlib import Path
 
+from .control.config import port_key
 from .errors import (ReservoirDrawTooLarge, ReservoirError, ReservoirInUse, ReservoirNoWell,
                      ReservoirOverdraw, ReservoirUndeclared, ReservoirWriteError)
+from .events import RunEnded, RunStarted
 from .files import atomic_write
 
 _logger = logging.getLogger(__name__)
@@ -33,51 +53,59 @@ _logger = logging.getLogger(__name__)
 FORMAT = 2
 
 
+def _no_name(port):
+    """What a ledger attached without the valves' names calls every port."""
+    return None
+
+
 class ReservoirLedger:
     def __init__(self, definitions, path=None, declared=True):
         self._defs = {key: {"loaded_ul": int(d["loaded_ul"]), "residual_ul": int(d["residual_ul"])}
                       for key, d in definitions.items()}
         self._dispatched = {key: 0.0 for key in self._defs}
+        self._used_run = {}          # routed port -> uL drawn since the run started
         self._path = Path(path) if path is not None else None
         self._lock = threading.Lock()
         self._lockfile = None
         self._undeclared = set() if declared else set(self._defs)
         self._sipper_port = self._extract_port = None
         self._current_port = self._current_well = None
+        self._port_to_reagent = _no_name
 
     # --- wiring ---
 
-    def attach(self, pump, sipper_port, extract_port, current_port, current_well):
-        """Authorize the pump's draws. current_port() is the valve system's
-        routed port; current_well() is the sipper's well key or None;
-        sipper_port is the one port whose draws come from a well."""
+    def attach(self, pump, sipper_port, extract_port, current_port, current_well,
+               port_to_reagent=_no_name):
+        """Authorize and count the pump's draws. current_port() is the valve
+        system's routed port; current_well() is the sipper's well key or
+        None; sipper_port is the one port whose draws come from a well;
+        port_to_reagent(port) is the valves' name for a port, or None,
+        read by used_rows."""
         self._sipper_port, self._extract_port = sipper_port, extract_port
         self._current_port, self._current_well = current_port, current_well
+        self._port_to_reagent = port_to_reagent
         pump.draw_authorizers.append(self.authorize)
 
-    def key_for_draw(self):
-        """The reservoir the next draw comes from, by where the valve and
-        the sipper are now; ReservoirNoWell for the sipper's port with the
-        tip in no well."""
-        return self._route()[0]
-
     def _route(self):
-        """(key, whether it is a well) for the next draw: one read of the
-        valve and the sipper, so the key and its kind cannot disagree."""
+        """(key, the routed port) for the next draw, from one read of the
+        valve and the sipper, so the key and the port it is counted under
+        cannot disagree; ReservoirNoWell for the sipper's port with the tip
+        in no well."""
         port = self._current_port()
         if port == self._sipper_port:
             well = self._current_well()
             if well is None:
                 raise ReservoirNoWell(f"port {port} is the sipper's and the sipper is not in a well")
-            return well, True
-        return f"port_{port}", False
+            return well, port
+        return port_key(port), port
 
     def authorize(self, pump_port, volume_ul):
-        """The pump's pre-dispatch call: refuse, or charge and write."""
+        """The pump's pre-dispatch call: refuse, or count the draw under
+        its port -- and, for a tracked key, charge and write first."""
         if pump_port != self._extract_port:
             return
-        key, from_well = self._route()
-        if from_well and key not in self._defs:
+        key, port = self._route()
+        if port == self._sipper_port and key not in self._defs:
             # Untracked is for bulk bottles. Every well of every plate is
             # defined, so a well the ledger does not know would be a guess.
             raise ReservoirUndeclared(
@@ -85,20 +113,32 @@ class ReservoirLedger:
                 "the draw was not started")
         with self._lock:
             self._check(key, volume_ul)
-            if key not in self._defs or volume_ul == 0:
-                return      # untracked, or no draw at all: nothing to charge or write
-            self._dispatched[key] += volume_ul
-            try:
-                self._write()
-            except Exception as e:
-                self._dispatched[key] -= volume_ul
-                raise ReservoirWriteError(
-                    f"the reservoir ledger could not be written ({e}); the draw from {key} "
-                    "was not started") from e
-            _logger.info("%s: %.0f uL dispatched, %.0f uL left", key, volume_ul,
-                         self._remaining(key))
+            if volume_ul == 0:
+                return      # no draw at all: nothing to count, charge or write
+            if key in self._defs:
+                self._dispatched[key] += volume_ul
+                try:
+                    self._write()
+                except Exception as e:
+                    self._dispatched[key] -= volume_ul
+                    raise ReservoirWriteError(
+                        f"the reservoir ledger could not be written ({e}); the draw from {key} "
+                        "was not started") from e
+                _logger.info("%s: %.0f uL dispatched, %.0f uL left", key, volume_ul,
+                             self._remaining(key))
+            # Counted last, once the draw is authorized: a refused draw, a
+            # write that failed included, leaves the per-run figure as it
+            # was, with nothing to roll back. A well draw is counted under
+            # the sipper's port, the port the valves name.
+            self._used_run[port] = self._used_run.get(port, 0.0) + volume_ul
 
     # --- reading ---
+
+    @property
+    def tracked(self):
+        """The keys with a declared volume, in key order; empty where the
+        ledger is the tally alone and has nothing to refuse or refill."""
+        return tuple(sorted(self._defs))
 
     @property
     def declared(self):
@@ -124,14 +164,15 @@ class ReservoirLedger:
             self._check(key, volume_ul)
 
     def _check(self, key, volume_ul):
-        if key not in self._defs:
-            return
-        # First: NaN fails every comparison, so it would pass every check
-        # below and, charged, every check on every draw after it.
+        # First, for every key: NaN fails every comparison, so it would pass
+        # every check below and, charged, every check on every draw after
+        # it -- and counted under an untracked port, poison that figure too.
         if (isinstance(volume_ul, bool) or not isinstance(volume_ul, numbers.Real)
                 or not 0 <= volume_ul < math.inf):
             raise ReservoirError(f"{key}: {volume_ul!r} uL is not a volume that can be drawn "
                                  "(a finite number, 0 or more)")
+        if key not in self._defs:
+            return      # untracked: counted, never limited
         if volume_ul == 0:
             return      # not a draw: no liquid moves, so there is nothing to refuse
         if self._undeclared:
@@ -148,6 +189,44 @@ class ReservoirLedger:
         with self._lock:
             return [(key, self._dispatched[key], self._remaining(key))
                     for key in sorted(self._defs) if self._dispatched[key]]
+
+    def used_rows(self):
+        """(port, reagent name or None, uL) per port drawn from since the
+        run started, in port order -- the one place the per-run figures
+        meet their names, read fresh here so a rename shows on the next
+        paint."""
+        with self._lock:
+            used = dict(self._used_run)
+        return [(port, self._port_to_reagent(port), used[port]) for port in sorted(used)]
+
+    # --- the run's boundaries (RunSession.events; the system subscribes) ---
+
+    def on_run_event(self, event):
+        """The per-run figure follows the run: it starts over at RunStarted
+        ("from the beginning of each experiment") and goes to the log at
+        RunEnded, so the record exists even when nothing was watching. A
+        resumed run (the resume offer re-runs the tail as a fresh start)
+        deliberately counts as a new experiment: the interrupted run's
+        figures were logged at its end, and cross-run accumulation, if ever
+        wanted, belongs with run identity."""
+        if isinstance(event, RunStarted):
+            # RunStarted fires from the worker's constructor, on the
+            # starter's thread before the run's thread exists, so the reset
+            # cannot race the run's first draw.
+            with self._lock:
+                self._used_run = {}
+        elif isinstance(event, RunEnded):
+            self._log_used(event.run_id)
+
+    def _log_used(self, run_id):
+        rows = self.used_rows()
+        if not rows:
+            _logger.info("Reagent used (%s): none drawn.", run_id)
+            return
+        parts = [(f"port {port} ({name})" if name else f"port {port}")
+                 + f": {used:.0f} uL"
+                 for port, name, used in rows]
+        _logger.info("Reagent used (%s): %s.", run_id, "; ".join(parts))
 
     # --- state ---
 

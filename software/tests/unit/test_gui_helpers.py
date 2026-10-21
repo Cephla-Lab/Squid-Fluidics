@@ -1109,16 +1109,16 @@ class TestShowingWhereTheValvesAre:
 
 
 class TestUsageTable:
-    """The run tab's per-port table: painted from the ledger's snapshot,
-    names read fresh from the config at each paint, hidden when empty."""
+    """The run tab's per-port table: painted from the reservoir ledger's
+    per-run rows, names read fresh at each paint, hidden when empty."""
 
     def _stub(self, rows):
         from qtpy.QtWidgets import QTableWidget
         table = QTableWidget(0, 3)
         stub = SimpleNamespace(
             usageTable=table,
-            system=SimpleNamespace(
-                usage=SimpleNamespace(rows=lambda: list(rows))),
+            system=SimpleNamespace(devices=SimpleNamespace(
+                reservoirs=SimpleNamespace(used_rows=lambda: list(rows)))),
         )
         return stub, table
 

@@ -2,6 +2,7 @@ import logging
 from .control.config import gantry
 from .errors import Cancelled, OperationError, ReservoirError
 from .flow_monitor import DrawGuard
+from .robot.labware import well_key
 from .sequences import use_ports_problem
 from .vocabulary import sipper_vocabulary
 from . import sequence_utils
@@ -17,8 +18,10 @@ class MERFISHOperations():
         self.sp = syringe_pump
         self.sv = selector_valves
         self.tc = temperature_controller
-        # The sipper's robot and the reservoir ledger, both None on a rig
-        # without them (spec §5). The vocabulary spells the wells.
+        # The sipper's robot, None on a rig without a gantry (spec §5), and
+        # the reservoir ledger, None only when the operations are built by
+        # hand (fixtures, embedders): build_devices builds one on every rig.
+        # The vocabulary spells the wells.
         self.robot = robot
         self.reservoirs = reservoirs
         g = gantry(config) if robot is not None else None
@@ -110,7 +113,7 @@ class MERFISHOperations():
         if well is not None:
             ref = self.vocabulary.resolve(well)
             if self.reservoirs is not None:
-                self.reservoirs.check(f"{ref.reservoir}/{ref.well}", volume_ul)
+                self.reservoirs.check(well_key(ref), volume_ul)
             self.robot.go_to_well(ref)
         self.sv.open_port(port)
 

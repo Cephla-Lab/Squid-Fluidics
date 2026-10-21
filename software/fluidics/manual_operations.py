@@ -205,7 +205,10 @@ class ManualOperations:
         _logger.info("Taught: travel height %.2f mm.", z)
 
     def refill(self, key):
-        if self.reservoirs is None:
+        """Declare `key` full in the ledger: `all`, a plate name, or one
+        key. Refused where no volume is declared: the tally alone has
+        nothing to refill."""
+        if not self.reservoirs.tracked:
             raise RuntimeError("this rig tracks no reservoir volumes")
         self._refuse_a_refill_under_the_tip(key)
         self.reservoirs.refill(key)

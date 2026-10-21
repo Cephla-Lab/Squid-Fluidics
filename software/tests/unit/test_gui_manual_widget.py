@@ -1,6 +1,7 @@
 """ManualControlWidget over a simulated system: the tracked bottles' remaining
 volumes and the "Bottle refilled…" declaration (spec §7, §9), which every
-ledger rig has, robot or not; a rig that tracks nothing shows neither."""
+rig with a declared bottle has, robot or not; a rig that tracks nothing
+shows neither."""
 from qtpy.QtCore import QEvent
 from qtpy.QtWidgets import QApplication
 
@@ -14,7 +15,7 @@ def _destroy(widget):
 
 def test_the_manual_tab_shows_remaining_and_declares_a_bottle(qapp, plate_sipper_config, tmp_path, monkeypatch):
     """Codex finding 15: tracked bottles are declared from the manual tab,
-    which every ledger rig has, robot or not."""
+    which every rig has, robot or not."""
     from fluidics.devices import build_devices
     from fluidics.qt.manual_control import ManualControlWidget
     from fluidics.system import FluidicsSystem
@@ -62,9 +63,9 @@ def test_the_routed_bottle_s_remaining_shows_beside_the_port(qapp, plate_sipper_
 
 
 def test_a_rig_with_bottles_and_no_robot_declares_them_here(qapp, flow_cell_config, tmp_path, monkeypatch):
-    """The manual tab is where a bottle is declared on every ledger rig --
-    one without a robot (and so without a Robot tab) included. The click
-    asks which bottle; Cancel refills nothing."""
+    """The manual tab is where a bottle is declared on every rig that tracks
+    one -- a rig without a robot (and so without a Robot tab) included. The
+    click asks which bottle; Cancel refills nothing."""
     from fluidics.devices import build_devices
     from fluidics.qt.manual_control import ManualControlWidget
     from fluidics.system import FluidicsSystem
@@ -74,7 +75,7 @@ def test_a_rig_with_bottles_and_no_robot_declares_them_here(qapp, flow_cell_conf
         sensor.close()
     system = FluidicsSystem(flow_cell_config, devices, report_dir=tmp_path)
     try:
-        assert system.devices.robot is None and system.devices.reservoirs is not None
+        assert system.devices.robot is None and system.devices.reservoirs.tracked == ("port_2",)
         w = ManualControlWidget(flow_cell_config, system)
         system.devices.reservoirs._dispatched["port_2"] = 400
         w.refreshRemaining()
@@ -92,7 +93,8 @@ def test_a_rig_with_bottles_and_no_robot_declares_them_here(qapp, flow_cell_conf
 
 
 def test_a_rig_that_tracks_nothing_shows_no_bottles(qapp, flow_cell_config, tmp_path):
-    """D8: no declared volumes, no ledger, the manual tab as it was."""
+    """D8: no declared volume, a ledger that tracks nothing, the manual tab
+    as it was."""
     from fluidics.devices import build_devices
     from fluidics.qt.manual_control import ManualControlWidget
     from fluidics.system import FluidicsSystem
@@ -101,7 +103,7 @@ def test_a_rig_that_tracks_nothing_shows_no_bottles(qapp, flow_cell_config, tmp_
         sensor.close()
     system = FluidicsSystem(flow_cell_config, devices, report_dir=tmp_path)
     try:
-        assert system.devices.reservoirs is None
+        assert system.devices.reservoirs.tracked == ()
         w = ManualControlWidget(flow_cell_config, system)
         assert not hasattr(w, "bottleRefilledButton")
         w.refreshRemaining()                       # a no-op, not an error
