@@ -7,10 +7,12 @@ from fluidics.sequences import (
     APPLICATION_SEQUENCES,
     SEQUENCE_TYPES,
     SEQUENCE_TYPE_LABELS,
+    SIPPER_TYPES,
     SequenceListAdapter,
     check_ports_against_config,
     check_types_against_application,
     sequence_type_problem,
+    types_for_rig,
     load_sequences,
     save_sequences_yaml,
     get_included_sequences,
@@ -19,6 +21,19 @@ from fluidics.sequences import (
 
 
 class TestSequenceModels:
+    def test_a_push_names_a_well_and_a_flow_rate_and_nothing_else(self):
+        """The volume is the config's and the port the sipper's: neither is
+        the row's to give; dips are optional."""
+        [seq] = SequenceListAdapter.validate_python([
+            {"type": "push", "well": "ssct/A1", "flow_rate": 2000}])
+        assert (seq.well, seq.flow_rate, seq.dip_cycles) == ("ssct/A1", 2000, 0)
+        for extra in ({"volume": 490}, {"fluidic_port": 1}):
+            with pytest.raises(ValidationError):
+                SequenceListAdapter.validate_python([
+                    {"type": "push", "well": "ssct/A1", "flow_rate": 2000, **extra}])
+        with pytest.raises(ValidationError, match="well"):
+            SequenceListAdapter.validate_python([{"type": "push", "flow_rate": 2000}])
+
     def test_flow_reagent_valid(self):
         seq = SequenceListAdapter.validate_python([
             {"type": "flow_reagent", "fluidic_port": 1, "flow_rate": 5000, "volume": 2000}
@@ -223,6 +238,21 @@ class TestRegistryConsistency:
     def test_flow_cell_includes_set_temperature(self):
         assert "set_temperature" in APPLICATION_SEQUENCES["Flow Cell"]
 
+    def test_the_sipper_only_types_are_derived_from_the_models(self):
+        """A type whose rows name a well and carry no port draws through
+        the sipper and nowhere else; nothing declares it."""
+        assert SIPPER_TYPES == {"push"}
+        assert SIPPER_TYPES <= set(APPLICATION_SEQUENCES["Flow Cell"])
+        from fluidics.sequences import _CSV_NAME_TO_TYPE
+        assert "Push" not in _CSV_NAME_TO_TYPE, "a CSV's columns cannot express a push"
+
+    def test_a_rig_without_a_sipper_is_offered_no_sipper_only_type(self, plate_sipper_config):
+        from fluidics.vocabulary import sipper_vocabulary
+        assert "push" not in types_for_rig("Flow Cell", None)
+        assert types_for_rig("Flow Cell", sipper_vocabulary(plate_sipper_config)) \
+            == APPLICATION_SEQUENCES["Flow Cell"]
+        assert types_for_rig("Open Chamber", None) == APPLICATION_SEQUENCES["Open Chamber"]
+
 
 class TestCheckPortsAgainstConfig:
     """The upper bound lives in the rig config, not the sequence file, so the
@@ -338,6 +368,7 @@ from fluidics.sequences import (sequence_problem as _sequence_problem,
 from fluidics.vocabulary import sipper_vocabulary as _vocabulary
 
 HYB = {"type": "flow_reagent", "fluidic_port": 1, "well": "A1", "flow_rate": 2000, "volume": 100}
+PUSH = {"type": "push", "well": "ssct/A1", "flow_rate": 2000}
 
 
 class TestWellFields:
@@ -372,6 +403,38 @@ class TestPairingRules:
         assert sequence_well_problems(dict(HYB, fluidic_port=2), v) == ["well=A1 needs fluidic_port=1 (the sipper)"]
         assert sequence_well_problems({**HYB, "well": None}, v) == ["fluidic_port=1 is the sipper: name a well"]
         assert sequence_well_problems(HYB, v) == []
+
+    def test_a_push_row_is_the_sippers_and_names_only_its_well(self, plate_sipper_config):
+        v = _vocabulary(plate_sipper_config)
+        assert sequence_well_problems(PUSH, v) == []
+        assert sequence_well_problems({"type": "push", "flow_rate": 2000}, v) == [
+            "a push row draws through the sipper: name a well"]
+        assert sequence_well_problems(dict(PUSH, well="water/A1"), v)[0].startswith("well=water/A1:")
+        _validate([PUSH], plate_sipper_config)
+        # A script's raw dict still carrying the old push row's port or
+        # volume is refused, not drawn past: the gate never runs the model.
+        for stray in ("fluidic_port", "volume"):
+            message = f"{stray} is not a field of push rows"
+            assert sequence_well_problems({**PUSH, stray: 25}, v) == [message]
+            with pytest.raises(ValueError, match=message):
+                _validate([{**PUSH, stray: 25}], plate_sipper_config)
+
+    def test_a_push_row_on_a_rig_without_a_sipper_is_refused_with_or_without_its_well(
+            self, flow_cell_config):
+        """The type gate offers push on every Flow Cell rig; the well gate
+        refuses the row where the rig has no sipper, a script's raw dict
+        with no well included."""
+        for row in (PUSH, {"type": "push", "flow_rate": 2000}):
+            with pytest.raises(ValueError, match="this rig has no sipper"):
+                _validate([row], flow_cell_config)
+
+    def test_a_bare_set_temperature_row_on_a_sipper_rig_draws_no_well_complaint(
+            self, plate_sipper_config):
+        """The pairing is for rows with a port and for the sipper-only
+        types; a row with neither is nobody's well row."""
+        row = {"type": "set_temperature", "temperature": 37.0}
+        assert sequence_well_problems(row, _vocabulary(plate_sipper_config)) == []
+        _validate([row], plate_sipper_config)
 
     def test_a_sipper_row_carries_no_fill(self, plate_sipper_config):
         v = _vocabulary(plate_sipper_config)
@@ -422,6 +485,7 @@ class TestPairingRules:
           "flow_rate": 5000, "volume": 800}, "dip_cycles is not a field of priming rows"),
         ({"type": "set_temperature", "temperature": 37.0, "fluidic_port": 1, "well": "A1"},
          "well is not a field of set_temperature rows"),
+        (dict(PUSH, sipper_well="ssct/H10"), "sipper_well is not a field of push rows"),
     ])
     def test_a_well_field_the_row_type_lacks_is_refused(self, plate_sipper_config, row, message):
         """The model forbids these; the raw-dict gate must too, or the

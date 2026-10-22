@@ -47,6 +47,7 @@ reagent_selection:
   common_tubing_fluid_amount_ul: 240
   nimotion_gantry_system:
     selector_valve_port: 1
+    push_volume_ul: 490
     serial_number: FTXXXXXX
     baudrate: 115200
     axes: {x: X1, y: Y2, z: Z3}

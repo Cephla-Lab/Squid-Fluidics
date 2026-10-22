@@ -41,6 +41,18 @@ class FlowReagentSequence(FluidicSequence):
     dip_cycles: int = Field(default=0, ge=0)   # dips before the draw, sipper rows only
 
 
+class PushSequence(SequenceBase):
+    """The row after a well draw on a sipper rig: the config's push volume
+    (nimotion_gantry_system.push_volume_ul, tip to flow cell) drawn from
+    `well` through the sipper, so what the previous row drew into the line
+    is in the flow cell for this row's incubation. No port (the sipper's)
+    and no volume (the config's); dips before the draw are optional."""
+    type: Literal["push"]
+    well: str                                  # the well pushed from, through the sipper
+    flow_rate: int = Field(gt=0)
+    dip_cycles: int = Field(default=0, ge=0)
+
+
 class AddReagentSequence(FluidicSequence):
     type: Literal["add_reagent"]
     fill_tubing_with: Optional[int] = None
@@ -74,6 +86,7 @@ class SetTemperatureSequence(SequenceBase):
 Sequence = Annotated[
     Union[
         FlowReagentSequence,
+        PushSequence,
         AddReagentSequence,
         ClearAndAddReagentSequence,
         WashConstantFlowSequence,
@@ -97,8 +110,17 @@ for _cls in get_args(get_args(Sequence)[0]):
     _type_key = get_args(_type_field.annotation)[0]
     SEQUENCE_TYPES[_type_key] = _cls
 
+# The types that draw through the sipper and nowhere else: a row names a
+# well and carries no port. Derived from the models, so the Add dialog's
+# offer (types_for_rig) and the pairing rule (sequence_well_problems) cannot
+# disagree about which types they mean.
+SIPPER_TYPES: frozenset[str] = frozenset(
+    t for t, m in SEQUENCE_TYPES.items()
+    if "well" in m.model_fields and "fluidic_port" not in m.model_fields)
+
 SEQUENCE_TYPE_LABELS: dict[str, str] = {
     "flow_reagent": "Flow Reagent",
+    "push": "Push",
     "add_reagent": "Add Reagent",
     "clear_and_add_reagent": "Clear Tubings and Add Reagent",
     "wash_constant_flow": "Wash with Constant Flow",
@@ -108,7 +130,7 @@ SEQUENCE_TYPE_LABELS: dict[str, str] = {
 }
 
 APPLICATION_SEQUENCES: dict[str, list[str]] = {
-    "Flow Cell": ["flow_reagent", "priming", "clean_up", "set_temperature"],
+    "Flow Cell": ["flow_reagent", "push", "priming", "clean_up", "set_temperature"],
     "Open Chamber": [
         "add_reagent",
         "clear_and_add_reagent",
@@ -119,10 +141,12 @@ APPLICATION_SEQUENCES: dict[str, list[str]] = {
     ],
 }
 
-# Derive CSV name-to-type mapping from labels (inverse, excluding set_temperature
-# which is handled via regex pattern matching in _load_csv).
+# Derive CSV name-to-type mapping from labels (inverse, excluding set_temperature,
+# which is handled via regex pattern matching in _load_csv, and the sipper-only
+# types, which a CSV's port, flow-rate and volume columns cannot express).
 _CSV_NAME_TO_TYPE: dict[str, str] = {
-    v: k for k, v in SEQUENCE_TYPE_LABELS.items() if k != "set_temperature"
+    v: k for k, v in SEQUENCE_TYPE_LABELS.items()
+    if k != "set_temperature" and k not in SIPPER_TYPES
 }
 
 
@@ -272,11 +296,12 @@ def sequence_well_problems(seq: dict, vocabulary) -> list[str]:
     problems = []
     # The model forbids a field its type lacks; the raw row is not run
     # through the model here, so a stray one would be silently ignored at
-    # run time (a priming row's dips never happen). Named first.
+    # run time (a priming row's dips never happen; a push row's own port
+    # and volume would be drawn past). Named first.
     model = SEQUENCE_TYPES.get(seq.get("type"))
     if model is not None:
         problems.extend(f"{f} is not a field of {seq['type']} rows"
-                        for f in (*WELL_FIELDS, "dip_cycles")
+                        for f in (*WELL_FIELDS, "dip_cycles", *PORT_FIELDS, "volume")
                         if f in seq and f not in model.model_fields)
     set_fields = [f for f, falsy_unset in WELL_FIELDS.items()
                   if seq.get(f) is not None and not (falsy_unset and not seq.get(f))]
@@ -285,7 +310,7 @@ def sequence_well_problems(seq: dict, vocabulary) -> list[str]:
         problems.append(f"dip_cycles={dips!r}: a whole number of dips, 0 or more")
         dips = 0
     if vocabulary is None:
-        if set_fields or dips:
+        if set_fields or dips or seq.get("type") in SIPPER_TYPES:
             problems.append("this rig has no sipper")
         return problems
     port, well = seq.get("fluidic_port"), seq.get("well")
@@ -297,10 +322,15 @@ def sequence_well_problems(seq: dict, vocabulary) -> list[str]:
             vocabulary.resolve(seq[field])
         except ValueError as e:
             problems.append(f"{field}={seq[field]}: {e}")
-    if well is not None and port != vocabulary.sipper_port:
-        problems.append(f"well={well} needs fluidic_port={vocabulary.sipper_port} (the sipper)")
-    if well is None and port == vocabulary.sipper_port:
-        problems.append(f"fluidic_port={port} is the sipper: name a well")
+    if seq.get("type") in SIPPER_TYPES:
+        # The port is implied, the sipper's; the well is the row's to name.
+        if well is None:
+            problems.append(f"a {seq['type']} row draws through the sipper: name a well")
+    else:
+        if well is not None and port != vocabulary.sipper_port:
+            problems.append(f"well={well} needs fluidic_port={vocabulary.sipper_port} (the sipper)")
+        if well is None and port == vocabulary.sipper_port:
+            problems.append(f"fluidic_port={port} is the sipper: name a well")
     if well is not None and seq.get("fill_tubing_with"):
         problems.append("a sipper row cannot fill tubing: add a flow_reagent row from the paired well")
     if seq.get("fill_tubing_with") == vocabulary.sipper_port:
@@ -317,7 +347,8 @@ def sequence_well_problems(seq: dict, vocabulary) -> list[str]:
 def check_wells_against_config(sequences: list[dict], config) -> None:
     """Raise ValueError if a sequence's well fields do not fit this rig:
     a well without the sipper's port, the sipper's port without a well, a
-    well on a rig with no sipper (spec §6), a priming or clean-up row whose
+    sipper-only row (SIPPER_TYPES) without a well, a well or a sipper-only
+    row on a rig with no sipper (spec §6), a priming or clean-up row whose
     use_ports skips the sipper (D7). Reached through validate_sequences,
     like the port and type checks."""
     from .vocabulary import sipper_vocabulary
@@ -351,9 +382,20 @@ def sequence_port_problems(seq: dict, ports) -> list[str]:
 
 def types_for_application(application: str) -> list[str]:
     """The sequence types a rig with `application` offers -- one policy for
-    an unknown application (nothing), shared by the gate, the live paint,
-    and the Add dialog."""
+    an unknown application (nothing), shared by the gate and the live
+    paint, and by the Add dialog through types_for_rig."""
     return APPLICATION_SEQUENCES.get(application, [])
+
+
+def types_for_rig(application: str, sipper) -> list[str]:
+    """What the Add dialog offers: the application's types, less the
+    sipper-only ones on a rig without a sipper (`sipper` None) -- the gate
+    refuses every row of those there as having no sipper, well or no well,
+    so the dialog does not list them. The gate itself reads
+    types_for_application: a push row is a Flow Cell row on any Flow Cell
+    rig."""
+    return [t for t in types_for_application(application)
+            if sipper is not None or t not in SIPPER_TYPES]
 
 
 def label_for_type(seq_type: str) -> str:

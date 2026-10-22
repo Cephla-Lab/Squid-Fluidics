@@ -10,7 +10,7 @@ from fluidics.system import FluidicsSystem
 from .conftest import FLOW_CELL_STEP
 
 HYB = {"type": "flow_reagent", "fluidic_port": 1, "well": "A1", "flow_rate": 2000, "volume": 100}
-PUSH = {"type": "flow_reagent", "fluidic_port": 1, "well": "ssct/A1", "flow_rate": 2000, "volume": 490}
+PUSH = {"type": "push", "well": "ssct/A1", "flow_rate": 2000}      # 490 uL: the fixture's push_volume_ul
 WASH = {"type": "flow_reagent", "fluidic_port": 1, "well": "ssct/A1", "flow_rate": 5000,
         "volume": 1000, "dip_cycles": 3}
 
@@ -226,3 +226,13 @@ def test_a_run_is_refused_at_time_zero_while_do_not_lower_tip_is_on(system):
     system.manual.set_lower_tip(True)
     system.run([HYB])
     assert system.wait()
+
+
+def test_a_push_is_priced_by_replay_like_the_draw_it_stands_for(plate_sipper_config):
+    """No per-type pricing: the twin runs the push, so it costs what the
+    flow_reagent row it replaces cost, never the flat fallback."""
+    from fluidics.time_estimate import FALLBACK_SEQUENCE_SECONDS, plan_run
+    [push] = plan_run(plate_sipper_config, [PUSH])
+    [same] = plan_run(plate_sipper_config, [{"type": "flow_reagent", "fluidic_port": 1, "well": "ssct/A1",
+                                             "flow_rate": 2000, "volume": 490}])
+    assert push.duration_seconds == same.duration_seconds != FALLBACK_SEQUENCE_SECONDS

@@ -184,3 +184,41 @@ def test_selective_priming_that_lists_the_sipper_primes_it_from_the_priming_well
     assert opened == [1, 25, 25], "the sipper's port, port 25, then the final draw: no other bottle"
     assert devices.reservoirs.remaining("ssct/H11") == 1750 - 250   # the sipper port's tip-to-valve volume
     assert devices.reservoirs.remaining("port_25") == 480000 - 700 - 800
+
+
+def test_a_push_draws_the_configs_volume_from_its_well_through_the_sipper(rig):
+    """The row after a well draw names its well and flow rate, nothing
+    else: the volume is the config's push_volume_ul (490, tip to flow
+    cell), the port the sipper's, and its dips run before the draw."""
+    devices, ops = rig
+    events = []
+    devices.robot.moves.subscribe(lambda pos: events.append(("z", pos[2])))
+    devices.syringe_pump.draws.subscribe(lambda port, ul: events.append(("draw", ul)))
+    ops.process_sequence({"type": "push", "well": "ssct/A1", "flow_rate": 2000, "dip_cycles": 2})
+    zs = [z for kind, z in events if kind == "z"]
+    assert zs[-5:] == [52.0, 47.0, 52.0, 47.0, 52.0]
+    last_z = max(i for i, (kind, _) in enumerate(events) if kind == "z")
+    assert events.index(("draw", 490)) > last_z
+    assert devices.robot.current_well == WellRef("ssct", "A1")
+    assert devices.reservoirs.remaining("ssct/A1") == 1750 - 490
+    assert devices.reservoirs.used_rows() == [(1, "sipper", 490)]
+
+
+def test_a_push_on_a_rig_without_a_sipper_refuses_by_name(flow_cell_rig):
+    """The gate refuses such a row at time zero; a direct caller is told
+    the same thing before the syringe moves."""
+    ops, sp = flow_cell_rig
+    with pytest.raises(OperationError, match="no sipper"):
+        ops.process_sequence({"type": "push", "well": "ssct/A1", "flow_rate": 2000})
+    assert sp.executed_ops == []
+
+
+def test_a_push_without_dips_makes_no_stroke_and_a_bare_well_is_on_the_default_plate(rig):
+    devices, ops = rig
+    zs = []
+    devices.robot.moves.subscribe(lambda pos: zs.append(pos[2]))
+    ops.process_sequence({"type": "push", "well": "ssct/A1", "flow_rate": 2000})
+    assert 47.0 not in zs and zs[-1] == 52.0, "dip depth, no agitation stroke"
+    assert devices.reservoirs.remaining("ssct/A1") == 1750 - 490
+    with pytest.raises(ReservoirError, match="probes/A2"):      # 490 uL from a 105 uL well
+        ops.process_sequence({"type": "push", "well": "A2", "flow_rate": 2000})

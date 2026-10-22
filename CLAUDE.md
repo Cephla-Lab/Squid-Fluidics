@@ -98,6 +98,7 @@ These must stay in sync. Same applies to `VALVE_POSITIONS`/`ValvesStates_t` and 
 
 `fluidics/sequences.py` defines pydantic models using a discriminated union on the `type` field. Each sequence type has only the fields it needs:
 - **Fluidic types** (`flow_reagent`, `add_reagent`, `clear_and_add_reagent`, `wash_constant_flow`, `priming`, `clean_up`): `fluidic_port`, `flow_rate`, `volume`; some also have `fill_tubing_with`
+- **`push`** (plate-sipper rigs only): `well`, `flow_rate`, optional `dip_cycles`; the volume is the config's `push_volume_ul`
 - **`set_temperature`**: `temperature` field only
 - **All types** share: `name` (optional label), `repeat`, `include`, `incubation_time`
 

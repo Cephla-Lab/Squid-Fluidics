@@ -518,6 +518,7 @@ class TestGantryConfig:
     def test_the_fixture_loads_and_names_the_sipper_port(self, plate_sipper_config):
         g = _gantry(plate_sipper_config)
         assert g.selector_valve_port == 1
+        assert g.push_volume_ul == 490
         assert sorted(r.name for r in g.reservoirs.values()) == ["probes", "ssct"]
         assert g.reservoirs[1].column_axis == "+y" and g.reservoirs[1].row_axis == "+x"
 
@@ -527,6 +528,9 @@ class TestGantryConfig:
     @pytest.mark.parametrize("edit, message", [
         (lambda d: d.__setitem__("application", "Open Chamber"), "Flow Cell"),
         (lambda d: d["reagent_selection"]["nimotion_gantry_system"].__setitem__("selector_valve_port", 2), "plumbed"),
+        (lambda d: d["reagent_selection"]["nimotion_gantry_system"].__setitem__("push_volume_ul", 0), "push_volume_ul"),
+        (lambda d: d["reagent_selection"]["nimotion_gantry_system"].pop("push_volume_ul"),
+         r"push_volume_ul\n\s+Field required"),
         (lambda d: d["reagent_selection"]["nimotion_gantry_system"]["reservoirs"][2].__setitem__("name", "probes"), "unique"),
         (lambda d: d["reagent_selection"]["nimotion_gantry_system"]["reservoirs"][2].__setitem__("name", "all"), "reserved"),
         (lambda d: d["reagent_selection"]["nimotion_gantry_system"]["reservoirs"][2].__setitem__("name", "port_25"), "reserved"),

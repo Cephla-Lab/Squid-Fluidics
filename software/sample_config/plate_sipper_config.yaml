@@ -47,13 +47,14 @@ reagent_selection:
       port_25: 500000
     residual_volume_ul:
       port_25: 20000
-  common_tubing_fluid_amount_ul: 240   # valve to flow cell; tip to flow cell = 490 = the push row's volume
+  common_tubing_fluid_amount_ul: 240   # valve to flow cell; tip to flow cell = 490 = push_volume_ul
   # The XYZ robot that carries the sipper (spec section 3). Two Corning 3960
   # plates sit side by side along X with their long sides along Y, so each
   # plate's columns 1..12 run along +y and its rows A..H along +x; A1 is
   # taught on the Robot tab. Z: 0 at the retracted top, increasing to the deck.
   nimotion_gantry_system:
     selector_valve_port: 1
+    push_volume_ul: 490   # what a push row draws: tip to flow cell (tubing_fluid_amount_ul.port_1 + common_tubing_fluid_amount_ul)
     serial_number: FTXXXXXX
     baudrate: 115200
     axes: {x: X1, y: Y2, z: Z3}

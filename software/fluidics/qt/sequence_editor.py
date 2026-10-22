@@ -49,7 +49,7 @@ from fluidics.sequences import (
     label_for_type,
     load_sequences,
     save_sequences_yaml,
-    types_for_application,
+    types_for_rig,
     validate_sequences,
 )
 from fluidics.vocabulary import sipper_vocabulary
@@ -69,7 +69,9 @@ class AddSequenceDialog(QDialog):
     beside it -- live only while the port is the sipper's, where the fill
     combo hides (a sipper row cannot fill tubing); priming and clean-up
     offer where the sipper sits; flow_reagent offers its dips (spec §9).
-    Without it, none of those fields is offered (D8)."""
+    A sipper-only row (push) has no port, so its well and its dips are
+    live throughout. Without it, none of those fields is offered (D8),
+    nor a sipper-only type (types_for_rig)."""
 
     def __init__(self, parent, application, port_names, sipper=None):
         super().__init__(parent)
@@ -90,7 +92,7 @@ class AddSequenceDialog(QDialog):
         type_layout = QHBoxLayout()
         type_layout.addWidget(QLabel("Type:"))
         self.typeCombo = QComboBox()
-        available_types = types_for_application(self.application)
+        available_types = types_for_rig(self.application, self.sipper)
         for seq_type in available_types:
             self.typeCombo.addItem(label_for_type(seq_type), seq_type)
         type_layout.addWidget(self.typeCombo)
@@ -531,10 +533,14 @@ class SequencesWidget(PostsToQtThread, QWidget):
         for fname, finfo in type_fields.items():
             if fname in ('include', 'name'):
                 continue
+            # A required field has no default -- pydantic's PydanticUndefined,
+            # not None -- so a push row added with its well left blank gets an
+            # empty cell (red: the model wants a well), not the sentinel's name.
+            default = None if finfo.is_required() else finfo.default
             if (fname in SIPPER_FIELDS and self._sipper is None
-                    and seq.get(fname, finfo.default) in (None, finfo.default)):
+                    and seq.get(fname, default) in (None, default)):
                 continue
-            value = seq.get(fname, finfo.default)
+            value = seq.get(fname, default)
             child = QTreeWidgetItem([self.FIELD_LABELS.get(fname, fname),
                                      '' if value is None else str(value)])
             child.setData(0, Qt.UserRole, fname)

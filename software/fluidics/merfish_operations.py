@@ -28,6 +28,7 @@ class MERFISHOperations():
         self.sipper_port = g.selector_valve_port if g is not None else None
         self.priming_well = g.priming_well if g is not None else None
         self.clean_up_well = g.clean_up_well if g is not None else None
+        self.push_volume_ul = g.push_volume_ul if g is not None else None
         self.vocabulary = sipper_vocabulary(config)
         self._op = None
         # The run's cancellation signal, borrowed once here rather than read
@@ -79,6 +80,9 @@ class MERFISHOperations():
                 sequence.get('fill_tubing_with'),
                 well=sequence.get('well'),
                 dip_cycles=sequence.get('dip_cycles') or 0)
+        elif seq_type == "push":
+            self.push(sequence['flow_rate'], sequence['well'],
+                      dip_cycles=sequence.get('dip_cycles') or 0)
         elif seq_type in ("priming", "clean_up"):
             self._op = seq_type
             self.priming_or_clean_up(
@@ -153,6 +157,18 @@ class MERFISHOperations():
             raise
         except Exception as e:
             raise OperationError(f"Error in flow_reagent from port: {port}: {str(e)}")
+
+    def push(self, flow_rate, well, dip_cycles=0):
+        """Draw the config's push volume (tip to flow cell) from `well`
+        through the sipper, so what the previous row drew into the line is
+        in the flow cell for this row's incubation. A flow_reagent from the
+        sipper's port with the config's volume and no tubing fill, so it
+        inherits the ledger's check before the move, the move-then-open
+        order, the dips, the dump rule, the draw guard and the wrapper."""
+        if self.robot is None:
+            raise OperationError("push: this rig has no sipper")
+        self.flow_reagent(self.sipper_port, flow_rate, self.push_volume_ul, None,
+                          well=well, dip_cycles=dip_cycles)
 
     def priming_or_clean_up(self, port, flow_rate, volume, use_ports=None, well=None, sipper_well=None):
         """

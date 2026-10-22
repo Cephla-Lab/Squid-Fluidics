@@ -184,6 +184,7 @@ class GantryConfig(_StrictModel):
     """The XYZ robot that carries the sipper (spec §3), keyed as You Yan
     wrote it: `reagent_selection.nimotion_gantry_system`."""
     selector_valve_port: int = Field(ge=1)
+    push_volume_ul: int = Field(gt=0)        # what a push row draws: the tip-to-flow-cell volume
     serial_number: Optional[str] = None
     port: Optional[str] = None
     baudrate: int = 115200

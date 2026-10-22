@@ -18,7 +18,7 @@ from fluidics.sequences import APPLICATION_SEQUENCES
 from .conftest import FLOW_CELL_STEP
 from ..worker_helpers import record_run
 
-# Every fluidic step type on each operations stack: both stacks share the
+# Every fluidic step type on each operations stack: the stacks share the
 # pump's cancellation path, and every one of their exception wrappers must let
 # a cancellation through.
 FLUIDIC_STEPS = {
@@ -32,6 +32,11 @@ FLUIDIC_STEPS = {
         {"type": "priming", "fluidic_port": 1, "flow_rate": 500, "volume": 500},
         {"type": "clean_up", "fluidic_port": 1, "flow_rate": 500, "volume": 500},
     ],
+    # The rows only a sipper rig can run, on the fixture sipper rig: a
+    # push's draw is a pump move a cancel can reach, through the sipper.
+    "plate_sipper": [
+        {"type": "push", "well": "ssct/A1", "flow_rate": 2000},
+    ],
     "open_chamber": [
         {"type": "add_reagent", "fluidic_port": 3, "flow_rate": 1000, "volume": 1000},
         {"type": "clear_and_add_reagent", "fluidic_port": 3, "flow_rate": 1000, "volume": 1000},
@@ -43,15 +48,19 @@ FLUIDIC_STEPS = {
 # One representative step per stack, for the tests that need only one.
 SEQS = {app: steps[0] for app, steps in FLUIDIC_STEPS.items()}
 
-APPLICATION_NAMES = {"flow_cell": "Flow Cell", "open_chamber": "Open Chamber"}
+APPLICATION_NAMES = {"flow_cell": "Flow Cell", "plate_sipper": "Flow Cell",
+                     "open_chamber": "Open Chamber"}
 
 
-@pytest.mark.parametrize("app", list(FLUIDIC_STEPS))
-def test_the_step_table_covers_every_fluidic_type_of_the_application(app):
+@pytest.mark.parametrize("application", sorted(set(APPLICATION_NAMES.values())))
+def test_the_step_table_covers_every_fluidic_type_of_the_application(application):
     """A fluidic type added to the application without a row here would be
-    a wrapper nobody polices."""
-    covered = {seq["type"] for seq in FLUIDIC_STEPS[app]}
-    assert covered == set(APPLICATION_SEQUENCES[APPLICATION_NAMES[app]]) - {"set_temperature"}
+    a wrapper nobody polices. An application's stacks cover it together:
+    the sipper-only types ride the plate_sipper stack, the rest the
+    flow_cell one."""
+    covered = {seq["type"] for app, steps in FLUIDIC_STEPS.items()
+               if APPLICATION_NAMES[app] == application for seq in steps}
+    assert covered == set(APPLICATION_SEQUENCES[application]) - {"set_temperature"}
 
 
 @pytest.fixture(params=list(SEQS))
@@ -87,6 +96,9 @@ def test_an_abort_before_the_operation_starts_raises(stack):
     moved = []
     original = ops.sv.open_port
     ops.sv.open_port = lambda port: (original(port), moved.append(port))
+    robot = getattr(ops, "robot", None)
+    if robot is not None:               # the sipper stack: the robot is touched first
+        robot.moves.subscribe(moved.append)
     sp.run_control.cancel()
     with pytest.raises(AbortRequested):
         ops.process_sequence(seq)

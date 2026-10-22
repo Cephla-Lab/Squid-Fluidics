@@ -6,7 +6,7 @@ from fluidics.control.disc_pump import DiscPump
 from fluidics.control.selector_valve import SelectorValveSystem
 from fluidics.control.syringe_pump import SyringePumpSimulation
 from fluidics.control.temperature_controller import TCMControllerSimulation
-from fluidics.devices import build_devices
+from fluidics.devices import build_devices, build_operations
 from fluidics.merfish_operations import MERFISHOperations
 from fluidics.open_chamber_operations import OpenChamberOperations
 
@@ -33,6 +33,15 @@ def instant_devices(built):
         return devices
 
     return _build
+
+
+@pytest.fixture
+def plate_sipper_rig(plate_sipper_config, instant_devices):
+    """(MERFISHOperations with a sipper, syringe_pump) over the sipper
+    fixture config: an instant simulated rig with a fresh in-memory ledger,
+    every well full, for the rows only a sipper rig can run."""
+    devices = instant_devices(plate_sipper_config)
+    return build_operations(plate_sipper_config, devices), devices.syringe_pump
 
 
 @pytest.fixture

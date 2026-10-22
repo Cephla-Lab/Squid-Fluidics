@@ -455,14 +455,23 @@ class TestAddSequenceDialog:
 
     PORTS = [(1, "Port 1: a"), (5, "Port 5: b"), (9, "Port 9: c")]
 
-    @pytest.mark.parametrize("application", ["Flow Cell", "Open Chamber"])
-    def test_every_type_builds_its_fields(self, qapp, application):
-        from fluidics.sequences import types_for_application
-        dialog = gui.AddSequenceDialog(None, application, self.PORTS)
+    # No Open Chamber rig with a sipper: the config refuses a gantry there.
+    @pytest.mark.parametrize("application, with_sipper", [
+        ("Flow Cell", False), ("Flow Cell", True), ("Open Chamber", False),
+    ], ids=["flow cell", "flow cell with sipper", "open chamber"])
+    def test_every_type_builds_its_fields(self, qapp, application, with_sipper, plate_sipper_config):
+        """Every type the rig offers builds a form -- and push, the
+        sipper-only type, is offered only with a sipper (types_for_rig)."""
+        from fluidics.sequences import types_for_rig
+        from fluidics.vocabulary import sipper_vocabulary
+        sipper = sipper_vocabulary(plate_sipper_config) if with_sipper else None
+        dialog = gui.AddSequenceDialog(None, application, self.PORTS, sipper=sipper)
+        offered = [dialog.typeCombo.itemData(i) for i in range(dialog.typeCombo.count())]
         for index in range(dialog.typeCombo.count()):
             dialog.typeCombo.setCurrentIndex(index)      # rebuilds the form
             assert dialog._field_widgets, dialog.typeCombo.currentData()
-        assert dialog.typeCombo.count() == len(types_for_application(application))
+        assert offered == types_for_rig(application, sipper)
+        assert ("push" in offered) == (with_sipper and application == "Flow Cell")
 
     def test_both_port_fields_offer_the_rig_s_ports(self, qapp):
         """fluidic_port and fill_tubing_with are both ports -- a free-typed
@@ -583,6 +592,26 @@ class TestTheDialogKnowsWells:
         dialog.accept()
         assert dialog.result_dict["sipper_well"] == "ssct/H10"
 
+    def test_a_push_row_offers_its_well_live_with_no_port_and_no_volume(self, qapp, plate_sipper_config):
+        dialog = self._dialog(plate_sipper_config, "push")
+        assert {"well", "flow_rate", "dip_cycles"} <= set(dialog._field_widgets)
+        assert not {"fluidic_port", "volume", "fill_tubing_with"} & set(dialog._field_widgets)
+        well = dialog._field_widgets["well"]
+        assert well.isEnabled(), "no port to follow: the well is the sipper's"
+        plate = dialog._well_reservoirs["well"]
+        plate.setCurrentIndex(plate.findData("ssct"))
+        well.setCurrentIndex(well.findData("B2"))
+        dialog._field_widgets["flow_rate"].setValue(2000)
+        dialog._field_widgets["dip_cycles"].setValue(3)
+        dialog.accept()
+        assert dialog.result_dict["well"] == "ssct/B2"
+        assert dialog.result_dict["dip_cycles"] == 3
+        from fluidics.sequences import sequence_problem
+        from fluidics.vocabulary import sipper_vocabulary
+        from fluidics.control.config import available_ports
+        assert sequence_problem(dialog.result_dict, "Flow Cell", available_ports(plate_sipper_config),
+                                sipper=sipper_vocabulary(plate_sipper_config)) is None
+
 
 def _field_names(widget, row):
     top = widget.tree.topLevelItem(row)
@@ -687,3 +716,31 @@ class TestARefusedStartIsADialog:
         widget.runSelectedSequences()
         assert said == [str(refusal)]
         assert not widget.timer.isActive(), "no run display for a run that never started"
+
+
+class TestAPushRowInTheTree:
+    """The first type with a required well."""
+
+    def test_a_push_row_is_titled_by_its_well_and_judged_clean(self, sipper_widget):
+        w = sipper_widget
+        w.setSequences([{"type": "push", "well": "ssct/A1", "flow_rate": 2000}])
+        assert w.tree.topLevelItem(0).text(0) == "Push: ssct/A1"
+        assert {"well", "flow_rate", "dip_cycles"} <= _field_names(w, 0)
+        assert not {"fluidic_port", "volume"} & _field_names(w, 0)
+        assert w._model.problem(0) is None
+
+    def test_a_push_row_without_its_well_shows_a_blank_cell_not_the_sentinel(self, sipper_widget):
+        """pydantic spells a missing required value PydanticUndefined, which
+        is not None: the cell is empty and the row red, as for any gap."""
+        w = sipper_widget
+        w.setSequences([{"type": "push", "flow_rate": 2000}])
+        assert field_item(w, 0, "well").text(1) == ""
+        assert "well" in w._model.problem(0)
+
+    def test_a_push_row_on_a_rig_without_a_sipper_is_red_for_the_rig(self, widget):
+        """A file's push row on a plain rig shows its well, to clear, and is
+        refused for the rig, not the well; the dips are not offered (D8)."""
+        w = widget
+        w.setSequences([{"type": "push", "well": "ssct/A1", "flow_rate": 2000}])
+        assert "no sipper" in w._model.problem(0)
+        assert "well" in _field_names(w, 0) and "dip_cycles" not in _field_names(w, 0)

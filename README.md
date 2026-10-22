@@ -118,6 +118,7 @@ All sequence types share these optional fields: `name` (custom label), `repeat` 
 | Type | Extra Fields | Description |
 |------|-------------|-------------|
 | `flow_reagent` | `fluidic_port`, `flow_rate`, `volume`, `fill_tubing_with` | Flow reagent from the specified port |
+| `push` | `well`, `flow_rate`, `dip_cycles` | Plate-sipper rigs only: draw the config's `push_volume_ul` from a well through the sipper, moving the previous row's reagent into the flow cell |
 | `priming` | `fluidic_port`, `flow_rate`, `volume` | Prime all tubings with corresponding reagents |
 | `clean_up` | `fluidic_port`, `flow_rate`, `volume` | Flush all tubings (typically with water) |
 
