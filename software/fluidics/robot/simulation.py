@@ -8,7 +8,8 @@ no real time but its travel is still counted (`travel_seconds`, the
 longest axis of each leg, since X and Y run together). Every call is
 logged for the tests; a test can plant a fault, freeze an axis, make a
 stop or a read fail, make the target-reached bit read stale, put a limit
-switch inside the stroke, or make a move end short of its target. Homing
+switch inside the stroke, make a limit input read active, or make a move
+end short of its target. Homing
 presents the drive's real protocol: the attained bit reads stale once,
 clears while the axis moves, then sets again in homing mode; it parks the
 axis 0.3 mm short of the stroke's low end, floored at 0 (the drives park
@@ -22,7 +23,8 @@ import math
 import time
 from collections import namedtuple
 
-AxisReading = namedtuple("AxisReading", "position_mm target_reached enabled fault error_code")
+AxisReading = namedtuple("AxisReading", "position_mm target_reached enabled fault error_code on_limit",
+                         defaults=(False,))      # on_limit: a limit input (60FDh) active
 HomingReading = namedtuple("HomingReading", "attained error fault homing_mode")
 
 # The XYG321-A's strokes as the driver's axis table has them at the vendored
@@ -56,6 +58,7 @@ class SimulatedService:
         self._creep = {}                                   # axis -> [mm per read, reads left or None]
         self._limits = {}                                  # axis -> mm of a switch inside the stroke
         self._on_limit = set()                             # axes a switch stopped, alarm 8614h showing
+        self._limit_inputs = set()                         # axes whose limit input (60FDh) reads active
         self._short = {}                                   # axis -> mm where the next move ends, "reached"
         self._polls = {axis: 0 for axis in axes}
         self.instant = instant
@@ -156,14 +159,15 @@ class SimulatedService:
             del self._moves[axis]
             self._position[axis] = self._target[axis] = limit
         if axis in self._on_limit:
-            return AxisReading(self._position[axis], False, self._enabled[axis], False, LIMIT_SWITCH_ALARM)
+            return AxisReading(self._position[axis], False, self._enabled[axis], False,
+                               LIMIT_SWITCH_ALARM, True)
         arrived = axis not in self._moves or math.isclose(position, self._target[axis], abs_tol=1e-9)
         if arrived and axis in self._moves:
             del self._moves[axis]
             self._position[axis] = self._target[axis]
             position = self._target[axis]
         reached = arrived or self.stale_target_reached
-        return AxisReading(position, reached, self._enabled[axis], False, 0)
+        return AxisReading(position, reached, self._enabled[axis], False, 0, axis in self._limit_inputs)
 
     def stop(self, axis):
         self.log.append(("stop", axis))
@@ -196,6 +200,16 @@ class SimulatedService:
         it stops there and reads enabled, not reached, alarm 8614h until
         a stop or a move away (what the drives do, nm-servo PR #10)."""
         self._limits[axis] = float(at_mm)
+
+    def limit_input(self, axis, active=True):
+        """The axis's limit input (60FDh bits 0-1) reads active from now. A
+        move can still report its target reached there -- a switch with a
+        wide span, a target on the switch -- which is not a completed move
+        (the driver's own wait refuses it, and so must the stage)."""
+        if active:
+            self._limit_inputs.add(axis)
+        else:
+            self._limit_inputs.discard(axis)
 
     def end_short(self, axis, at_mm):
         """The axis's next move ends at `at_mm` with target reached set, as

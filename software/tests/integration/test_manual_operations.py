@@ -160,6 +160,7 @@ def test_a_manual_extract_through_the_sipper_needs_a_well(plate_sipper_config, b
     manual.retract()
     with pytest.raises(RuntimeError, match="not in a well"):
         manual.extract(2, 100, 1000)
+    manual.extract(1, 100, 1000)            # another syringe port never reaches the sipper
 
 
 def test_robot_verbs_refuse_on_a_rig_without_a_robot(flow_cell_config, built):
@@ -269,3 +270,28 @@ def test_a_reload_of_the_plate_the_tip_is_in_is_refused_until_retract(plate_sipp
     manual.retract()
     manual.refill("ssct")
     assert devices.reservoirs.remaining("ssct/A2") == 1750
+
+
+def test_without_the_witness_a_plate_reload_waits_for_a_retracted_tip(plate_sipper_config, built, tmp_path):
+    """Copilot review: a jog, a halt or a fault reset clears the witness
+    without lifting the tip. With no well to name, only a position known
+    to be retracted lets a plate (or everything) reload; a bottle is never
+    under the tip."""
+    devices = built(plate_sipper_config, simulation=True, instant=True,
+                    ledger_path=tmp_path / "ledger.json")
+    manual = ManualOperations(devices)
+    manual.go_to_well("ssct/A2")
+    manual.jog("z", -1.0)                          # Z 51: the witness is gone, the tip is not
+    assert devices.robot.current_well is None and not devices.robot.is_retracted
+    for key in ("ssct", "probes", "all", "ssct/A1"):
+        with pytest.raises(RuntimeError, match="not known to be retracted.*Retract"):
+            manual.refill(key)
+    manual.refill("port_25")                       # a bottle is never under the tip
+    assert "port_25" not in devices.reservoirs.undeclared
+    manual.go_to_well("ssct/A2")
+    devices.make_safe()                            # an aborted run's halt clears the witness too
+    with pytest.raises(RuntimeError, match="not known to be retracted"):
+        manual.refill("ssct")
+    manual.retract()
+    manual.refill("all")
+    assert not devices.reservoirs.undeclared

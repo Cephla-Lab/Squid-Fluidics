@@ -432,11 +432,16 @@ class RobotControlWidget(PostsToQtThread, QWidget):
 
     def plateReloaded(self):
         name = self.reservoirCombo.currentData()
-        well = self.system.devices.robot.current_well
+        robot = self.system.devices.robot
+        well = robot.current_well
+        # Said here, before the question: the verb refuses too, but a
+        # dialog after "yes" would read as a failure, not a rule.
         if well is not None and well.reservoir == name:
-            # Said here, before the question: the verb refuses too, but a
-            # dialog after "yes" would read as a failure, not a rule.
             QMessageBox.warning(self, "Robot", f"The sipper's tip is in {well.reservoir}/{well.well}: "
+                                               f"Retract before reloading {name}.")
+            return
+        if well is None and not robot.is_retracted:
+            QMessageBox.warning(self, "Robot", "The sipper's tip is not known to be retracted: "
                                                f"Retract before reloading {name}.")
             return
         if not _ask_yes_no(self, "Plate reloaded?", f"Mark every well of {name} as full?"):

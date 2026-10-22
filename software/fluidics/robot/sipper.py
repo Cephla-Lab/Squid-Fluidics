@@ -113,6 +113,12 @@ class RobotSipper:
     def position(self):
         return self._stage.position()
 
+    @property
+    def is_retracted(self):
+        """Whether the tip is known to be clear of the deck: the stage homed
+        and its last published Z at or above travel height (no I/O)."""
+        return self._stage.is_retracted
+
     def retracted_at(self, position):
         """Whether a published position counts as retracted (no I/O)."""
         return self._stage.retracted_at(position)

@@ -33,6 +33,7 @@ class ManualOperations:
         g = gantry(devices.config)
         self._gantry = g
         self._sipper_port = g.selector_valve_port if devices.robot is not None else None
+        self._extract_port = devices.config.syringe_pump.extract_port
         self._vocabulary = sipper_vocabulary(devices.config)
 
     # --- what the rig offers ---
@@ -68,7 +69,10 @@ class ManualOperations:
 
     def extract(self, syringe_port, volume_ul, flow_rate_ul_min, on_started=None):
         """Draw `volume_ul` in through the pump's `syringe_port` at `flow_rate_ul_min`."""
-        if (self._sipper_port is not None and self.sv.get_current_port() == self._sipper_port
+        # Only the extract port draws through the selector and the sipper
+        # (the ledger's rule too); the pump's other ports never reach them.
+        if (syringe_port == self._extract_port and self._sipper_port is not None
+                and self.sv.get_current_port() == self._sipper_port
                 and self.robot.current_well is None):
             raise RuntimeError("the sipper is not in a well: go to a well first")
         _logger.info("Manual: extract %s uL through port %d at %s uL/min.",
@@ -216,15 +220,26 @@ class ManualOperations:
     def _refuse_a_refill_under_the_tip(self, key):
         """With no park well the tip rests in a well between steps, and
         lifting that plate with the tip in it bends the tip: a refill of
-        that plate (or of everything) waits for Retract. Read from the
-        witness, which is set only while the tip is at dip depth."""
-        if self.robot is None or self.robot.current_well is None:
+        that plate (or of everything) waits for Retract. The witness names
+        the well; without one -- a jog, a halt, a fault reset or teaching
+        clears it where the tip is -- only a position known to be retracted
+        vouches for the deck, so any plate's reload waits for Retract. A
+        bottle is never under the tip."""
+        if self.robot is None or not self._is_a_plate(key):
             return
         well = self.robot.current_well
-        if key == "all" or key == well.reservoir or key.startswith(f"{well.reservoir}/"):
-            # Any well of that plate: refilling one means the plate was lifted.
-            raise RuntimeError(f"the sipper's tip is in {well.reservoir}/{well.well}: "
-                               f"Retract before reloading {well.reservoir}")
+        if well is not None:
+            if key == "all" or key == well.reservoir or key.startswith(f"{well.reservoir}/"):
+                # Any well of that plate: refilling one means the plate was lifted.
+                raise RuntimeError(f"the sipper's tip is in {well.reservoir}/{well.well}: "
+                                   f"Retract before reloading {well.reservoir}")
+        elif not self.robot.is_retracted:
+            raise RuntimeError("the sipper's tip is not known to be retracted: "
+                               f"Retract before reloading {key}")
+
+    def _is_a_plate(self, key):
+        """Whether a refill key names a plate, a well of one, or everything."""
+        return key == "all" or key.split("/")[0] in self._vocabulary.reservoirs
 
     def _move(self, op, args, flow_rate_ul_min, on_started):
         """One syringe move: a fresh queue, the op, then the wait.

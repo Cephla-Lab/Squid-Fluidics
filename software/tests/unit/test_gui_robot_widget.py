@@ -237,6 +237,27 @@ def test_plate_reloaded_refuses_while_the_tip_is_in_that_plate(widget, monkeypat
     assert len(asked) == 1
 
 
+def test_plate_reloaded_refuses_while_the_tip_is_down_without_a_witness(widget, monkeypatch):
+    """A jog clears the witness without lifting the tip (Copilot review):
+    the tab says so before it asks, for any plate, until Retract."""
+    w, system = widget
+    asked, warned = [], []
+    monkeypatch.setattr("fluidics.qt.robot_control._ask_yes_no", lambda *a, **k: asked.append(a) or True)
+    monkeypatch.setattr("fluidics.qt.robot_control.QMessageBox.warning", lambda *a, **k: warned.append(a[2]))
+    w.jogButtons[("z", 10.0)].click()
+    _settle(system)
+    robot = system.devices.robot
+    assert robot.current_well is None and not robot.is_retracted
+    w.reservoirCombo.setCurrentIndex(w.reservoirCombo.findData("probes"))
+    w.plateReloaded()
+    QApplication.processEvents()
+    assert asked == [] and len(warned) == 1 and "not known to be retracted" in warned[0]
+    system.manual.retract()
+    w.plateReloaded()
+    _settle(system)
+    assert len(asked) == 1
+
+
 def test_a_jog_click_moves_the_axis_it_says(widget):
     w, system = widget
     w.jogButtons[("z", 10.0)].click()

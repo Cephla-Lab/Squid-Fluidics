@@ -357,6 +357,12 @@ class XYZStage:
                         continue       # arrived, and still watched until the leg ends
                     if not reading.target_reached:
                         in_flight.add(axis)
+                    elif reading.on_limit:
+                        # Reached with a limit input (60FDh) active: a switch's
+                        # span, or a target on the switch. Not a completed move,
+                        # as the driver's own wait rules too.
+                        raise DeviceError(f"axis {_label(axis)}: move to {target:.2f} mm ended on a "
+                                          f"limit switch at {reading.position_mm:.2f} mm")
                     elif abs(reading.position_mm - target) <= TOLERANCE_MM:
                         del pending[axis]
                     elif axis in in_flight:

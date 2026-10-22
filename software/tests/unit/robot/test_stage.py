@@ -418,6 +418,23 @@ class TestPolling:
         assert ("stop", "Y2") in service.log
         assert stage.position() == (10.0, 30.0, 0.0)
 
+    def test_a_move_that_ends_on_an_active_limit_input_is_an_error_not_an_arrival(self):
+        """Copilot review, and the driver's own wait: the target reached
+        with a limit input (60FDh) active -- a switch with a wide span, a
+        target on the switch -- is not a completed move. The stage halts,
+        re-reads and names the position rather than dipping from there."""
+        stage, service, _ = build(instant=False)
+        stage.connect()
+        stage.home()
+        service.limit_input("Y2")
+        with pytest.raises(DeviceError, match="Y2.*60.00 mm ended on a limit switch at 60.00 mm"):
+            stage.move_xy(10.0, 60.0)
+        assert ("stop", "Y2") in service.log
+        assert stage.position() == (10.0, 60.0, 0.0)
+        service.limit_input("Y2", active=False)
+        stage.move_xy(10.0, 61.0)                  # the input released: moves complete again
+        assert stage.position() == (10.0, 61.0, 0.0)
+
     def test_a_move_that_ends_short_of_its_target_is_an_error_not_a_timeout(self):
         """X1's far switch flickers (nm-servo PR #10): the drive once
         cleared the limit and reported the target reached 2 mm short.

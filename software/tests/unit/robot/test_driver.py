@@ -42,6 +42,7 @@ def fake_service(monkeypatch):
     class FakeMotor:
         def __init__(self, word, mode):
             self.word, self.mode = word, mode
+            self.inputs = 0                      # 60FDh
 
         def read_status_word(self):
             return self.word
@@ -49,11 +50,15 @@ def fake_service(monkeypatch):
         def read_operation_mode(self):
             return self.mode
 
+        def read_digital_inputs(self):
+            return self.inputs
+
     class FakeServo:
         def __init__(self, port, baudrate, axis_configs):
             self.axis_configs = axis_configs
             self.current_axis = None
             self.motor = FakeMotor(0x1000, 6)
+            self.reached = True
             calls.append(("init", sorted(a.value for a in axis_configs)))
 
         def connect(self):
@@ -66,7 +71,7 @@ def fake_service(monkeypatch):
             return self.motor
 
         def get_axis_status(self, axis):
-            return SimpleNamespace(position_mm=1.0, is_target_reached=True,
+            return SimpleNamespace(position_mm=1.0, is_target_reached=self.reached,
                                    is_enabled=True, is_fault=False, error_code=0)
 
         def stop(self, axis, wait=True):
@@ -111,6 +116,23 @@ def test_homing_state_reads_the_bits_and_the_mode(fake_service):
     service._service.motor.word = 0x2008
     reading = service.homing_state(names["z"])
     assert (reading.attained, reading.error, reading.fault) == (False, True, True)
+
+
+@pytestmark_driver
+def test_read_carries_the_limit_inputs_once_the_target_reads_reached(fake_service):
+    """60FDh bits 0-1, asked only at a move's end as the driver's own wait
+    asks them: a target reached on an active switch is not an arrival."""
+    driver, _ = fake_service
+    service, names = driver.open_service("COM5", 115200, {"x": "X1", "y": "Y2", "z": "Z3"})
+    motor = service._service.motor
+    motor.inputs = 0b10
+    assert service.read(names["x"]).on_limit is True
+    motor.inputs = 0b100                           # another input: not a limit
+    assert service.read(names["x"]).on_limit is False
+    service._service.reached = False
+    motor.inputs = 0b01
+    reading = service.read(names["x"])
+    assert reading.target_reached is False and reading.on_limit is False
 
 
 @pytestmark_driver

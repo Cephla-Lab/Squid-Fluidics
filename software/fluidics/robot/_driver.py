@@ -57,8 +57,9 @@ def default_axis_table():
 class DriverService:
     """ServoService, in the shape XYZStage speaks (stage.py's service
     protocol): non-blocking moves and homing, a waited controlled stop,
-    the homing bits and mode read from the drive, strokes from the axis
-    table, every failure a DeviceError naming the axis."""
+    the homing bits and mode read from the drive, the limit inputs once a
+    target reads reached, strokes from the axis table, every failure a
+    DeviceError naming the axis."""
 
     def __init__(self, port, baudrate, names):
         self._names = names                       # "x"/"y"/"z" -> AxisName
@@ -123,8 +124,14 @@ class DriverService:
     def read(self, axis):
         def read():
             status = self._service.get_axis_status(axis)
+            # The limit inputs (60FDh bits 0-1) only once the target reads
+            # reached, as the driver's own wait asks them: a move that ends
+            # on an active switch is not a completed move. One read more at
+            # the end of a leg, none per poll.
+            on_limit = (status.is_target_reached
+                        and bool(self._service.get_motor(axis).read_digital_inputs() & 0b11))
             return AxisReading(status.position_mm, status.is_target_reached,
-                               status.is_enabled, status.is_fault, status.error_code)
+                               status.is_enabled, status.is_fault, status.error_code, on_limit)
         return self._call(axis, "status read", read)
 
     def stop(self, axis):
