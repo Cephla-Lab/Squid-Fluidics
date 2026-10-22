@@ -28,7 +28,7 @@ class SipperVocabulary:
 
     def well_name(self, key):
         """The config's label for the well a ledger key names (`ssct/A1`),
-        or None where the plate gives it none: what the reagents table
+        or None where the plate gives it none: what the Reservoirs window
         calls a well's reagent."""
         plate, _, well = key.partition("/")
         r = self.reservoirs.get(plate)

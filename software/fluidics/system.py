@@ -121,10 +121,11 @@ class FluidicsSystem:
                      if rows else "no tracked reservoir is drawn from")
         return rows
 
-    def refill(self, key):
-        """Declare a reservoir full: `all`, a plate name, or one key. Through
-        the manual verb, which refuses a plate the sipper's tip is in."""
-        self.manual.refill(key)
+    def refill(self, *keys):
+        """Declare reservoirs full, each `all`, a plate name, or one key, in
+        one write. Through the manual verb, which refuses a plate the
+        sipper's tip is in."""
+        self.manual.refill(*keys)
 
     def run_manual(self, verb, callbacks=None, source=None):
         """Start one manual verb; see RunSession.run_manual."""

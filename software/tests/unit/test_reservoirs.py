@@ -274,9 +274,10 @@ class TestPersistence:
         assert ledger.remaining("ssct/A1") == 1750
 
     def test_a_refill_of_nothing_or_of_an_unknown_name_is_refused(self, rig):
-        """A bottle has no plate, so a None key must not match every bottle."""
+        """A bottle has no plate, so a None key must not match every bottle;
+        an untracked bottle never drawn from has no figure to reset."""
         ledger, pump, state = rig
-        for key in (None, "water", "ssct/Z9"):
+        for key in (None, "water", "ssct/Z9", "port_26"):
             with pytest.raises(ValueError, match="nothing to refill"):
                 ledger.refill(key)
 
@@ -293,6 +294,35 @@ class TestPersistence:
         assert ledger.remaining("ssct/A1") == 1050
         assert ledger.remaining("port_25") == 4800
         assert ledger.undeclared == ["port_25"]
+
+    def test_several_keys_reset_in_one_write_or_not_at_all(self, tmp_path):
+        """A selection of rows: one write. The file refusing it leaves every
+        one of them as it was, and a key that names nothing refuses all of
+        them before anything changes."""
+        ledger = ReservoirLedger(DEFS, path=tmp_path / "ledger.json")
+        ledger.restore({"reservoirs": {"ssct/A1": {"dispatched_ul": 700},
+                                       "port_25": {"dispatched_ul": 300}}})
+        writes = []
+        write = ledger._write
+        ledger._write = lambda: writes.append(1) or write()
+        with pytest.raises(ValueError, match="nothing to refill named 'water'"):
+            ledger.refill("ssct/A1", "water")
+        assert writes == [] and ledger.remaining("ssct/A1") == 1050
+        ledger.refill("ssct/A1", "port_25")
+        assert writes == [1]
+        assert ledger.remaining("ssct/A1") == 1750 and ledger.remaining("port_25") == 4800
+        blocked = tmp_path / "blocked.json"
+        blocked.mkdir()                            # a directory where the file should be
+        failing = ReservoirLedger(DEFS, path=blocked)
+        failing.restore({"reservoirs": {"ssct/A1": {"dispatched_ul": 700},
+                                        "port_25": {"dispatched_ul": 300}}})
+        with pytest.raises(ReservoirWriteError, match="'ssct/A1', 'port_25' was not recorded"):
+            failing.refill("ssct/A1", "port_25")
+        assert failing.remaining("ssct/A1") == 1050 and failing.remaining("port_25") == 4500
+
+    def test_all_on_a_rig_that_tracks_and_has_drawn_nothing_says_so(self):
+        with pytest.raises(ValueError, match="tracks no reservoir volumes, and no bottle"):
+            ReservoirLedger({}).refill("all")
 
     @pytest.mark.parametrize("on_disk", [
         {"definitions": []},
@@ -399,10 +429,74 @@ class TestTheRunTally:
         assert tally.ledger.used_rows() == [(3, "DAPI", 500.0)]
 
 
+class TestTheUntrackedFigure:
+    """What an untracked bottle has given since launch or its last reset:
+    counted on every draw, run after run, in memory alone; its reset zeroes
+    it with no write and nothing to declare."""
+
+    def test_an_untracked_bottle_accumulates_across_runs_and_never_reaches_the_file(self, rig, tmp_path):
+        ledger, pump, state = rig
+        state["port"] = 26
+        pump.extract(EXTRACT_PORT, 300)
+        ledger.on_run_event(RunStarted("run-1", ()))
+        pump.extract(EXTRACT_PORT, 200)
+        assert ("port_26", None, 500.0, None, None, False) in ledger.balances()
+        assert ledger.used_rows() == [(26, None, 200.0)], "the run's figure starts over"
+        assert ledger.rows() == [] and ledger.snapshot()["reservoirs"] == {}
+        assert not (tmp_path / "ledger.json").exists()
+
+    def test_its_reset_zeroes_it_without_a_write_and_takes_it_off_the_rows(self, rig, tmp_path):
+        """The run's own figure is the run's: the report and the run-end
+        line keep what this run drew."""
+        ledger, pump, state = rig
+        state["port"] = 26
+        pump.extract(EXTRACT_PORT, 300)
+        ledger.refill("port_26")
+        assert "port_26" not in [key for key, *_ in ledger.balances()]
+        assert not (tmp_path / "ledger.json").exists(), "nothing tracked was reset: no write"
+        assert ledger.used_rows() == [(26, None, 300.0)]
+        pump.extract(EXTRACT_PORT, 50)
+        assert ("port_26", None, 50.0, None, None, False) in ledger.balances()
+
+    def test_reset_all_zeroes_the_untracked_bottles_with_the_tracked(self, rig, tmp_path):
+        ledger, pump, state = rig
+        pump.extract(EXTRACT_PORT, 500)               # port_25: tracked
+        state["port"] = 26
+        pump.extract(EXTRACT_PORT, 300)
+        ledger.refill("all")
+        assert [(key, accumulated) for key, _, accumulated, *_ in ledger.balances()] == [
+            ("port_25", 0.0), ("ssct/A1", 0.0), ("ssct/A2", 0.0)]
+        assert json.loads((tmp_path / "ledger.json").read_text())["reservoirs"] == {}
+
+    def test_a_reset_all_that_cannot_be_written_leaves_the_untracked_figure_too(self, tmp_path):
+        """One reset, all or nothing: memory must not read reset over a
+        file that is not."""
+        path = tmp_path / "ledger.json"
+        path.mkdir()                               # a directory where the file should be
+        pump = FakePump()
+        ledger = ReservoirLedger(DEFS, path=path)
+        ledger.attach(pump, SIPPER_PORT, EXTRACT_PORT, lambda: 26, lambda: None)
+        pump.extract(EXTRACT_PORT, 300)            # untracked: no write, so it goes
+        with pytest.raises(ReservoirWriteError, match="not recorded"):
+            ledger.refill("all")
+        assert ("port_26", None, 300.0, None, None, False) in ledger.balances()
+
+    def test_a_rig_that_tracks_nothing_accumulates_and_resets_its_bottles(self, tally):
+        tally.pump.extract(EXTRACT_PORT, 500)
+        tally.run_started()
+        tally.pump.extract(EXTRACT_PORT, 100)
+        assert tally.ledger.balances() == [("port_3", "DAPI", 600.0, None, None, False)]
+        tally.ledger.refill("all")
+        assert tally.ledger.balances() == []
+        assert tally.ledger.used_rows() == [(3, "DAPI", 100.0)]
+
+
 class TestBalances:
-    """balances(): the Run tab's rows -- every reservoir drawn from this run
-    or since its refill, what this run drew from each, and where a volume
-    is declared what is loaded and left."""
+    """balances(): the Reservoirs window's rows -- every tracked reservoir,
+    drawn from or not, and every untracked bottle drawn from since launch
+    or its reset: what each has given since its reset and, where a volume
+    is declared, what is left and what was loaded; and whether the ledger
+    lacks its declaration."""
 
     @pytest.fixture
     def named(self, tmp_path):
@@ -417,10 +511,18 @@ class TestBalances:
                       well_name={"ssct/A1": "hyb R01"}.get)
         return SimpleNamespace(ledger=ledger, pump=pump, state=state, names=names)
 
-    def test_every_reservoir_drawn_from_has_a_row_in_key_order(self, named):
-        """A tracked bottle, an untracked one (no volumes to show), a named
-        well and one that takes the sipper port's name; and used_rows still
-        answers per port, the wells summed under the sipper's."""
+    def test_every_tracked_reservoir_has_a_row_before_any_draw(self, named):
+        """Full and declared, a named well and one that takes the sipper
+        port's name; no untracked bottle has been drawn from."""
+        assert named.ledger.balances() == [
+            ("port_25", "4x SSC", 0.0, 4800.0, 5000, False),
+            ("ssct/A1", "hyb R01", 0.0, 1750.0, 1800, False),
+            ("ssct/A2", "sipper", 0.0, 1750.0, 1800, False)]
+
+    def test_each_draw_accumulates_on_its_reservoir_with_blanks_where_none_is_declared(self, named):
+        """A tracked bottle, an untracked one (no volumes to show) and two
+        wells; used_rows still answers per port, the wells summed under the
+        sipper's."""
         named.pump.extract(EXTRACT_PORT, 500)
         named.state["port"] = 26
         named.pump.extract(EXTRACT_PORT, 300)
@@ -429,44 +531,63 @@ class TestBalances:
         named.state["well"] = "ssct/A1"
         named.pump.extract(EXTRACT_PORT, 1000)
         assert named.ledger.balances() == [
-            ("port_25", "4x SSC", 500.0, 5000, 4300.0),
-            ("port_26", "DAPI", 300.0, None, None),
-            ("ssct/A1", "hyb R01", 1000.0, 1800, 750.0),
-            ("ssct/A2", "sipper", 200.0, 1800, 1550.0)]
+            ("port_25", "4x SSC", 500.0, 4300.0, 5000, False),
+            ("port_26", "DAPI", 300.0, None, None, False),
+            ("ssct/A1", "hyb R01", 1000.0, 750.0, 1800, False),
+            ("ssct/A2", "sipper", 200.0, 1550.0, 1800, False)]
         assert named.ledger.used_rows() == [(SIPPER_PORT, "sipper", 1200.0),
                                             (25, "4x SSC", 500.0), (26, "DAPI", 300.0)]
 
-    def test_bottles_come_first_by_port_number_then_the_wells(self, named):
-        """port_10 after port_2, as the valves count, not as strings sort."""
+    def test_bottles_come_first_by_port_number_then_the_wells_by_plate_in_its_own_order(self):
+        """port_10 after port_2, as the valves count, not as strings sort;
+        a plate's wells column-major, as the plate and the well pickers
+        order them: B1 before A2, A2 before A10."""
+        pump, state = FakePump(), {"port": 10}
+        well = {"loaded_ul": 110, "residual_ul": 5}
+        ledger = ReservoirLedger({key: well for key in
+                                  ("ssct/A1", "probes/A10", "probes/A2", "probes/B1", "port_25")})
+        ledger.attach(pump, SIPPER_PORT, EXTRACT_PORT, lambda: state["port"], lambda: None)
         for port in (10, 2):
-            named.state["port"] = port
-            named.pump.extract(EXTRACT_PORT, 100)
-        named.state["port"], named.state["well"] = SIPPER_PORT, "ssct/A1"
-        named.pump.extract(EXTRACT_PORT, 100)
-        assert [key for key, *_ in named.ledger.balances()] == ["port_2", "port_10", "ssct/A1"]
+            state["port"] = port
+            pump.extract(EXTRACT_PORT, 100)
+        assert [key for key, *_ in ledger.balances()] == [
+            "port_2", "port_10", "port_25", "probes/B1", "probes/A2", "probes/A10", "ssct/A1"]
 
-    def test_a_run_start_zeroes_used_and_a_touched_reservoir_stays_listed(self, named):
-        """Since its refill the well has given liquid, and the table says so
-        with nothing drawn this run; the untracked bottle, with no balance
-        of its own, is off the table until it is drawn from again."""
+    def test_a_run_start_zeroes_used_rows_and_nothing_accumulated(self, named):
+        """The run's figure starts over at RunStarted; what a reservoir has
+        given since its reset does not, an untracked bottle's included."""
         named.state["port"], named.state["well"] = SIPPER_PORT, "ssct/A1"
         named.pump.extract(EXTRACT_PORT, 1000)
         named.state["port"] = 26
         named.pump.extract(EXTRACT_PORT, 300)
         named.ledger.on_run_event(RunStarted("run-1", ()))
-        assert named.ledger.balances() == [("ssct/A1", "hyb R01", 0.0, 1800, 750.0)]
+        rows = {key: tuple(row) for key, *row in named.ledger.balances()}
+        assert rows["ssct/A1"] == ("hyb R01", 1000.0, 750.0, 1800, False)
+        assert rows["port_26"] == ("DAPI", 300.0, None, None, False)
         assert named.ledger.used_rows() == []
+
+    def test_an_undeclared_reservoir_is_flagged_until_its_reset(self, named):
+        named.ledger.restore({"undeclared": ["port_25", "ssct/A2"]})
+        assert [(key, undeclared) for key, *_, undeclared in named.ledger.balances()] == [
+            ("port_25", True), ("ssct/A1", False), ("ssct/A2", True)]
+        named.ledger.refill("port_25")
+        assert [key for key, *_, undeclared in named.ledger.balances() if undeclared] == ["ssct/A2"]
+
+    def test_a_reset_puts_a_tracked_reservoir_back_to_full(self, named):
+        named.state["port"], named.state["well"] = SIPPER_PORT, "ssct/A1"
+        named.pump.extract(EXTRACT_PORT, 1000)
+        named.ledger.refill("ssct/A1")
+        assert ("ssct/A1", "hyb R01", 0.0, 1750.0, 1800, False) in named.ledger.balances()
 
     def test_names_are_read_when_the_rows_are(self, named):
         named.pump.extract(EXTRACT_PORT, 500)
         named.names[25] = "SSC"
-        assert named.ledger.balances() == [("port_25", "SSC", 500.0, 5000, 4300.0)]
+        assert named.ledger.balances()[0] == ("port_25", "SSC", 500.0, 4300.0, 5000, False)
 
 
 def test_tracked_names_every_declared_key_in_order():
-    """What the system asks before the gate and the manual verb before a
-    refill: a declared volume is a limit, and none declared, there is
-    nothing to refuse or refill."""
+    """What the system asks before the gate: a declared volume is a
+    limit, and none declared, there is nothing to refuse or declare."""
     assert ReservoirLedger(DEFS).tracked == ("port_25", "ssct/A1", "ssct/A2")
     assert ReservoirLedger({}).tracked == ()
 
@@ -492,7 +613,7 @@ def test_the_undeclared_refusal_names_a_wholly_undeclared_plate_once():
         ledger.check("ssct/A1", 100)
     assert str(refused.value) == (
         "the reservoir ledger is undeclared for port_25, every well of probes, ssct/A2: "
-        "declare refills (Refilled… on the Run Experiments tab, or --refilled) first")
+        "reset them (Reservoirs… on the Run Experiments tab, or --refilled) first")
 
 
 def test_describe_keys_keeps_a_label_to_a_line_or_two():

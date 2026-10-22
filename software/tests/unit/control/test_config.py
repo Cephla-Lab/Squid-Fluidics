@@ -595,6 +595,21 @@ class TestGantryConfig:
         path.write_text(text.replace(self._CORNER, self._COMMENTED))
         return path
 
+    def test_a_save_keeps_a_non_ascii_comment_byte_for_byte(self, tmp_path):
+        """The file is UTF-8 both ways: read under the locale's code page
+        and written as UTF-8, every save double-encoded a character such as
+        the button's ellipsis in a comment."""
+        path = tmp_path / "config.yaml"
+        text = _SIPPER_SAMPLE.read_bytes().decode("utf-8").replace("\r\n", "\n")
+        assert text.count(self._CORNER) == 1, "sample changed; re-plant the comment"
+        text = text.replace(self._CORNER, "        a1_xy_mm: [12.0, 1.5]   # taught… 4 µL\n")
+        path.write_bytes(text.encode("utf-8"))
+        config = load_config(str(path))
+        sv = config.reagent_selection.selector_valves
+        sv.name_mapping = {**sv.name_mapping, "port_24": "wash"}
+        save_config(config)
+        assert "# taught… 4 µL" in path.read_bytes().decode("utf-8")
+
     def test_a_save_leaves_an_untouched_corner_and_its_comment_alone(self, tmp_path):
         """model_dump gives a1_xy_mm as a tuple and the file holds a list: a
         save that compared the two rewrote every plate's corner in block

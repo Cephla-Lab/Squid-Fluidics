@@ -1,6 +1,9 @@
 """RobotControlWidget over a simulated system (spec §9): verbs as manual
-jobs, the freeze on any job, teaching through the manual verbs, clicks that
-carry no bool, the editable well picker, the deck map."""
+jobs, the freeze on any job, teaching through the manual verbs (the
+dedicated wells among them), clicks that carry no bool, the editable well
+picker, the deck map."""
+import logging
+import shutil
 import threading
 import time
 
@@ -10,12 +13,13 @@ from qtpy.QtTest import QTest
 from qtpy.QtWidgets import QApplication
 
 import gui
-from fluidics.control.config import gantry
+from fluidics.control.config import gantry, load_config
 from fluidics.errors import OperationError
+from fluidics.qt.deck_map import ROLE_COLORS
 from fluidics.qt.robot_control import RobotControlWidget
 from fluidics.robot.labware import WellRef, well_key
 
-from ..conftest import HYB, settle
+from ..conftest import HYB, PRIME, SAMPLE_CONFIG_DIR, settle
 from .test_gui_deck_map import _at
 
 
@@ -243,6 +247,98 @@ def test_a_refused_teach_is_a_dialog_and_changes_nothing(widget, monkeypatch):
     assert gantry(w.config).travel_z_mm == before
 
 
+def _set_dedicated(w, system, role, reservoir, well):
+    """A dedicated well's row as the operator works it: pick the
+    reservoir, type (or pick) the well, Set; the job settled."""
+    reservoirs, wells, button = w.dedicatedWells[role]
+    reservoirs.setCurrentIndex(reservoirs.findData(reservoir))
+    wells.setCurrentText(well)
+    button.click()
+    settle(system)
+
+
+def _fill_at(w, reservoir, well):
+    """The colour the deck map paints at a well's centre."""
+    w.deckMap.resize(640, 360)
+    placement = w.system.devices.robot.placements[reservoir]
+    return w.deckMap.grab().toImage().pixelColor(_at(w.deckMap, placement, well))
+
+
+def test_the_dedicated_wells_are_offered_in_the_teach_window_prefilled_from_the_config(widget):
+    w, _ = widget
+    for role, well in (("priming", "H11"), ("clean-up", "H12")):
+        reservoirs, wells, button = w.dedicatedWells[role]
+        assert (reservoirs.currentData(), wells.value()) == ("ssct", well)
+        assert {control.window() for control in (reservoirs, wells, button)} == {w.teachWindow}
+    w.setControlsEnabled(False)
+    assert not any(control.isEnabled() for control in w.dedicatedWells["priming"])
+
+
+def test_set_names_a_dedicated_well_in_the_config_and_the_map_marks_it(widget, caplog):
+    """The verb writes the config's value as reservoir/well -- a bare well
+    on the reservoir picked beside it, a qualified one as typed -- and the
+    job's end repaints the deck map's marks."""
+    w, system = widget
+    assert _fill_at(w, "ssct", "C3") != ROLE_COLORS["priming"]
+    with caplog.at_level(logging.INFO, logger="fluidics.manual_operations"):
+        _set_dedicated(w, system, "priming", "ssct", "C3")
+    assert gantry(w.config).priming_well == "ssct/C3"
+    assert "Taught: priming well ssct/C3." in caplog.text
+    assert _fill_at(w, "ssct", "C3") == ROLE_COLORS["priming"]
+    assert _fill_at(w, "ssct", "H11") != ROLE_COLORS["priming"], "the old mark goes"
+    _set_dedicated(w, system, "clean-up", "probes", "ssct/C3")
+    assert gantry(w.config).clean_up_well == "ssct/C3"
+    assert w.deckMap.legend() == ["priming + clean-up well"]
+
+
+@pytest.mark.parametrize("reservoir, typed, refusal", [
+    ("ssct", "Z9", "not a well"),
+    ("ssct", "nope/A1", "no reservoir named 'nope'"),
+    # 110 uL loaded less 5 residual, against the sipper's 250 uL line.
+    ("probes", "C3", "probes/C3 gives 105 uL when full, less than the 250 uL"),
+])
+def test_a_refused_dedicated_well_is_a_dialog_and_changes_nothing(widget, monkeypatch, reservoir, typed, refusal):
+    w, system = widget
+    said = []
+    monkeypatch.setattr("fluidics.qt.robot_control.QMessageBox.critical",
+                        lambda parent, title, text: said.append(text))
+    _set_dedicated(w, system, "priming", reservoir, typed)
+    assert len(said) == 1 and refusal in said[0]
+    assert gantry(w.config).priming_well == "ssct/H11"
+    assert w.deckMap.legend() == ["clean-up well", "priming well"]
+
+
+def test_the_next_priming_row_primes_the_sipper_from_the_well_set(widget):
+    """The operations read the gantry block at the row, so a well set
+    between runs is the one drawn from."""
+    w, system = widget
+    _set_dedicated(w, system, "priming", "ssct", "H10")
+    system.run([PRIME])
+    settle(system)
+    ledger = system.devices.reservoirs
+    assert ledger.remaining("ssct/H10") < 1750, "the sipper's port primed from the well set"
+    assert ledger.remaining("ssct/H11") == 1750
+
+
+def test_save_writes_the_dedicated_wells_to_the_config_file(qapp, simulated_system, tmp_path):
+    """Save, the teach window's one write, carries the dedicated wells
+    with the rest of the teaching: read back from the file."""
+    path = tmp_path / "plate_sipper_config.yaml"
+    shutil.copy(SAMPLE_CONFIG_DIR / "plate_sipper_config.yaml", path)
+    config = load_config(str(path))
+    system = simulated_system(config)
+    w = RobotControlWidget(config, system)
+    try:
+        _set_dedicated(w, system, "priming", "ssct", "H10")
+        _set_dedicated(w, system, "clean-up", "ssct", "G12")
+        w.saveTeaching()
+    finally:
+        w.deleteLater()
+        QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    saved = gantry(load_config(str(path)))
+    assert (saved.priming_well, saved.clean_up_well) == ("ssct/H10", "ssct/G12")
+
+
 def test_the_map_judges_the_published_position_not_the_live_stage(widget):
     """The paint lands on the Qt thread after the publish, when the next leg
     may already be under way and the stage's own position is unknown: with
@@ -402,34 +498,59 @@ def test_one_job_on_the_rig_greys_the_other_tabs(main_window, plate_sipper_confi
         assert enabled() == {"run": True, "manual": True, "robot": True}
 
 
-def test_a_refill_from_the_run_tab_keeps_the_run_tab_live(main_window, plate_sipper_config, monkeypatch,
-                                                           real_clock):
-    """The declaration is a manual job the Run tab starts: the window must
-    not grey that tab under its own job (Qt would then switch to the next
-    tab and stay there); the other two go dead until it ends."""
+@pytest.mark.parametrize("in_front", ["run", "manual", "robot"])
+def test_a_reset_from_the_reservoirs_window_keeps_the_run_tab_live(main_window, plate_sipper_config,
+                                                                    monkeypatch, real_clock, in_front):
+    """A reset is a manual job the Run tab's Reservoirs window starts: the
+    main window must not grey that tab -- nor so the window, its child --
+    under its own job; the other two go dead until it ends. The window
+    floats, so the reset may start with another tab in front: that tab
+    goes dead, and the Run tab comes forward rather than Qt's next tab."""
     window, system = main_window(plate_sipper_config)
     tabs = window.tabWidget
-    tabs.setCurrentIndex(window.RUN_TAB)
+    tabs.setCurrentIndex({"run": window.RUN_TAB, "manual": window.MANUAL_TAB,
+                          "robot": window.ROBOT_TAB}[in_front])
     gate = threading.Event()
-    monkeypatch.setattr(system.manual, "refill", lambda key: gate.wait(5))
-    monkeypatch.setattr("fluidics.qt.sequence_editor.QInputDialog.getItem",
-                        lambda *a, **k: ("every well of probes", True))
-    monkeypatch.setattr("fluidics.qt.sequence_editor._ask_yes_no", lambda *a, **k: True)
+    monkeypatch.setattr(system.manual, "refill", lambda *keys: gate.wait(5))
+    monkeypatch.setattr("fluidics.qt.reservoirs_window._ask_yes_no", lambda *a, **k: True)
 
     def enabled():
         return {name: tabs.isTabEnabled(index) for name, index in
                 (("run", window.RUN_TAB), ("manual", window.MANUAL_TAB), ("robot", window.ROBOT_TAB))}
 
-    tabs.widget(window.RUN_TAB).refilled()
+    run_tab = tabs.widget(window.RUN_TAB)
+    run_tab.reservoirsButton.click()
+    reservoirs = run_tab.reservoirsWindow
+    reservoirs.resetPlateButtons["probes"].click()
     try:
         QApplication.processEvents()
         assert tabs.currentIndex() == window.RUN_TAB
         assert enabled() == {"run": True, "manual": False, "robot": False}
+        assert reservoirs.isEnabled() and not reservoirs.resetAllButton.isEnabled()
     finally:
         gate.set()
     settle(system)
     assert tabs.currentIndex() == window.RUN_TAB
     assert enabled() == {"run": True, "manual": True, "robot": True}
+    assert reservoirs.resetAllButton.isEnabled()
+
+
+def test_a_teach_job_started_with_the_manual_tab_in_front_brings_the_robot_tab_forward(
+        main_window, plate_sipper_config, real_clock):
+    """The Teach window floats too: its job greys the Manual tab, and the
+    Robot tab comes forward, not Qt's next tab."""
+    window, system = main_window(plate_sipper_config)
+    tabs = window.tabWidget
+    tabs.setCurrentIndex(window.MANUAL_TAB)
+    gate = threading.Event()
+    tabs.widget(window.ROBOT_TAB)._run(lambda: gate.wait(5))
+    try:
+        QApplication.processEvents()
+        assert tabs.currentIndex() == window.ROBOT_TAB
+    finally:
+        gate.set()
+    settle(system)
+    assert tabs.currentIndex() == window.ROBOT_TAB
 
 
 @pytest.mark.parametrize("config_name, has_robot", [("plate_sipper_config", True),
@@ -441,3 +562,13 @@ def test_the_main_window_adds_a_robot_tab_only_with_a_gantry(main_window, reques
     tabs = [window.tabWidget.tabText(i) for i in range(window.tabWidget.count())]
     assert ("Robot" in tabs) == has_robot
     assert window.ROBOT_TAB == (tabs.index("Robot") if has_robot else None)
+
+
+def test_a_dedicated_well_set_elsewhere_shows_on_its_row(widget):
+    """A Set made through the verb by a script or an embedder: the row
+    shows the config's well once the job ends, and when Teach opens."""
+    w, system = widget
+    system.run_manual(lambda: system.manual.set_dedicated_well("priming", "ssct/B4"))
+    settle(system)
+    reservoirs, wells, _ = w.dedicatedWells["priming"]
+    assert (reservoirs.currentData(), wells.value()) == ("ssct", "B4")

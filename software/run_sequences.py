@@ -70,8 +70,8 @@ def main():
         validate_sequences(included, config)
 
         system = FluidicsSystem.build(config, args.simulation, ledger_path=args.ledger)
-        for key in args.refilled:
-            system.refill(key)
+        if args.refilled:
+            system.refill(*args.refilled)       # every one of them, in one write
 
         # The worker narrates its own run through the fluidics logger, so
         # the CLI renders nothing -- but a failed run must not exit 0, and

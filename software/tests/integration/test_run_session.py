@@ -201,6 +201,22 @@ class TestAManualMove:
         assert session.wait(5)
         assert reported == [("no reply from pump", False), "finished"]
 
+    def test_a_report_that_raises_still_publishes_idle_and_wakes_the_waiters(self, session, real_clock):
+        """A widget destroyed under its own job posts into nothing and raises:
+        the rig must still read idle, say so, and wake whoever waits."""
+        seen = []
+        session.state.subscribe(seen.append)
+
+        def broken():
+            raise IOError("no reply from pump")
+
+        def report(message):
+            raise RuntimeError("wrapped C/C++ object has been deleted")
+
+        session.run_manual(broken, callbacks={"on_error": report})
+        assert session.wait(5)
+        assert seen == ["manual", None] and not session.busy
+
     @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
     def test_a_move_that_dies_of_anything_still_frees_the_rig(self, session, real_clock):
         """Not an Exception -- the thread dies with it -- and the session must

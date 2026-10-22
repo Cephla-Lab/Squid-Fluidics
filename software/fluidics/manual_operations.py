@@ -16,11 +16,15 @@ way it stops a run.
 import logging
 
 from .control.config import gantry
-from .robot.labware import agitation_problem, plate_of, unknown_reservoir
+from .robot.labware import agitation_problem, plate_of, unknown_reservoir, well_key
 from .robot.stage import MIN_TRAVEL_Z_MM
 from .vocabulary import sipper_vocabulary
 
 _logger = logging.getLogger(__name__)
+
+# The sipper's dedicated wells, by the role the deck map marks them with:
+# the gantry block's field that names each.
+DEDICATED_WELLS = {"priming": "priming_well", "clean-up": "clean_up_well"}
 
 
 class ManualOperations:
@@ -194,21 +198,41 @@ class ManualOperations:
         self._gantry.travel_z_mm = z
         _logger.info("Taught: travel height %.2f mm.", z)
 
-    def refill(self, key):
-        """Declare `key` full in the ledger: `all`, a plate name, or one
-        key. Refused where no volume is declared: the tally alone has
-        nothing to refill."""
-        if not self.reservoirs.tracked:
-            raise RuntimeError("this rig tracks no reservoir volumes")
-        refusal = self.refill_refusal(key)
-        if refusal:
-            raise RuntimeError(refusal)
-        self.reservoirs.refill(key)
+    def set_dedicated_well(self, role, text):
+        """The priming or the clean-up well (`role`, as DEDICATED_WELLS
+        names them) is `text` from now on: resolved through the rig's
+        vocabulary first, so a plate or a well this rig has not got changes
+        nothing, then written to the config as reservoir/well -- the value
+        Save writes, and the one the operations read at the next priming or
+        clean-up row. No move: the live robot holds no dedicated well."""
+        self._need_robot()
+        ref = self._vocabulary.resolve(text)
+        key = well_key(ref)
+        # Priming and clean-up each draw the sipper's line full from it.
+        need = self.sv.get_tubing_fluid_amount_to_port(self._sipper_port)
+        r = self._vocabulary.reservoirs[ref.reservoir]
+        usable = (r.loaded_ul_by_well or {}).get(ref.well, r.loaded_ul) - r.residual_ul
+        if usable < need:
+            raise ValueError(f"{key} gives {usable} uL when full, less than the {need} uL the "
+                             f"sipper's line takes to prime: pick a fuller well")
+        setattr(self._gantry, DEDICATED_WELLS[role], key)
+        _logger.info("Taught: %s well %s.", role, key)
+
+    def refill(self, *keys):
+        """Reset `keys` in the ledger, each `all`, a plate name, or one key
+        -- a tracked reservoir declared full, an untracked bottle's
+        accumulated figure zeroed -- all of them in one write or none. The
+        tip's rule is asked of every key before anything changes."""
+        for key in keys:
+            refusal = self.refill_refusal(key)
+            if refusal:
+                raise RuntimeError(refusal)
+        self.reservoirs.refill(*keys)
 
     def refill_refusal(self, key):
         """Why refill(key) would be refused for where the tip is, or None:
-        the one statement of the rule, which the Robot tab asks before its
-        question. With no park well the tip rests in a well between steps,
+        the one statement of the rule, which the Reservoirs window asks
+        before its question. With no park well the tip rests in a well between steps,
         and lifting that plate with the tip in it bends the tip: a refill of
         that plate (or of everything) waits for Retract. The witness names
         the well; without one -- a jog, a halt, a fault reset or teaching

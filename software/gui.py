@@ -178,10 +178,20 @@ class FluidicsControlGUI(PostsToQtThread, QMainWindow):
         kind = self.session.kind
         robot_job = is_robot_job(self.session)
         run_job = is_run_tab_job(self.session)
-        self.tabWidget.setTabEnabled(self.RUN_TAB, kind != "manual" or run_job)
-        self.tabWidget.setTabEnabled(self.MANUAL_TAB, kind != "run" and not robot_job and not run_job)
+        enabled = {self.RUN_TAB: kind != "manual" or run_job,
+                   self.MANUAL_TAB: kind != "run" and not robot_job and not run_job}
         if self.ROBOT_TAB is not None:
-            self.tabWidget.setTabEnabled(self.ROBOT_TAB, kind is None or robot_job)
+            enabled[self.ROBOT_TAB] = kind is None or robot_job
+        # A tool window (Teach on the Robot tab, Reservoirs on the Run tab)
+        # starts its tab's jobs while any tab may be in front. Qt moves off
+        # a tab it greys to the next one and stays there, so the job's own
+        # tab comes forward first.
+        if not enabled.get(self.tabWidget.currentIndex(), True):
+            self.tabWidget.setCurrentIndex(
+                self.ROBOT_TAB if robot_job else
+                self.RUN_TAB if kind == "run" or run_job else self.MANUAL_TAB)
+        for index, on in enabled.items():
+            self.tabWidget.setTabEnabled(index, on)
 
     def _quiesce(self):
         """A live job must end before the devices close (system.close does

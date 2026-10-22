@@ -479,7 +479,9 @@ def run_widget(paused=False, at_rest=False, total_time=100, elapsed=0):
         runButton=Button(), pauseButton=Button(), abortButton=Button(),
         loadButton=Button(), addButton=Button(), removeButton=Button(),
         duplicateButton=Button(), moveUpButton=Button(), moveDownButton=Button(),
-        refilledButton=None,                   # a rig that tracks no volume
+        # The tab repaints its Reservoirs window with itself; the window
+        # has its own tests.
+        reservoirsWindow=SimpleNamespace(refresh=lambda: None),
         timeLabel=SimpleNamespace(setText=lambda text: None),
         progressBar=SimpleNamespace(setValue=lambda value: None),
         timer=SimpleNamespace(stop=lambda: None),
@@ -490,11 +492,9 @@ def run_widget(paused=False, at_rest=False, total_time=100, elapsed=0):
     # them on the stub too.
     for name in ("_showTimeRemaining", "_renderRunControls"):
         stub.__dict__[name] = _bind(name, stub)
-    # A static method needs no stub of its own; a valid list blocks nothing;
-    # the reagents table has its own tests.
+    # A static method needs no stub of its own; a valid list blocks nothing.
     stub.__dict__["_pauseSuffix"] = gui.SequencesWidget._pauseSuffix
     stub.__dict__["_blockingError"] = lambda: None
-    stub.__dict__["_renderReagents"] = lambda: None
     return stub
 
 
@@ -764,7 +764,9 @@ class TestMainWindowJobs:
         enabled = {}
         stub = SimpleNamespace(RUN_TAB=0, MANUAL_TAB=1, ROBOT_TAB=robot_tab,
                                session=FakeSession(kind=kind, source=source),
-                               tabWidget=SimpleNamespace(setTabEnabled=enabled.__setitem__))
+                               tabWidget=SimpleNamespace(setTabEnabled=enabled.__setitem__,
+                                                         currentIndex=lambda: 0,
+                                                         setCurrentIndex=lambda index: None))
         gui.FluidicsControlGUI._renderTabs(stub)
         return enabled
 
@@ -1107,51 +1109,6 @@ class TestShowingWhereTheValvesAre:
         gui.ManualControlWidget._showCurrentPort(stub)
         assert combo.currentIndex() == -1
         assert combo.currentData() is None
-
-
-class TestReagentsTable:
-    """The run tab's reagent table: painted from the ledger's balances,
-    names read fresh at each paint, blank where no volume is declared,
-    hidden when empty; the undeclared notice under it where the rig has
-    one."""
-
-    def _stub(self, rows, undeclared=(), tracked=(), notice=False):
-        from qtpy.QtWidgets import QLabel, QTableWidget
-        table = QTableWidget(0, 5)
-        stub = SimpleNamespace(
-            reagentsTable=table,
-            undeclaredLabel=QLabel("") if notice else None,
-            system=SimpleNamespace(devices=SimpleNamespace(reservoirs=SimpleNamespace(
-                balances=lambda: list(rows), undeclared=list(undeclared), tracked=tuple(tracked)))),
-        )
-        return stub, table
-
-    def test_balances_paint_with_blanks_where_no_volume_is_declared(self, qapp):
-        stub, table = self._stub([("port_3", "DAPI", 1500.0, None, None),
-                                  ("probes/A1", "hyb R01", 300.0, 350, 45.0),
-                                  ("ssct/A1", None, 0.0, 1800, 10.0)])
-        gui.SequencesWidget._renderReagents(stub)
-        assert not table.isHidden()
-        rows = [tuple(table.item(r, c).text() for c in range(5)) for r in range(table.rowCount())]
-        assert rows == [("port_3", "DAPI", "1500", "", ""),
-                        ("probes/A1", "hyb R01", "300", "350", "45"),
-                        ("ssct/A1", "", "0", "1800", "10")]
-
-    def test_nothing_drawn_hides_the_table(self, qapp):
-        stub, table = self._stub([])
-        table.setVisible(True)
-        gui.SequencesWidget._renderReagents(stub)
-        assert table.isHidden()
-
-    def test_the_notice_names_the_undeclared_and_clears_with_them(self, qapp):
-        tracked = ("port_25", "ssct/A1", "ssct/A2")
-        stub, _ = self._stub([], undeclared=tracked, tracked=tracked, notice=True)
-        gui.SequencesWidget._renderReagents(stub)
-        assert stub.undeclaredLabel.text() == \
-            "Ledger undeclared for port_25, every well of ssct: declare refills before running"
-        stub, _ = self._stub([], tracked=tracked, notice=True)
-        gui.SequencesWidget._renderReagents(stub)
-        assert stub.undeclaredLabel.text() == ""
 
 
 class TestHeldVolumePaint:

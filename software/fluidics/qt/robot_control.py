@@ -1,13 +1,15 @@
 """The Robot tab, the run-time view: home, retract, reset a fault, STOP,
 "Do not lower tip", the deck map and go to well -- the stage's movement,
-and nothing of what the wells hold (the Run Experiments tab's table).
-Teaching, with the jog it needs, is a tool window opened from the Stage
-row. Every verb is a manual job through the session (one job on the rig);
-the controls freeze while ANY job runs (the session's state, not only this
-tab's); position is painted from the stage's publish; STOP is the session's
-abort -- the ManualControlWidget's contract, applied to the sipper (spec
-§9). Teaching goes through the manual verbs, which change the live robot
-and the config together, or neither; Save writes the config.
+and nothing of what the wells hold (the Run Experiments tab's Reservoirs
+window). Teaching, with the jog it needs, is a tool window opened from the
+Stage row: each plate's A1 and dip depth, the travel height, and the
+priming and clean-up wells. Every verb is a manual job through the
+session (one job on the rig); the controls freeze while ANY job runs (the
+session's state, not only this tab's); position is painted from the
+stage's publish; STOP is the session's abort -- the ManualControlWidget's
+contract, applied to the sipper (spec §9). Teaching goes through the
+manual verbs, which change the live robot and the config together, or
+neither; Save writes the config.
 """
 
 import logging
@@ -17,6 +19,7 @@ from qtpy.QtWidgets import (QCheckBox, QComboBox, QGridLayout, QGroupBox, QHBoxL
                             QMessageBox, QPushButton, QVBoxLayout, QWidget)
 
 from fluidics.control.config import gantry, save_config
+from fluidics.manual_operations import DEDICATED_WELLS
 from fluidics.vocabulary import sipper_vocabulary
 
 from .deck_map import DeckMapWidget
@@ -115,12 +118,9 @@ class RobotControlWidget(PostsToQtThread, QWidget):
         # stage last said it was. A click on a well is Go to well for that
         # well, and nothing between wells; it freezes with the controls.
         robot = self.system.devices.robot
-        g = gantry(self.config)
         self.deckMap = DeckMapWidget(robot.strokes())
         self.deckMap.setPlacements(robot.placements)
-        self.deckMap.setNamedWells({
-            "priming": self._vocabulary.resolve(g.priming_well),
-            "clean-up": self._vocabulary.resolve(g.clean_up_well)})
+        self._paintNamedWells()
         self.deckMap.wellClicked.connect(self._goToClickedWell)
         stage_column.addWidget(self.deckMap, 1)
         self._controls.append(self.deckMap)
@@ -162,6 +162,7 @@ class RobotControlWidget(PostsToQtThread, QWidget):
         layout.addWidget(wells)
 
         teach = QGroupBox("Teach (then Save)")
+        rows = QVBoxLayout()
         row = QHBoxLayout()
         row.addWidget(QLabel("Plate"))
         self.teachPlateCombo = QComboBox()
@@ -173,7 +174,16 @@ class RobotControlWidget(PostsToQtThread, QWidget):
         self.setDipButton = self._button(row, "Set dip depth here", self.setDipHere)
         self.setTravelButton = self._button(row, "Set travel height here", self.setTravelHere)
         self.saveButton = self._button(row, "Save", self.saveTeaching)
-        teach.setLayout(row)
+        rows.addLayout(row)
+        # Under the plate teaching, the dedicated wells: where a priming or
+        # clean-up row primes the sipper unless the row names its own.
+        dedicated = QGridLayout()
+        self.dedicatedWells = {}
+        self._dedicatedShown = {}       # role -> the config's well when its row last showed it
+        for r, role in enumerate(DEDICATED_WELLS):
+            self._addDedicatedRow(dedicated, r, role)
+        rows.addLayout(dedicated)
+        teach.setLayout(rows)
         teaching.addWidget(teach)
         self.teachWindow = _ToolWindow("Teach", teaching, parent=self)
 
@@ -189,21 +199,61 @@ class RobotControlWidget(PostsToQtThread, QWidget):
         self._controls.append(button)
         return button
 
+    def _addDedicatedRow(self, grid, r, role):
+        """One dedicated well's row: a reservoir picker and a well picker,
+        prefilled from the config, and Set; held in dedicatedWells[role]."""
+        ref = self._vocabulary.resolve(getattr(gantry(self.config), DEDICATED_WELLS[role]))
+        grid.addWidget(QLabel(f"{role.capitalize()} well"), r, 0)
+        reservoir = QComboBox()
+        for name in sorted(self._vocabulary.reservoirs):
+            reservoir.addItem(name, name)
+        reservoir.setCurrentIndex(reservoir.findData(ref.reservoir))
+        well = WellCombo()
+        well.fill(self._vocabulary.well_names(ref.reservoir))
+        well.setCurrentIndex(well.findData(ref.well))
+        reservoir.currentIndexChanged.connect(
+            lambda _index: well.fill(self._vocabulary.well_names(reservoir.currentData())))
+        grid.addWidget(reservoir, r, 1)
+        grid.addWidget(well, r, 2)
+        self._controls.extend((reservoir, well))
+        button = self._button(grid, "Set", lambda: self.setDedicatedWell(role), r, 3)
+        self.dedicatedWells[role] = (reservoir, well, button)
+        self._dedicatedShown[role] = getattr(gantry(self.config), DEDICATED_WELLS[role])
+
+    def _syncDedicatedRows(self):
+        """A row whose well the config no longer names (a Set from a script
+        or an embedder, a Save loaded elsewhere) shows the config's again; a
+        row the operator is mid-way through editing, its well unchanged in
+        the config, is left alone."""
+        for role, (reservoir, well, _) in self.dedicatedWells.items():
+            text = getattr(gantry(self.config), DEDICATED_WELLS[role])
+            if text == self._dedicatedShown.get(role):
+                continue
+            ref = self._vocabulary.resolve(text)
+            reservoir.setCurrentIndex(reservoir.findData(ref.reservoir))
+            well.fill(self._vocabulary.well_names(ref.reservoir))
+            well.setCurrentIndex(well.findData(ref.well))
+            self._dedicatedShown[role] = text
+
     def _fillWells(self):
         self.wellCombo.fill(self._vocabulary.well_names(self.reservoirCombo.currentData()))
+
+    @staticmethod
+    def _reference(reservoirs, well):
+        """The well a picker pair names: on the reservoir picked beside it
+        -- or, typed as reservoir/well, as typed."""
+        text = well.value()
+        return text if "/" in text else f"{reservoirs.currentData()}/{text}"
 
     # --- verbs: every one a manual job ---
 
     def goToWell(self):
-        """The well on the reservoir picked beside it -- or, typed as
-        reservoir/well, as typed."""
-        reservoir = self.reservoirCombo.currentData()
-        well = self.wellCombo.value()
-        reference = well if "/" in well else f"{reservoir}/{well}"
+        reference = self._reference(self.reservoirCombo, self.wellCombo)
         self._run(lambda: self.manual.go_to_well(reference))
 
     def showTeach(self):
         """Open the teach window, or bring it back to the front."""
+        self._syncDedicatedRows()
         self.teachWindow.show()
         self.teachWindow.raise_()
         self.teachWindow.activateWindow()
@@ -270,6 +320,8 @@ class RobotControlWidget(PostsToQtThread, QWidget):
             # before it is set).
             robot = self.system.devices.robot
             self.deckMap.setPlacements(robot.placements)
+            self._paintNamedWells()
+            self._syncDedicatedRows()
             self._paintPosition(robot.position())
 
     def setControlsEnabled(self, enabled):
@@ -288,6 +340,15 @@ class RobotControlWidget(PostsToQtThread, QWidget):
         for control in self._controls:
             control.setEnabled(enabled)
         self.stopButton.setEnabled(busy and self._ownsJob())
+
+    # --- the deck map's marked wells ---
+
+    def _paintNamedWells(self):
+        """The deck map's marked wells, from the config as it stands: Set
+        changes it, so it is read again whenever a job ends."""
+        g = gantry(self.config)
+        self.deckMap.setNamedWells({role: self._vocabulary.resolve(getattr(g, field))
+                                    for role, field in DEDICATED_WELLS.items()})
 
     # --- position ---
 
@@ -338,6 +399,15 @@ class RobotControlWidget(PostsToQtThread, QWidget):
             return
         z = position[2]
         self._run(lambda: self.manual.teach_travel(z))
+
+    def setDedicatedWell(self, role):
+        """The priming or the clean-up well is the one picked on its row,
+        through the manual verb, which refuses a plate or a well this rig
+        has not got (a dialog; nothing changes). No position is read: the
+        well is named, not taught where the tip is."""
+        reservoir, well, _ = self.dedicatedWells[role]
+        reference = self._reference(reservoir, well)
+        self._run(lambda: self.manual.set_dedicated_well(role, reference))
 
     def saveTeaching(self):
         if self.session.busy:

@@ -238,7 +238,14 @@ class RunSession:
             # ended; the next one must not raise on a stale abort.
             self.control.reset()
             if report is not None:
-                report()
+                try:
+                    report()
+                except Exception:
+                    # A report that raises -- a widget destroyed under its own
+                    # job, an embedder's callback -- must not keep the rig
+                    # from reading idle: the state change and the waiters'
+                    # wake below are the session's, not the reporter's.
+                    _logger.exception("A job's report failed")
             self.state.notify(None)
             # Done means no job is current. A subscriber may have started the
             # next one just now, in which case waiters keep waiting for it --

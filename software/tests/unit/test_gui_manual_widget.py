@@ -1,7 +1,7 @@
 """ManualControlWidget over a simulated system: the tab's wiring on a real
 widget -- a port picked on the valve combo turns the valve as a manual job
 on the session, and the controls come back when it ends. The volumes it
-used to show live on the Run Experiments tab now."""
+used to show live in the Run Experiments tab's Reservoirs window now."""
 import pytest
 from qtpy.QtCore import QEvent
 from qtpy.QtWidgets import QApplication

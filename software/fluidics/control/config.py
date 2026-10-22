@@ -461,7 +461,7 @@ def save_config(config: FluidicsConfig, config_path: str = None) -> str:
         type(None),
         lambda representer, _: representer.represent_scalar(
             'tag:yaml.org,2002:null', 'null'))
-    with open(config_path) as f:
+    with open(config_path, encoding="utf-8") as f:
         document = yaml_rt.load(f)
     _update_yaml_node(document, values)
     with atomic_write(config_path) as f:
@@ -595,14 +595,14 @@ def load_config(config_path: str) -> FluidicsConfig:
             config_path = yaml_path
         else:
             # Convert JSON → YAML
-            with open(config_path) as f:
+            with open(config_path, encoding="utf-8") as f:
                 old_data = json.load(f)
             new_data = convert_legacy_config(old_data)
             with atomic_write(yaml_path) as f:
                 yaml.dump(new_data, f, default_flow_style=False, sort_keys=False)
             config_path = yaml_path
 
-    with open(config_path) as f:
+    with open(config_path, encoding="utf-8") as f:
         data = yaml.safe_load(f)
 
     config = FluidicsConfig(**data)
