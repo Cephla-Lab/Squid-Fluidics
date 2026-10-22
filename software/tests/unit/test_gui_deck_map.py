@@ -39,10 +39,15 @@ def test_a_click_on_a_well_centre_names_it_and_between_wells_names_nothing(deck)
 
 
 def test_the_map_follows_the_plate_orientation(deck):
-    """Columns along +y read upward on screen; rows along +x read to the right."""
-    a1, a2, b1 = (_at(deck, PROBES, well) for well in ("A1", "A2", "B1"))
-    assert a2.y() < a1.y() and a2.x() == a1.x()
-    assert b1.x() > a1.x() and b1.y() == a1.y()
+    """A half turn from the stage's axes, as the operator faces the rig:
+    plate 1's A1 is top right; columns along +y read downward, rows along
+    +x read to the left."""
+    a1, a2, b1, h12 = (_at(deck, PROBES, well) for well in ("A1", "A2", "B1", "H12"))
+    assert a2.y() > a1.y() and a2.x() == a1.x()
+    assert b1.x() < a1.x() and b1.y() == a1.y()
+    ssct_a1 = _at(deck, SSCT, "A1")
+    assert a1.x() > ssct_a1.x() and a1.y() <= ssct_a1.y(), "plate 1's A1 is the top right corner"
+    assert a1.y() < h12.y()
 
 
 def test_the_state_line_reads_lowered_retracted_or_unknown(deck):

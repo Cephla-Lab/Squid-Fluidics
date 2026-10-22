@@ -26,6 +26,14 @@ class SipperVocabulary:
         return [(well, f"{well}: {names[well]}" if well in names else well)
                 for well in self.reservoirs[reservoir].geometry.wells()]
 
+    def well_name(self, key):
+        """The config's label for the well a ledger key names (`ssct/A1`),
+        or None where the plate gives it none: what the reagents table
+        calls a well's reagent."""
+        plate, _, well = key.partition("/")
+        r = self.reservoirs.get(plate)
+        return None if r is None else (r.well_names or {}).get(well)
+
     def placement(self, name):
         """The plate as the config has it now."""
         r = self.reservoirs[name]

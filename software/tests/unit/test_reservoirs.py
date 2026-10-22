@@ -10,7 +10,7 @@ import pytest
 from fluidics.errors import (ReservoirDrawTooLarge, ReservoirError, ReservoirInUse, ReservoirNoWell,
                              ReservoirOverdraw, ReservoirUndeclared, ReservoirWriteError)
 from fluidics.events import RunEnded, RunStarted
-from fluidics.reservoirs import ReservoirLedger
+from fluidics.reservoirs import ReservoirLedger, describe_keys
 
 DEFS = {"port_25": {"loaded_ul": 5000, "residual_ul": 200},
         "ssct/A1": {"loaded_ul": 1800, "residual_ul": 50},
@@ -399,6 +399,70 @@ class TestTheRunTally:
         assert tally.ledger.used_rows() == [(3, "DAPI", 500.0)]
 
 
+class TestBalances:
+    """balances(): the Run tab's rows -- every reservoir drawn from this run
+    or since its refill, what this run drew from each, and where a volume
+    is declared what is loaded and left."""
+
+    @pytest.fixture
+    def named(self, tmp_path):
+        """The tracked rig with the names a rig attaches: the valves' for
+        every port, the config's for one well."""
+        pump = FakePump()
+        state = {"port": 25, "well": None}
+        names = {SIPPER_PORT: "sipper", 25: "4x SSC", 26: "DAPI"}
+        ledger = ReservoirLedger(DEFS, path=tmp_path / "ledger.json")
+        ledger.attach(pump, SIPPER_PORT, EXTRACT_PORT, current_port=lambda: state["port"],
+                      current_well=lambda: state["well"], port_to_reagent=names.get,
+                      well_name={"ssct/A1": "hyb R01"}.get)
+        return SimpleNamespace(ledger=ledger, pump=pump, state=state, names=names)
+
+    def test_every_reservoir_drawn_from_has_a_row_in_key_order(self, named):
+        """A tracked bottle, an untracked one (no volumes to show), a named
+        well and one that takes the sipper port's name; and used_rows still
+        answers per port, the wells summed under the sipper's."""
+        named.pump.extract(EXTRACT_PORT, 500)
+        named.state["port"] = 26
+        named.pump.extract(EXTRACT_PORT, 300)
+        named.state["port"], named.state["well"] = SIPPER_PORT, "ssct/A2"
+        named.pump.extract(EXTRACT_PORT, 200)
+        named.state["well"] = "ssct/A1"
+        named.pump.extract(EXTRACT_PORT, 1000)
+        assert named.ledger.balances() == [
+            ("port_25", "4x SSC", 500.0, 5000, 4300.0),
+            ("port_26", "DAPI", 300.0, None, None),
+            ("ssct/A1", "hyb R01", 1000.0, 1800, 750.0),
+            ("ssct/A2", "sipper", 200.0, 1800, 1550.0)]
+        assert named.ledger.used_rows() == [(SIPPER_PORT, "sipper", 1200.0),
+                                            (25, "4x SSC", 500.0), (26, "DAPI", 300.0)]
+
+    def test_bottles_come_first_by_port_number_then_the_wells(self, named):
+        """port_10 after port_2, as the valves count, not as strings sort."""
+        for port in (10, 2):
+            named.state["port"] = port
+            named.pump.extract(EXTRACT_PORT, 100)
+        named.state["port"], named.state["well"] = SIPPER_PORT, "ssct/A1"
+        named.pump.extract(EXTRACT_PORT, 100)
+        assert [key for key, *_ in named.ledger.balances()] == ["port_2", "port_10", "ssct/A1"]
+
+    def test_a_run_start_zeroes_used_and_a_touched_reservoir_stays_listed(self, named):
+        """Since its refill the well has given liquid, and the table says so
+        with nothing drawn this run; the untracked bottle, with no balance
+        of its own, is off the table until it is drawn from again."""
+        named.state["port"], named.state["well"] = SIPPER_PORT, "ssct/A1"
+        named.pump.extract(EXTRACT_PORT, 1000)
+        named.state["port"] = 26
+        named.pump.extract(EXTRACT_PORT, 300)
+        named.ledger.on_run_event(RunStarted("run-1", ()))
+        assert named.ledger.balances() == [("ssct/A1", "hyb R01", 0.0, 1800, 750.0)]
+        assert named.ledger.used_rows() == []
+
+    def test_names_are_read_when_the_rows_are(self, named):
+        named.pump.extract(EXTRACT_PORT, 500)
+        named.names[25] = "SSC"
+        assert named.ledger.balances() == [("port_25", "SSC", 500.0, 5000, 4300.0)]
+
+
 def test_tracked_names_every_declared_key_in_order():
     """What the system asks before the gate and the manual verb before a
     refill: a declared volume is a limit, and none declared, there is
@@ -428,4 +492,16 @@ def test_the_undeclared_refusal_names_a_wholly_undeclared_plate_once():
         ledger.check("ssct/A1", 100)
     assert str(refused.value) == (
         "the reservoir ledger is undeclared for port_25, every well of probes, ssct/A2: "
-        "declare refills (Plate reloaded / Bottle refilled, or --refilled) first")
+        "declare refills (Refilled… on the Run Experiments tab, or --refilled) first")
+
+
+def test_describe_keys_keeps_a_label_to_a_line_or_two():
+    """The undeclared notice on a rig of 192 wells: every well of a plate as
+    one phrase, more than four of them by their count, a bottle and the few
+    wells of a plate by key."""
+    wells = [f"probes/{well}" for well in ("A1", "B1", "C1", "D1", "E1", "F1")]
+    defined = dict(DEFS, **{key: {"loaded_ul": 110, "residual_ul": 5} for key in wells})
+    assert describe_keys(["port_25", *wells], defined) == "port_25, every well of probes"
+    assert describe_keys(wells[:5], defined) == "5 wells of probes"
+    assert describe_keys(wells[:4] + ["ssct/A2"], defined) == \
+        "probes/A1, probes/B1, probes/C1, probes/D1, ssct/A2"

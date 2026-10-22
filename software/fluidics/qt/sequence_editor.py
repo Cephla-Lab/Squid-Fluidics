@@ -1,7 +1,9 @@
 """The sequence editor and run display (SequencesWidget) and its
 Add-sequence dialog. Extracted from gui.py so an embedding application
 can import them; the list itself is fluidics.sequence_list, which this
-renders."""
+renders. The run display carries the rig's one reagent table -- every
+reservoir drawn from, with what the ledger says is loaded and left -- and,
+where a volume is declared, the Refilled… declaration."""
 
 import logging
 import time
@@ -17,6 +19,7 @@ from qtpy.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -33,11 +36,13 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from fluidics.control.config import available_ports
+from fluidics.control.config import available_ports, port_of
 from fluidics.errors import FluidicsError
 from fluidics.events import RunEnded, RunStarted, SequenceCompleted, SequenceStarted, plan_seconds, repeat_suffix
 from fluidics.files import atomic_write
-from fluidics.qt.support import GuiLogHandler, PostsToQtThread, WellCombo, _ask_yes_no, _hms, subscribe_until_detached
+from fluidics.qt.support import (GuiLogHandler, PostsToQtThread, WellCombo, _ask_yes_no, _hms, connect_click,
+                                 subscribe_until_detached)
+from fluidics.reservoirs import describe_keys
 from fluidics.run_log import LOGGER_NAME
 from fluidics.sequence_list import SequenceList
 from fluidics.sequences import (
@@ -261,6 +266,33 @@ class AddSequenceDialog(QDialog):
         super().accept()
 
 
+# The session's `source` for a manual job this tab started (a refill
+# declaration): the main window keeps this tab live for it and greys the
+# others, as it does for the Robot tab's own jobs.
+RUN_TAB_JOB_SOURCE = "run tab"
+
+
+def is_run_tab_job(session):
+    """Whether the job in flight is one the Run tab started: a manual job
+    the session labels RUN_TAB_JOB_SOURCE, read from the session, which
+    sets and clears its source with its kind."""
+    return session.kind == "manual" and session.source == RUN_TAB_JOB_SOURCE
+
+
+def _refill_choices(sipper, loaded_volume_ul, port_labels):
+    """{key: label} for the Refilled… picker, in the order it offers them:
+    everything, each plate (every well of it: a plate reloads as a plate),
+    each tracked bottle under the rig's own label for its port. `sipper`
+    is the rig's SipperVocabulary or None; `port_labels` the valves'
+    {port: label}, read fresh for this picker so a rename shows."""
+    choices = {"all": "all reservoirs"}
+    if sipper is not None:
+        for name in sorted(sipper.reservoirs):
+            choices[name] = f"every well of {name}"
+    for key in sorted(loaded_volume_ul or {}, key=port_of):
+        choices[key] = port_labels.get(port_of(key), key)
+    return choices
+
 
 class SequencesWidget(PostsToQtThread, QWidget):
     """Edits the sequence list and runs it through the system's session, which
@@ -271,7 +303,9 @@ class SequencesWidget(PostsToQtThread, QWidget):
     holds what the operator typed, judges each row as it goes, and
     coerces on the way out (its validated()/included(), which this
     widget's getSequences wraps); this widget paints those verdicts and
-    turns clicks into its verbs.
+    turns clicks into its verbs. Under the run display sits the rig's one
+    reagent table (the ledger's balances) and, where a volume is declared,
+    Refilled… -- the one place the GUI declares a refill (refilled).
     """
 
     def __init__(self, config, system):
@@ -422,16 +456,39 @@ class SequencesWidget(PostsToQtThread, QWidget):
         progressSection.addLayout(statusRow)
         progressSection.addWidget(self.warningLabel)
 
-        # Reagent drawn per port since the run began (manual draws show
-        # between runs). Hidden until something has been drawn.
-        self.usageTable = QTableWidget(0, 3)
-        self.usageTable.setHorizontalHeaderLabels(["Port", "Reagent", "Used (\u00b5L)"])
-        self.usageTable.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self.usageTable.verticalHeader().setVisible(False)
-        self.usageTable.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.usageTable.setMaximumHeight(120)
-        self.usageTable.setVisible(False)
-        progressSection.addWidget(self.usageTable)
+        # Every reservoir drawn from, this run or since its refill (the
+        # ledger's balances): what this run drew from each, declared volume
+        # or not, and what is loaded and left where the config declares
+        # one. Hidden until it has a row. The reagent column takes the
+        # width; the numeric ones size to their contents, so their headers
+        # show whole.
+        self.reagentsTable = QTableWidget(0, 5)
+        self.reagentsTable.setHorizontalHeaderLabels(
+            ["Reservoir", "Reagent", "Used this run (\u00b5L)", "Loaded (\u00b5L)", "Remaining (\u00b5L)"])
+        header = self.reagentsTable.horizontalHeader()
+        for column in range(self.reagentsTable.columnCount()):
+            header.setSectionResizeMode(
+                column, QHeaderView.Stretch if column == 1 else QHeaderView.ResizeToContents)
+        self.reagentsTable.verticalHeader().setVisible(False)
+        self.reagentsTable.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.reagentsTable.setMaximumHeight(160)
+        self.reagentsTable.setVisible(False)
+        progressSection.addWidget(self.reagentsTable)
+
+        # Where a volume is declared, so is its refill: the undeclared
+        # notice and Refilled…, which marks a plate (every well of it), a
+        # bottle or everything full through the manual verb, as a manual
+        # job. A rig that tracks nothing has nothing to declare.
+        self.undeclaredLabel = self.refilledButton = None
+        if self.system.devices.reservoirs.tracked:
+            self.undeclaredLabel = QLabel("")
+            self.undeclaredLabel.setWordWrap(True)
+            self.refilledButton = QPushButton("Refilled…")
+            connect_click(self.refilledButton, self.refilled)
+            declaration = QHBoxLayout()
+            declaration.addWidget(self.undeclaredLabel, 1)
+            declaration.addWidget(self.refilledButton)
+            progressSection.addLayout(declaration)
 
         layout.addLayout(progressSection)
 
@@ -441,6 +498,11 @@ class SequencesWidget(PostsToQtThread, QWidget):
         self.timer = QTimer()
         self.timer.timeout.connect(self.updateTimeRemaining)
         self.total_time = None
+        # The ledger and the session as they stand at build: a reservoir
+        # undeclared since launch is said, and a job already running greys
+        # the controls, before the first tick or state change.
+        self._renderReagents()
+        self._renderRunControls()
 
     # What the log pane keeps. Enough to cover a long run's narration
     # without holding the whole session's text in the widget -- the run
@@ -821,19 +883,79 @@ class SequencesWidget(PostsToQtThread, QWidget):
         """
         self._showTimeRemaining()
         self._renderRunControls()
-        self._renderUsage()
+        self._renderReagents()
 
-    def _renderUsage(self):
-        """The per-port figures as they stand; the ledger's per-run rows
-        carry the names, read fresh per call, so a rename shows on the
-        next tick."""
-        rows = self.system.devices.reservoirs.used_rows()
-        self.usageTable.setVisible(bool(rows))
-        self.usageTable.setRowCount(len(rows))
-        for index, (port, name, used) in enumerate(rows):
-            for column, text in enumerate((str(port), name or "",
-                                           f"{used:.0f}")):
-                self.usageTable.setItem(index, column, QTableWidgetItem(text))
+    # --- the reagents: the ledger's balances, and their declaration ---
+
+    def showEvent(self, event):
+        """A port rename (the Manual tab's Port Names) happens while the
+        rig is idle, when no tick runs: the names are read again as this
+        tab comes back into view."""
+        super().showEvent(event)
+        self._renderReagents()
+
+    def _renderReagents(self):
+        """Every reservoir drawn from, as the ledger has it now, and the
+        undeclared notice under the table; the names come with the rows,
+        read fresh per call, so a rename shows on the next tick or when the
+        tab is shown again."""
+        ledger = self.system.devices.reservoirs
+        rows = ledger.balances()
+        self.reagentsTable.setVisible(bool(rows))
+        self.reagentsTable.setRowCount(len(rows))
+        for index, (key, reagent, used, loaded, remaining) in enumerate(rows):
+            cells = (key, reagent or "", f"{used:.0f}",
+                     "" if loaded is None else f"{loaded:.0f}",
+                     "" if remaining is None else f"{remaining:.0f}")
+            for column, text in enumerate(cells):
+                self.reagentsTable.setItem(index, column, QTableWidgetItem(text))
+        if self.undeclaredLabel is not None:
+            undeclared = ledger.undeclared
+            self.undeclaredLabel.setText(
+                "" if not undeclared else
+                f"Ledger undeclared for {describe_keys(undeclared, ledger.tracked)}: "
+                "declare refills before running")
+
+    def refilled(self):
+        """Declare a reservoir full again: pick it (everything, a plate --
+        every well of it -- or a tracked bottle), hear the verb's refusal
+        if there is one, confirm, and run the refill as a manual job on
+        the session, so it waits for an idle rig like any move and the
+        run's gate reads the file it rewrites. The refusal (the tip in that
+        plate, or not known to be retracted) is said before the question:
+        a dialog after "yes" would read as a failure, not a rule."""
+        choices = _refill_choices(self._sipper,
+                                  self.config.reagent_selection.selector_valves.loaded_volume_ul,
+                                  dict(self.selectorValveSystem.get_port_names()))
+        label, ok = QInputDialog.getItem(self, "Refilled", "What is full again?",
+                                         list(choices.values()), 0, False)
+        if not ok:
+            return
+        key = next(key for key, text in choices.items() if text == label)
+        refusal = self.system.manual.refill_refusal(key)
+        if refusal:
+            QMessageBox.warning(self, "Refilled", refusal)
+            return
+        if not _ask_yes_no(self, "Refilled?", f"Mark {label} as full?"):
+            return
+        try:
+            self.system.run_manual(lambda: self.system.manual.refill(key), callbacks={
+                "on_error": lambda message: self._post_event("_refillFailed", message),
+                "on_finished": lambda: self._post_event("_refillFinished"),
+            }, source=RUN_TAB_JOB_SOURCE)
+        except RuntimeError as e:
+            QMessageBox.warning(self, "Rig busy", str(e))
+            return
+        # The session took the job before run_manual returned, and its
+        # posted state change cannot land before this does: paint now.
+        self._renderRunControls()
+
+    def _refillFailed(self, message):
+        QMessageBox.critical(self, "Refilled", f"The refill was not recorded: {message}")
+
+    def _refillFinished(self):
+        self._renderReagents()
+        self._renderRunControls()
 
     def _showTimeRemaining(self):
         """Draw the label and the bar from one session snapshot: the clock a
@@ -885,6 +1007,10 @@ class SequencesWidget(PostsToQtThread, QWidget):
                        self.duplicateButton, self.moveUpButton,
                        self.moveDownButton):
             button.setEnabled(idle)
+        if self.refilledButton is not None:
+            # A declaration is a manual job: it waits for an idle rig like
+            # any other.
+            self.refilledButton.setEnabled(idle)
 
     def pauseSequences(self):
         """Hold the run after the move in flight, or let it go on."""
@@ -1001,7 +1127,7 @@ class SequencesWidget(PostsToQtThread, QWidget):
             self.sequenceLabel.setText("0/0 sequences")
             self.highlightRow(None)
         self._renderRunControls()
-        self._renderUsage()
+        self._renderReagents()
 
     def _onRunEvent(self, event):
         # On the worker's or session's thread; the paint crosses to Qt.

@@ -1,5 +1,6 @@
 """The Robot tab, the run-time view: home, retract, reset a fault, STOP,
-"Do not lower tip", the deck map, go to well, and the reservoir table.
+"Do not lower tip", the deck map and go to well -- the stage's movement,
+and nothing of what the wells hold (the Run Experiments tab's table).
 Teaching, with the jog it needs, is a tool window opened from the Stage
 row. Every verb is a manual job through the session (one job on the rig);
 the controls freeze while ANY job runs (the session's state, not only this
@@ -12,17 +13,14 @@ and the config together, or neither; Save writes the config.
 import logging
 
 from qtpy.QtCore import Qt
-from qtpy.QtWidgets import (QCheckBox, QComboBox, QGridLayout, QGroupBox, QHBoxLayout,
-                            QHeaderView, QLabel, QMessageBox, QPushButton, QTableWidget,
-                            QTableWidgetItem, QVBoxLayout, QWidget)
+from qtpy.QtWidgets import (QCheckBox, QComboBox, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
+                            QMessageBox, QPushButton, QVBoxLayout, QWidget)
 
 from fluidics.control.config import gantry, save_config
-from fluidics.events import RunStarted, SequenceCompleted
-from fluidics.reservoirs import describe_keys
 from fluidics.vocabulary import sipper_vocabulary
 
 from .deck_map import DeckMapWidget
-from .support import PostsToQtThread, WellCombo, _ask_yes_no, connect_click, subscribe_until_detached
+from .support import PostsToQtThread, WellCombo, connect_click, subscribe_until_detached
 
 _logger = logging.getLogger(__name__)
 
@@ -63,11 +61,9 @@ class RobotControlWidget(PostsToQtThread, QWidget):
         # The embedder's switch (setControlsEnabled), kept apart from the
         # session's state so a job's end never lifts it.
         self._externallyEnabled = True
-        self._plan = ()
         detach = subscribe_until_detached(
             (system.devices.robot.moves, self._onMove),
-            (system.session.state, self._onSessionState),
-            (system.session.events, self._onRunEvent))
+            (system.session.state, self._onSessionState))
         self.destroyed.connect(detach)
         self.initUI()
         # The teach window's plate follows the Wells row's pick (a Go to well
@@ -78,7 +74,6 @@ class RobotControlWidget(PostsToQtThread, QWidget):
         self._followReservoir()
         self.lowerTipBox.setChecked(not system.devices.robot.lower_tip)
         self._paintPosition(system.devices.robot.position())
-        self.refreshReservoirs()
         # Built while a job runs (an embedder's tab), it starts frozen.
         self._paintControls()
 
@@ -91,8 +86,6 @@ class RobotControlWidget(PostsToQtThread, QWidget):
         row = QHBoxLayout()
         self.positionLabel = QLabel("")
         row.addWidget(self.positionLabel)
-        self.primedLabel = QLabel("primed this session: no")
-        row.addWidget(self.primedLabel)
         self.homeButton = self._button(row, "Home", lambda: self._run(self.manual.home_robot))
         self.retractButton = self._button(row, "Retract", lambda: self._run(self.manual.retract))
         self.resetFaultButton = self._button(row, "Reset fault", lambda: self._run(self.manual.reset_robot_faults))
@@ -184,29 +177,6 @@ class RobotControlWidget(PostsToQtThread, QWidget):
         teaching.addWidget(teach)
         self.teachWindow = _ToolWindow("Teach", teaching, parent=self)
 
-        ledger = QGroupBox("Reservoirs")
-        ledger_column = QVBoxLayout()
-        self.reservoirTable = QTableWidget(0, 3)
-        self.reservoirTable.setHorizontalHeaderLabels(["Reservoir", "Dispatched (µL)", "Remaining (µL)"])
-        # The numeric columns size to their contents (the header's label
-        # counts), the name takes the rest: at the default width the labels
-        # read "ispatched (µ".
-        header = self.reservoirTable.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.Stretch)
-        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self.reservoirTable.verticalHeader().setVisible(False)
-        self.reservoirTable.setEditTriggers(QTableWidget.NoEditTriggers)
-        ledger_column.addWidget(self.reservoirTable)
-        row = QHBoxLayout()
-        self.undeclaredLabel = QLabel("")
-        self.undeclaredLabel.setWordWrap(True)
-        row.addWidget(self.undeclaredLabel, 1)
-        self.plateReloadedButton = self._button(row, "Plate reloaded…", self.plateReloaded)
-        ledger_column.addLayout(row)
-        ledger.setLayout(ledger_column)
-        layout.addWidget(ledger)
-
         self.setLayout(layout)
 
     def _button(self, container, text, slot, *grid_pos):
@@ -295,10 +265,9 @@ class RobotControlWidget(PostsToQtThread, QWidget):
         self._paintControls()
         if not self.session.busy:
             # Whatever ran -- this tab's move, a manual draw, a run -- may
-            # have drawn from a well or declared a refill, taught a plate,
-            # or left the tip in a well (the witness is final once the job
-            # is over; a move's own publish can land before it is set).
-            self.refreshReservoirs()
+            # have taught a plate or left the tip in a well (the witness is
+            # final once the job is over; a move's own publish can land
+            # before it is set).
             robot = self.system.devices.robot
             self.deckMap.setPlacements(robot.placements)
             self._paintPosition(robot.position())
@@ -319,18 +288,6 @@ class RobotControlWidget(PostsToQtThread, QWidget):
         for control in self._controls:
             control.setEnabled(enabled)
         self.stopButton.setEnabled(busy and self._ownsJob())
-
-    def _onRunEvent(self, event):
-        # Completed, not started: a priming the operator aborted mid-way
-        # primed nothing.
-        if isinstance(event, RunStarted):
-            self._plan = event.plan
-        elif isinstance(event, SequenceCompleted) and self._plan:
-            if self._plan[event.position].sequence.get("type") == "priming":
-                self._post_event("_markPrimed")
-
-    def _markPrimed(self):
-        self.primedLabel.setText("primed this session: yes")
 
     # --- position ---
 
@@ -390,30 +347,3 @@ class RobotControlWidget(PostsToQtThread, QWidget):
             save_config(self.config)
         except Exception as e:
             QMessageBox.critical(self, "Error", f"The teaching applies for this session, but saving failed: {e}")
-
-    # --- the ledger ---
-
-    def refreshReservoirs(self):
-        ledger = self.system.devices.reservoirs
-        rows = ledger.rows()
-        self.reservoirTable.setRowCount(len(rows))
-        for r, (key, dispatched, remaining) in enumerate(rows):
-            for c, text in enumerate((key, f"{dispatched:.0f}", f"{remaining:.0f}")):
-                self.reservoirTable.setItem(r, c, QTableWidgetItem(text))
-        undeclared = ledger.undeclared
-        self.undeclaredLabel.setText(
-            "" if not undeclared else
-            f"Ledger undeclared for {describe_keys(undeclared, ledger.tracked)}: "
-            "declare refills before running")
-
-    def plateReloaded(self):
-        name = self.reservoirCombo.currentData()
-        # Said here, before the question: the verb refuses too, but a
-        # dialog after "yes" would read as a failure, not a rule.
-        refusal = self.manual.refill_refusal(name)
-        if refusal:
-            QMessageBox.warning(self, "Robot", refusal)
-            return
-        if not _ask_yes_no(self, "Plate reloaded?", f"Mark every well of {name} as full?"):
-            return
-        self._run(lambda: self.manual.refill(name))

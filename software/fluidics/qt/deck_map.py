@@ -2,7 +2,8 @@
 sipper's tip painted where the stage last published it and colored by
 whether it is retracted or lowered, the wells with a role (priming,
 clean-up) marked, and a click on a well that names the well -- never a point between
-wells, so a click can only ever send the tip to a well's centre.
+wells, so a click can only ever send the tip to a well's centre. Drawn as
+the operator faces the rig, a half turn from the stage's axes (pixel).
 
 Pure Qt over plain labware values: the Robot tab feeds it placements, a
 position, the current well and the named wells, and hears `wellClicked`.
@@ -30,9 +31,10 @@ HIT_RADIUS_PITCH = 0.45        # a click this close to a centre is that well; fa
 TEXT_BAND_PX = 20              # the state line above the plates, the legend below
 TIP_RADIUS_PX = 3.0            # the tip's dot: small, so the well under it stays visible
 
-# The mm-to-pixel transform: px/mm, the pixel of the box's low corner,
-# and the mm of that corner.
-Frame = namedtuple("Frame", "scale left bottom x0 y0")
+# The mm-to-pixel transform: px/mm, the pixel (left, bottom) the box's
+# high corner lands on, and that corner in mm -- the half turn from the
+# stage's axes puts the far corner bottom left.
+Frame = namedtuple("Frame", "scale left bottom x1 y1")
 
 
 class DeckMapWidget(QWidget):
@@ -123,10 +125,12 @@ class DeckMapWidget(QWidget):
         return [(f"{combo} well", combos[combo]) for combo in sorted(combos)]
 
     def pixel(self, x_mm, y_mm, frame=None):
-        """Deck mm to widget pixels: X to the right, Y up (the deck seen
-        from above). A paint passes the frame it computed once."""
-        scale, left, bottom, x0, y0 = frame or self._frame()
-        return left + (x_mm - x0) * scale, bottom - (y_mm - y0) * scale
+        """Deck mm to widget pixels: the deck as the operator faces it, a
+        half turn from the stage's axes, X to the left and Y down, so plate
+        1's A1 (near the stage origin) sits top right. A paint passes the
+        frame it computed once."""
+        scale, left, bottom, x1, y1 = frame or self._frame()
+        return left + (x1 - x_mm) * scale, bottom - (y1 - y_mm) * scale
 
     def wellAt(self, point):
         """The well whose centre is within the hit radius of `point` (a
@@ -135,8 +139,8 @@ class DeckMapWidget(QWidget):
 
     def _mm(self, px, py):
         """Widget pixels back to deck mm (the inverse of pixel())."""
-        scale, left, bottom, x0, y0 = self._frame()
-        return x0 + (px - left) / scale, y0 + (bottom - py) / scale
+        scale, left, bottom, x1, y1 = self._frame()
+        return x1 - (px - left) / scale, y1 - (bottom - py) / scale
 
     # --- clicks ---
 
@@ -166,7 +170,7 @@ class DeckMapWidget(QWidget):
         scale = min(width / (x1 - x0), height / (y1 - y0))
         left = (width - (x1 - x0) * scale) / 2
         bottom = TEXT_BAND_PX + height - (height - (y1 - y0) * scale) / 2
-        return Frame(scale, left, bottom, x0, y0)
+        return Frame(scale, left, bottom, x1, y1)
 
     # --- painting ---
 
@@ -199,14 +203,21 @@ class DeckMapWidget(QWidget):
         corners = [xy for _, xy in placement.corners()]
         xs, ys = [c[0] for c in corners], [c[1] for c in corners]
         pad = 0.75 * pitch
-        left, top = self.pixel(min(xs) - pad, max(ys) + pad, frame)
-        right, bottom = self.pixel(max(xs) + pad, min(ys) - pad, frame)
+        # Both corners through the transform, then sorted: the turn lands
+        # the low-mm corner right and top.
+        xa, ya = self.pixel(min(xs) - pad, max(ys) + pad, frame)
+        xb, yb = self.pixel(max(xs) + pad, min(ys) - pad, frame)
+        left, right = sorted((xa, xb))
+        top, bottom = sorted((ya, yb))
         painter.setPen(QPen(QColor("#444"), 1.2))
         painter.setBrush(QColor("#f7f7f7"))
         painter.drawRoundedRect(QRectF(left, top, right - left, bottom - top), 6, 6)
         painter.setFont(QFont("Helvetica", 9, QFont.Bold))
         painter.setPen(QPen(QColor("#222")))
-        painter.drawText(QPointF(left, top - 4), f"{name}  (dip {placement.dip_z_mm:g} mm)")
+        # Under the plate: the half turn puts the row letters along its top
+        # edge and the column numbers along its right.
+        painter.drawText(QPointF(left, bottom + 4 + painter.fontMetrics().ascent()),
+                         f"{name}  (dip {placement.dip_z_mm:g} mm)")
         painter.setPen(WELL_PEN)
         for well in geometry.wells():
             cx, cy = self.pixel(*placement.xy_mm(well), frame)

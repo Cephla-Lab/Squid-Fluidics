@@ -1,13 +1,13 @@
 """RobotControlWidget over a simulated system (spec §9): verbs as manual
 jobs, the freeze on any job, teaching through the manual verbs, clicks that
-carry no bool, the editable well picker, the reservoir table."""
+carry no bool, the editable well picker, the deck map."""
 import threading
 import time
 
 import pytest
 from qtpy.QtCore import QEvent, Qt
 from qtpy.QtTest import QTest
-from qtpy.QtWidgets import QApplication, QHeaderView
+from qtpy.QtWidgets import QApplication
 
 import gui
 from fluidics.control.config import gantry
@@ -15,7 +15,7 @@ from fluidics.errors import OperationError
 from fluidics.qt.robot_control import RobotControlWidget
 from fluidics.robot.labware import WellRef, well_key
 
-from ..conftest import HYB, PRIME, settle
+from ..conftest import HYB, settle
 from .test_gui_deck_map import _at
 
 
@@ -75,6 +75,22 @@ def test_go_to_well_runs_as_a_manual_job_and_paints_the_position(widget):
     assert w.positionLabel.text() == "x 102.50  y 10.50  z 52.00"
 
 
+def test_home_through_the_tab_lifts_the_tip_and_repaints_the_position(widget):
+    """Home is a manual job like the rest: the tip comes up out of its well
+    (no witness, retracted) and the label follows the stage's publish."""
+    w, system = widget
+    _go_to_well(w, system, "ssct", "A2")
+    robot = system.devices.robot
+    assert not robot.is_retracted
+    heard = []
+    system.session.state.subscribe(heard.append)
+    w.homeButton.click()
+    settle(system)
+    assert heard == ["manual", None], "a manual job on the session, like every verb of this tab"
+    assert robot.current_well is None and robot.is_retracted
+    assert w.positionLabel.text() == "x 0.50  y 0.50  z 0.50"
+
+
 def test_the_well_picker_takes_the_typed_well_over_the_last_pick(widget):
     w, _ = widget
     w.wellCombo.setCurrentIndex(w.wellCombo.findData("A1"))
@@ -123,7 +139,7 @@ def test_stop_is_live_for_this_tab_s_own_job_and_stops_it(widget, monkeypatch, r
 
 def _frozen(w):
     return not any(control.isEnabled() for control in
-                   (w.goToWellButton, w.jogButtons[("x", 1.0)], w.setA1Button, w.plateReloadedButton))
+                   (w.goToWellButton, w.jogButtons[("x", 1.0)], w.setA1Button))
 
 
 def test_an_embedders_freeze_outlasts_its_fluidics_run(widget):
@@ -134,8 +150,7 @@ def test_an_embedders_freeze_outlasts_its_fluidics_run(widget):
     w.setControlsEnabled(False)
     system.run([HYB])
     settle(system)
-    drawn = [w.reservoirTable.item(r, 0).text() for r in range(w.reservoirTable.rowCount())]
-    assert drawn == ["probes/A1"], "the run's end repaints the tab"
+    assert w.deckMap.currentWell == WellRef("probes", "A1"), "the run's end repaints the tab"
     assert _frozen(w) and not w.stopButton.isEnabled()
 
 
@@ -146,7 +161,7 @@ def test_the_embedder_lifts_its_freeze_once_the_rig_is_idle(widget):
     settle(system)
     assert _frozen(w)                  # the freeze held through the run's end
     w.setControlsEnabled(True)
-    assert w.goToWellButton.isEnabled() and w.setA1Button.isEnabled() and w.plateReloadedButton.isEnabled()
+    assert w.goToWellButton.isEnabled() and w.setA1Button.isEnabled()
     assert not w.stopButton.isEnabled()
 
 
@@ -176,31 +191,6 @@ def test_the_embedder_cannot_unfreeze_a_running_job_and_stop_follows_the_session
     assert w.goToWellButton.isEnabled() and not w.stopButton.isEnabled()
 
 
-def test_a_completed_priming_row_reads_primed(widget):
-    w, system = widget
-    system.run([PRIME])
-    settle(system)
-    assert w.primedLabel.text() == "primed this session: yes"
-
-
-def test_an_aborted_priming_row_primes_nothing(widget, monkeypatch, real_clock):
-    """Started is not done: a priming the operator aborted mid-way must not
-    read as primed."""
-    w, system = widget
-    started = threading.Event()
-
-    def held_priming(sequence):
-        started.set()
-        system.session.control.sleep(5)          # aborted here
-
-    monkeypatch.setattr(system.operations, "process_sequence", held_priming)
-    system.run([PRIME])
-    assert started.wait(5)
-    system.abort()
-    settle(system)
-    assert w.primedLabel.text() == "primed this session: no"
-
-
 @pytest.mark.parametrize("reservoir, typed, reference", [
     ("ssct", "A3", "ssct/A3"),          # bare: on the reservoir picked beside it
     ("probes", "ssct/A2", "ssct/A2"),   # qualified: as typed, whatever is picked
@@ -214,59 +204,6 @@ def test_go_to_well_takes_a_bare_or_a_qualified_well(widget, monkeypatch, reserv
     _go_to_well(w, system, reservoir, typed)
     assert said == [] and asked == [reference]
     assert well_key(system.devices.robot.current_well) == reference
-
-
-def test_a_click_asks_before_reloading_a_plate(widget, monkeypatch):
-    """QPushButton.clicked carries a bool; a slot that took it as its first
-    argument would skip the confirmation (Codex finding 14)."""
-    w, system = widget
-    asked = []
-    monkeypatch.setattr("fluidics.qt.robot_control._ask_yes_no", lambda *a, **k: asked.append(a) or False)
-    system.devices.reservoirs.restore({"reservoirs": {"probes/A1": {"dispatched_ul": 50}}})
-    w.plateReloadedButton.click()
-    QApplication.processEvents()
-    assert len(asked) == 1
-    assert system.devices.reservoirs.remaining("probes/A1") == 55, "declined: nothing refilled"
-
-
-def test_plate_reloaded_refuses_while_the_tip_is_in_that_plate(widget, monkeypatch):
-    """Lifting the plate the tip rests in bends the tip: the tab says so
-    before it asks, and starts no job; the other plate reloads as usual."""
-    w, system = widget
-    asked, warned = [], []
-    monkeypatch.setattr("fluidics.qt.robot_control._ask_yes_no", lambda *a, **k: asked.append(a) or True)
-    monkeypatch.setattr("fluidics.qt.robot_control.QMessageBox.warning", lambda *a, **k: warned.append(a[2]))
-    _go_to_well(w, system, "ssct", "A2")
-    system.devices.reservoirs.restore({"reservoirs": {"ssct/A1": {"dispatched_ul": 100}}})
-    w.plateReloaded()
-    QApplication.processEvents()
-    assert asked == [] and len(warned) == 1 and "ssct/A2" in warned[0] and "Retract" in warned[0]
-    assert system.devices.reservoirs.remaining("ssct/A1") == 1650, "nothing refilled"
-    w.reservoirCombo.setCurrentIndex(w.reservoirCombo.findData("probes"))
-    w.plateReloaded()
-    settle(system)
-    assert len(asked) == 1
-
-
-def test_plate_reloaded_refuses_while_the_tip_is_down_without_a_witness(widget, monkeypatch):
-    """A jog clears the witness without lifting the tip (Copilot review):
-    the tab says so before it asks, for any plate, until Retract."""
-    w, system = widget
-    asked, warned = [], []
-    monkeypatch.setattr("fluidics.qt.robot_control._ask_yes_no", lambda *a, **k: asked.append(a) or True)
-    monkeypatch.setattr("fluidics.qt.robot_control.QMessageBox.warning", lambda *a, **k: warned.append(a[2]))
-    w.jogButtons[("z", 10.0)].click()
-    settle(system)
-    robot = system.devices.robot
-    assert robot.current_well is None and not robot.is_retracted
-    w.reservoirCombo.setCurrentIndex(w.reservoirCombo.findData("probes"))
-    w.plateReloaded()
-    QApplication.processEvents()
-    assert asked == [] and len(warned) == 1 and "not known to be retracted" in warned[0]
-    system.manual.retract()
-    w.plateReloaded()
-    settle(system)
-    assert len(asked) == 1
 
 
 def test_a_jog_click_moves_the_axis_it_says(widget):
@@ -304,31 +241,6 @@ def test_a_refused_teach_is_a_dialog_and_changes_nothing(widget, monkeypatch):
     settle(system)
     assert said and "travel height" in said[0]
     assert gantry(w.config).travel_z_mm == before
-
-
-def test_the_wells_table_shows_what_was_drawn_and_a_reload_clears_it(widget, monkeypatch):
-    w, system = widget
-    monkeypatch.setattr("fluidics.qt.robot_control._ask_yes_no", lambda *a, **k: True)
-    system.devices.reservoirs.restore({"reservoirs": {"ssct/A1": {"dispatched_ul": 1000}}})
-    w.refreshReservoirs()
-    rows = {w.reservoirTable.item(r, 0).text(): w.reservoirTable.item(r, 2).text()
-            for r in range(w.reservoirTable.rowCount())}
-    assert rows["ssct/A1"] == "750"
-    w.reservoirCombo.setCurrentIndex(w.reservoirCombo.findData("ssct"))
-    w.plateReloaded()
-    settle(system)
-    assert system.devices.reservoirs.remaining("ssct/A1") == 1750
-    assert w.reservoirTable.rowCount() == 0, "the reload's finish repaints the table"
-
-
-def test_the_reservoir_table_shows_its_whole_headers(widget):
-    """"Dispatched (µL)" and "Remaining (µL)" read "ispatched (µ" at the
-    default column width: the numeric columns size to their contents and
-    the name column takes the rest, as the editor's usage table does."""
-    w, _ = widget
-    header = w.reservoirTable.horizontalHeader()
-    assert header.sectionResizeMode(0) == QHeaderView.Stretch
-    assert header.sectionResizeMode(1) == header.sectionResizeMode(2) == QHeaderView.ResizeToContents
 
 
 def test_the_map_judges_the_published_position_not_the_live_stage(widget):
@@ -402,7 +314,7 @@ def test_do_not_lower_tip_stops_go_to_well_over_the_well_and_refuses_a_run(widge
 
 
 def test_teaching_and_jog_live_in_their_own_window_and_the_map_on_the_tab(widget):
-    """The tab is the run-time view (map, go to well, reservoirs); jog and
+    """The tab is the run-time view (map, go to well); jog and
     teaching are a window the operator opens from the Stage row and closes.
     Opening it is allowed while a job runs (not a move); its controls
     freeze like every other."""
@@ -462,7 +374,9 @@ def test_teaching_moves_the_drawn_plate(widget):
     w.setA1Here()
     settle(system)
     after = w.deckMap.pixel(*system.devices.robot.placements["probes"].xy_mm("A1"))
-    assert after[0] < before[0], "A1 taught 2 mm left of where it was moves the drawn plate"
+    # Taught 1.5 mm nearer the stage origin, which the map's half turn
+    # puts to the right.
+    assert after[0] > before[0], "A1 taught nearer the stage origin moves the drawn plate"
 
 
 def test_one_job_on_the_rig_greys_the_other_tabs(main_window, plate_sipper_config, real_clock):
@@ -486,6 +400,36 @@ def test_one_job_on_the_rig_greys_the_other_tabs(main_window, plate_sipper_confi
             gate.set()
         settle(system)
         assert enabled() == {"run": True, "manual": True, "robot": True}
+
+
+def test_a_refill_from_the_run_tab_keeps_the_run_tab_live(main_window, plate_sipper_config, monkeypatch,
+                                                           real_clock):
+    """The declaration is a manual job the Run tab starts: the window must
+    not grey that tab under its own job (Qt would then switch to the next
+    tab and stay there); the other two go dead until it ends."""
+    window, system = main_window(plate_sipper_config)
+    tabs = window.tabWidget
+    tabs.setCurrentIndex(window.RUN_TAB)
+    gate = threading.Event()
+    monkeypatch.setattr(system.manual, "refill", lambda key: gate.wait(5))
+    monkeypatch.setattr("fluidics.qt.sequence_editor.QInputDialog.getItem",
+                        lambda *a, **k: ("every well of probes", True))
+    monkeypatch.setattr("fluidics.qt.sequence_editor._ask_yes_no", lambda *a, **k: True)
+
+    def enabled():
+        return {name: tabs.isTabEnabled(index) for name, index in
+                (("run", window.RUN_TAB), ("manual", window.MANUAL_TAB), ("robot", window.ROBOT_TAB))}
+
+    tabs.widget(window.RUN_TAB).refilled()
+    try:
+        QApplication.processEvents()
+        assert tabs.currentIndex() == window.RUN_TAB
+        assert enabled() == {"run": True, "manual": False, "robot": False}
+    finally:
+        gate.set()
+    settle(system)
+    assert tabs.currentIndex() == window.RUN_TAB
+    assert enabled() == {"run": True, "manual": True, "robot": True}
 
 
 @pytest.mark.parametrize("config_name, has_robot", [("plate_sipper_config", True),

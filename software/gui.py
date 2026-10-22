@@ -36,7 +36,7 @@ _logger = logging.getLogger("fluidics.gui")
 # removing them breaks the suite.
 from fluidics.qt.support import (WorkerEvent, PostsToQtThread, GuiLogHandler,  # noqa: E402,F401
                                  _ask_yes_no, _hms)
-from fluidics.qt.sequence_editor import AddSequenceDialog, SequencesWidget  # noqa: E402,F401
+from fluidics.qt.sequence_editor import AddSequenceDialog, SequencesWidget, is_run_tab_job  # noqa: E402,F401
 from fluidics.qt.manual_control import PortNamesDialog, ManualControlWidget  # noqa: E402,F401
 from fluidics.qt.robot_control import RobotControlWidget, is_robot_job  # noqa: E402,F401
 from fluidics.qt.sensor_plots import (_safe_filename_part, TimeSeriesPlotWidget,  # noqa: E402,F401
@@ -168,16 +168,18 @@ class FluidicsControlGUI(PostsToQtThread, QMainWindow):
         job on the rig: a run must not start under a manual move (the
         operations' valve turn would pass its gate and change the reagent
         under a live draw), nor a manual move under a run, nor a move from
-        one of the manual and Robot tabs under the other's. Both start
-        manual jobs; the session's source says which (the Robot tab labels
-        its own).
+        one of the manual and Robot tabs under the other's. Three tabs
+        start manual jobs -- the Manual tab's moves, the Robot tab's, and
+        the Run tab's refill declaration; the session's source says which
+        (the Robot and Run tabs label their own).
 
         Reads the session rather than the announcement it was posted
         with -- the rule for deferred subscribers, on RunSession.state."""
         kind = self.session.kind
         robot_job = is_robot_job(self.session)
-        self.tabWidget.setTabEnabled(self.RUN_TAB, kind != "manual")
-        self.tabWidget.setTabEnabled(self.MANUAL_TAB, kind != "run" and not robot_job)
+        run_job = is_run_tab_job(self.session)
+        self.tabWidget.setTabEnabled(self.RUN_TAB, kind != "manual" or run_job)
+        self.tabWidget.setTabEnabled(self.MANUAL_TAB, kind != "run" and not robot_job and not run_job)
         if self.ROBOT_TAB is not None:
             self.tabWidget.setTabEnabled(self.ROBOT_TAB, kind is None or robot_job)
 

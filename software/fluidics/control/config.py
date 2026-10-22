@@ -419,6 +419,13 @@ def port_key(port: int) -> str:
     return f"port_{port}"
 
 
+def port_of(key):
+    """The inverse of port_key: the port a `port_N` key names, or None for
+    any other key (a well's, `ssct/A1`)."""
+    name, _, number = key.partition("_")
+    return int(number) if name == "port" and number.isdigit() else None
+
+
 def gantry(config):
     """The gantry block, or None on a rig without one -- the one spelling
     of where it lives."""

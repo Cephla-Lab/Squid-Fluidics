@@ -353,14 +353,15 @@ def build_devices(config, simulation=False, on_issue=None, run_control=None,
 
         # Attached once the draws it counts can be routed: it reads the
         # valves' port and the sipper's well, and names a port's reagent
-        # as the valves do.
+        # as the valves do and a well's as the config does.
         reservoirs.attach(
             syringe_pump,
             sipper_port=None if robot is None else g.selector_valve_port,
             extract_port=config.syringe_pump.extract_port,
             current_port=selector_valves.get_current_port,
             current_well=(lambda: None) if robot is None else robot.current_well_key,
-            port_to_reagent=selector_valves.port_to_reagent)
+            port_to_reagent=selector_valves.port_to_reagent,
+            well_name=(lambda key: None) if robot is None else sipper_vocabulary(config).well_name)
     except BaseException:
         # A pump that is not found, a dead controller, a stuck valve, or a
         # Ctrl+C (an operator watching Z home) is not survivable, but the

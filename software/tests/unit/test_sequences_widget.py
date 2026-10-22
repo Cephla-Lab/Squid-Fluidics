@@ -26,15 +26,23 @@ from .test_gui_helpers import FakeSession
 from ..conftest import FLOW, TEMP
 
 
-@pytest.fixture
-def widget(qapp, flow_cell_config):
-    config = flow_cell_config
-    system = SimpleNamespace(
-        devices=SimpleNamespace(selector_valves=SimpleNamespace(
-            get_port_names=lambda: [(i, f"Port {i}") for i in range(1, 9)])),
+def fake_system(port_names):
+    """The system as this widget reads it on a rig that tracks no volume:
+    the valves' names, an idle session, a warnings channel and a ledger
+    that is the tally alone, with nothing drawn."""
+    return SimpleNamespace(
+        devices=SimpleNamespace(
+            selector_valves=SimpleNamespace(get_port_names=lambda: list(port_names)),
+            reservoirs=SimpleNamespace(tracked=(), balances=lambda: [], undeclared=[])),
         session=FakeSession(),
         warnings=Subscribers("test warnings"),
     )
+
+
+@pytest.fixture
+def widget(qapp, flow_cell_config):
+    config = flow_cell_config
+    system = fake_system([(i, f"Port {i}") for i in range(1, 9)])
     w = gui.SequencesWidget(config, system)
     yield w
     # Actually destroy it: deleteLater only queues, and a widget that is
@@ -197,11 +205,7 @@ class TestLogPane:
         """logging keeps handlers globally: one left attached would post
         to a destroyed widget, and take the process with it."""
         import logging
-        from fluidics.subscribers import Subscribers
-        system = SimpleNamespace(
-            devices=SimpleNamespace(selector_valves=SimpleNamespace(
-                get_port_names=lambda: [(1, "Port 1")])),
-            session=FakeSession(), warnings=Subscribers("test warnings"))
+        system = fake_system([(1, "Port 1")])
         logger = logging.getLogger("fluidics")
         before = len(logger.handlers)
         w = gui.SequencesWidget(flow_cell_config, system)
@@ -609,10 +613,7 @@ def _field_names(widget, row):
 
 @pytest.fixture
 def sipper_widget(qapp, plate_sipper_config):
-    system = SimpleNamespace(
-        devices=SimpleNamespace(selector_valves=SimpleNamespace(
-            get_port_names=lambda: [(1, "Port 1: sipper"), (25, "Port 25: 4x SSC")])),
-        session=FakeSession(), warnings=Subscribers("test warnings"))
+    system = fake_system([(1, "Port 1: sipper"), (25, "Port 25: 4x SSC")])
     w = gui.SequencesWidget(plate_sipper_config, system)
     yield w
     w.deleteLater()

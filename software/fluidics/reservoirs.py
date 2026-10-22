@@ -13,11 +13,13 @@ the no-air rule. The join of the pump's volume with the valves' port is
 sound by structure, not convention: the pump asks synchronously on the
 job thread, the only thread that moves valves, and the session admits one
 job at a time, so the port cannot change between the question and the
-dispatch. One charge keeps two figures: what each port has drawn since
-the run started (`used_rows`: the editor's Used table, the report's
-per-port block and the run-end log line; zeroed when a run starts, so a
-manual draw between runs stays in view until then), and what each tracked
-reservoir has dispatched since its refill (`rows`: the file's own rows).
+dispatch. One charge keeps two figures: what each reservoir has drawn
+since the run started, kept by key and summed under the valves' ports for
+`used_rows` (the report's per-port block and the run-end log line; zeroed
+when a run starts, so a manual draw between runs stays in view until
+then), and what each tracked reservoir has dispatched since its refill
+(`rows`: the file's own rows). `balances` lays the two side by side per
+reservoir: the Run tab's reagents table.
 
 A declared volume -- a key under `loaded_volume_ul`, or every well of a
 gantry's plates -- adds only a limit. For such a tracked key the ledger
@@ -43,7 +45,7 @@ import threading
 from contextlib import contextmanager
 from pathlib import Path
 
-from .control.config import gantry, port_key
+from .control.config import gantry, port_key, port_of
 from .errors import (ReservoirDrawTooLarge, ReservoirError, ReservoirInUse, ReservoirNoWell,
                      ReservoirOverdraw, ReservoirUndeclared, ReservoirWriteError)
 from .events import RunEnded, RunStarted
@@ -56,8 +58,9 @@ _logger = logging.getLogger(__name__)
 FORMAT = 2
 
 
-def _no_name(port):
-    """What a ledger attached without the valves' names calls every port."""
+def _no_name(key):
+    """What a ledger attached without the valves' or the plates' names
+    calls every reservoir."""
     return None
 
 
@@ -66,27 +69,28 @@ class ReservoirLedger:
         self._defs = {key: {"loaded_ul": int(d["loaded_ul"]), "residual_ul": int(d["residual_ul"])}
                       for key, d in definitions.items()}
         self._dispatched = {key: 0.0 for key in self._defs}
-        self._used_run = {}          # routed port -> uL drawn since the run started
+        self._used_run = {}          # reservoir key -> uL drawn since the run started
         self._path = Path(path) if path is not None else None
         self._lock = threading.Lock()
         self._lockfile = None
         self._undeclared = set() if declared else set(self._defs)
         self._sipper_port = self._extract_port = None
         self._current_port = self._current_well = None
-        self._port_to_reagent = _no_name
+        self._port_to_reagent = self._well_name = _no_name
 
     # --- wiring ---
 
     def attach(self, pump, sipper_port, extract_port, current_port, current_well,
-               port_to_reagent=_no_name):
+               port_to_reagent=_no_name, well_name=_no_name):
         """Authorize and count the pump's draws. current_port() is the valve
         system's routed port; current_well() is the sipper's well key or
         None; sipper_port is the one port whose draws come from a well;
-        port_to_reagent(port) is the valves' name for a port, or None,
-        read by used_rows."""
+        port_to_reagent(port) is the valves' name for a port and
+        well_name(key) the config's label for a well, either None, read
+        by used_rows and balances."""
         self._sipper_port, self._extract_port = sipper_port, extract_port
         self._current_port, self._current_well = current_port, current_well
-        self._port_to_reagent = port_to_reagent
+        self._port_to_reagent, self._well_name = port_to_reagent, well_name
         pump.draw_authorizers.append(self.authorize)
 
     def _route(self):
@@ -125,9 +129,8 @@ class ReservoirLedger:
                              self._remaining(key))
             # Counted last, once the draw is authorized: a refused draw, a
             # write that failed included, leaves the per-run figure as it
-            # was, with nothing to roll back. A well draw is counted under
-            # the sipper's port, the port the valves name.
-            self._used_run[port] = self._used_run.get(port, 0.0) + volume_ul
+            # was, with nothing to roll back.
+            self._used_run[key] = self._used_run.get(key, 0.0) + volume_ul
 
     # --- reading ---
 
@@ -189,12 +192,47 @@ class ReservoirLedger:
 
     def used_rows(self):
         """(port, reagent name or None, uL) per port drawn from since the
-        run started, in port order -- the one place the per-run figures
-        meet their names, read fresh here so a rename shows on the next
-        paint."""
+        run started, in port order: the per-key figures summed under the
+        ports the valves name (every well's under the sipper's), the
+        report's and the run-end log line's view. The names are read
+        fresh here, so a rename shows on the next paint."""
         with self._lock:
             used = dict(self._used_run)
-        return [(port, self._port_to_reagent(port), used[port]) for port in sorted(used)]
+        by_port = {}
+        for key, ul in used.items():
+            port = self._port_of(key)
+            by_port[port] = by_port.get(port, 0.0) + ul
+        return [(port, self._port_to_reagent(port), by_port[port]) for port in sorted(by_port)]
+
+    def balances(self):
+        """(key, reagent, used_run_ul, loaded_ul or None, remaining_ul or
+        None) for every reservoir drawn from this run or since its refill,
+        the bottles first by port number and the wells after them by key:
+        the Run tab's reagents table. The volumes are None
+        for an untracked bottle, which declares none. A bottle's reagent is
+        the valves' name for its port; a well's is the config's label for
+        it, else the sipper port's name -- read fresh, as used_rows reads
+        them."""
+        with self._lock:
+            used = dict(self._used_run)
+            touched = sorted(set(used) | {key for key, ul in self._dispatched.items() if ul},
+                             key=lambda k: (plate_of(k) is not None, port_of(k) or 0, k))
+            volumes = {key: ((self._defs[key]["loaded_ul"], self._remaining(key))
+                             if key in self._defs else (None, None))
+                       for key in touched}
+        return [(key, self._reagent(key), used.get(key, 0.0), loaded, remaining)
+                for key, (loaded, remaining) in volumes.items()]
+
+    def _port_of(self, key):
+        """The valves' port a reservoir is drawn through: a well's is the
+        sipper's."""
+        return self._sipper_port if plate_of(key) is not None else port_of(key)
+
+    def _reagent(self, key):
+        if plate_of(key) is None:
+            return self._port_to_reagent(port_of(key))
+        name = self._well_name(key)
+        return name if name is not None else self._port_to_reagent(self._sipper_port)
 
     # --- the run's boundaries (RunSession.events; the system subscribes) ---
 
@@ -375,11 +413,12 @@ class ReservoirLedger:
 
 
 def describe_keys(keys, defined):
-    """`keys` as a message names them: a plate every one of whose wells is
-    among them as "every well of <plate>", every other key as it is (a
-    bottle, the wells of a plate partly among them), in key order.
-    `defined` is every key the ledger tracks: it says what a plate's wells
-    are."""
+    """`keys` as a message names them, in key order: a plate every one of
+    whose wells is among them as "every well of <plate>", one with more
+    than four of its wells among them by their count ("<n> wells of
+    <plate>": a label stays a line or two on a rig of 192 wells), every
+    other key as it is (a bottle, the few wells of a plate). `defined` is
+    every key the ledger tracks: it says what a plate's wells are."""
     keys = set(keys)
     plates = {}
     for key in defined:
@@ -388,9 +427,14 @@ def describe_keys(keys, defined):
             plates.setdefault(plate, set()).add(key)
     named = []
     for plate, wells in plates.items():
-        if wells <= keys:
-            keys -= wells
+        among = wells & keys
+        if among == wells:
             named.append((plate, f"every well of {plate}"))
+        elif len(among) > 4:
+            named.append((plate, f"{len(among)} wells of {plate}"))
+        else:
+            continue
+        keys -= wells
     named.extend((key, key) for key in keys)
     return ", ".join(text for _, text in sorted(named))
 
@@ -399,7 +443,7 @@ def undeclared_message(undeclared, defined):
     """The refusal of a draw, or of a run at time zero, while anything
     tracked is undeclared."""
     return ("the reservoir ledger is undeclared for " + describe_keys(undeclared, defined)
-            + ": declare refills (Plate reloaded / Bottle refilled, or --refilled) first")
+            + ": declare refills (Refilled… on the Run Experiments tab, or --refilled) first")
 
 
 def _sync_directory(directory):

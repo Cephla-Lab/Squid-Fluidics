@@ -14,7 +14,6 @@ from qtpy.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -77,18 +76,6 @@ class PortNamesDialog(QDialog):
         super().accept()
 
 
-def _pick_bottle(parent, keys):
-    """Ask which tracked bottle was refilled. `keys` maps each tracked port
-    key to its label; returns the key picked, or None on Cancel."""
-    labels = list(keys.values())
-    label, ok = QInputDialog.getItem(parent, "Bottle refilled",
-                                     "Which bottle is full again?", labels, 0, False)
-    if not ok:
-        return None
-    return next((key for key, text in keys.items() if text == label), None)
-
-
-
 class ManualControlWidget(PostsToQtThread, QWidget):
     """The operator's hand on the rig, one move at a time -- see _run."""
 
@@ -99,25 +86,14 @@ class ManualControlWidget(PostsToQtThread, QWidget):
         self.session = system.session
         self.manual = system.manual
         self._controls = []         # everything _run disables while a move runs
-        # The tracked bottles (a declared loaded volume), robot or not:
-        # their remaining volumes show here and their refills are declared
-        # here (spec §7, §9). None declared: the tab as it was.
-        self._ledger = system.devices.reservoirs
-        loaded = config.reagent_selection.selector_valves.loaded_volume_ul or {}
-        self._bottles = sorted(loaded)
-        self._bottleNameLabels = {}
-        self._remainingLabels = {}
 
         self.progress_timer = QTimer(self)
         self.progress_timer.timeout.connect(self.updateProgress)
         # The plunger bar paints what the pump publishes after each of its
-        # own readings; the GUI thread never touches the serial line. The
-        # session going idle repaints the bottles: a run, or another tab's
-        # move, may have drawn from one. Detached on destroyed: an embedded
-        # widget must not outlive itself.
+        # own readings; the GUI thread never touches the serial line.
+        # Detached on destroyed: an embedded widget must not outlive itself.
         detach = subscribe_until_detached(
-            (system.devices.syringe_pump.held_volume, self._onHeldVolume),
-            (system.session.state, self._onSessionState))
+            (system.devices.syringe_pump.held_volume, self._onHeldVolume))
         self.destroyed.connect(detach)
 
         self.initUI()
@@ -136,21 +112,11 @@ class ManualControlWidget(PostsToQtThread, QWidget):
         self.valveCombo.currentIndexChanged.connect(self.openValve)
         valveLayout.addWidget(self.valveCombo)
         self._controls.append(self.valveCombo)
-        if self._bottles:
-            # The routed port's bottle, blank on an untracked port.
-            self.routedRemainingLabel = QLabel("")
-            valveLayout.addWidget(self.routedRemainingLabel)
         self.portNamesButton = QPushButton("Port Names…")
         self.portNamesButton.clicked.connect(self.editPortNames)
         valveLayout.addWidget(self.portNamesButton)
         self._controls.append(self.portNamesButton)
-        if self._bottles:
-            valveRows = QVBoxLayout()
-            valveRows.addLayout(valveLayout)
-            valveRows.addLayout(self._bottleRow())
-            valveGroupBox.setLayout(valveRows)
-        else:
-            valveGroupBox.setLayout(valveLayout)
+        valveGroupBox.setLayout(valveLayout)
         mainLayout.addWidget(valveGroupBox)
 
         if self.config.application == "Open Chamber":
@@ -252,25 +218,6 @@ class ManualControlWidget(PostsToQtThread, QWidget):
         mainLayout.addWidget(syringeGroupBox)
 
         self.setLayout(mainLayout)
-        self.refreshRemaining()
-
-    def _bottleRow(self):
-        """Every tracked bottle's remaining volume, and the declaration.
-        Painted by refreshRemaining."""
-        row = QHBoxLayout()
-        row.setContentsMargins(5, 0, 5, 5)
-        row.addWidget(QLabel("Remaining (\u00b5L):"))
-        for key in self._bottles:
-            self._bottleNameLabels[key] = QLabel(key)
-            self._remainingLabels[key] = QLabel("")
-            row.addWidget(self._bottleNameLabels[key])
-            row.addWidget(self._remainingLabels[key])
-        row.addStretch()
-        self.bottleRefilledButton = QPushButton("Bottle refilled…")
-        self.bottleRefilledButton.clicked.connect(self.bottleRefilled)
-        row.addWidget(self.bottleRefilledButton)
-        self._controls.append(self.bottleRefilledButton)
-        return row
 
     # --- the controls: each picks a verb and hands it to _run ---
 
@@ -325,14 +272,6 @@ class ManualControlWidget(PostsToQtThread, QWidget):
 
     def emptySyringe(self):
         self._run(lambda: self.manual.empty_to_waste(on_started=self._started))
-
-    def bottleRefilled(self):
-        """Declare a tracked bottle full again -- a manual job, like a move:
-        the ledger rewrites its file, and a run's gate reads it."""
-        key = _pick_bottle(self, self._bottleNames())
-        if key is None:
-            return
-        self._run(lambda: self.manual.refill(key))
 
     def startDiscPump(self):
         seconds = self.pumpInput.value()
@@ -389,7 +328,6 @@ class ManualControlWidget(PostsToQtThread, QWidget):
         if self.progress_timer.isActive():
             self._settleBar(100)
         self.setControlsEnabled(True)
-        self.refreshRemaining()
 
     def _settleBar(self, value):
         self.progress_timer.stop()
@@ -419,46 +357,9 @@ class ManualControlWidget(PostsToQtThread, QWidget):
     def _handle_held_volume(self, volume_ul):
         self.plungerPositionBar.setValue(int(volume_ul))
 
-    # --- the tracked bottles ---
-
-    def _onSessionState(self, kind):
-        # On the session's thread; the paint crosses to Qt and reads the
-        # session when it lands (RunSession.state says why).
-        self._post_event('_handle_session_state')
-
-    def _handle_session_state(self):
-        if not self.session.busy:
-            self.refreshRemaining()
-
-    def refreshRemaining(self):
-        """Repaint every tracked bottle's remaining volume from the ledger,
-        and the routed port's beside the source-port combo (blank when that
-        port is not tracked). A read of the ledger, no device I/O."""
-        if not self._bottles:
-            return
-        names = self._bottleNames()
-        for key, label in self._remainingLabels.items():
-            self._bottleNameLabels[key].setText(names[key])
-            label.setText(f"{self._ledger.remaining(key):.0f}")
-        port = self.valveCombo.currentData()
-        key = None if port is None else port_key(port)
-        self.routedRemainingLabel.setText(
-            f"{self._ledger.remaining(key):.0f} \u00b5L left" if key in self._remainingLabels else "")
-
-    def _bottleNames(self):
-        """{key: label} for the tracked bottles, read fresh: names live on
-        the config, and a rename shows at the next paint (editPortNames)."""
-        names = {port_key(port): label for port, label in self.manual.port_names()}
-        return {key: names.get(key, key) for key in self._bottles}
-
-    def remainingLabel(self, key):
-        """The remaining volume shown for tracked bottle `key`, as painted."""
-        return self._remainingLabels[key].text()
-
     def showEvent(self, event):
         super().showEvent(event)
         self._showCurrentPort()
-        self.refreshRemaining()
 
     def _showCurrentPort(self):
         """Show where the valves are; do not move them there.
