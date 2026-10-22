@@ -13,12 +13,15 @@ the not-yet-run entries, whatever the finished ones actually took.
 estimate_run_time wraps the plan for callers that only price.
 """
 
+import contextlib
 import logging
 
 from .control._def import CMD_SET
 from .devices import build_devices, build_operations
-from .errors import RunControl
+from .errors import (OperationError, ReservoirError, ReservoirOverdraw, ReservoirShortfall,
+                     ReservoirUndeclared, RunControl)
 from .events import PlanEntry
+from .reservoirs import undeclared_message
 from .sequences import sequence_label
 
 _logger = logging.getLogger(__name__)
@@ -97,7 +100,11 @@ def _op_seconds(pump, op, held_ul):
     return abs(after - held_ul) / pump.get_flow_rate(op[-1]) * 60, after
 
 
-def _replay(config, sequences):
+@contextlib.contextmanager
+def _twin(config):
+    """The simulated twin of `config` the plan's replay prices on and the
+    reservoir gate checks on -- its devices, its operations and the metered
+    control they wait on -- closed on the way out."""
     control = _MeteredRunControl()
     # Without the flow sensors: an estimate is the pump's time, which a
     # sensor adds nothing to, and a simulated one starts a publish thread
@@ -112,7 +119,13 @@ def _replay(config, sequences):
     devices = build_devices(config, simulation=True, run_control=control,
                             instant=True)
     try:
-        ops = build_operations(config, devices)
+        yield devices, build_operations(config, devices), control
+    finally:
+        devices.close()
+
+
+def _replay(config, sequences):
+    with _twin(config) as (devices, ops, control):
         pump = devices.syringe_pump
         sent = devices.controller.sent
         # Bring-up (the homing moves, the initial CLEAR) is not the run's
@@ -154,8 +167,6 @@ def _replay(config, sequences):
                 durations.append(total - previous)
                 previous = total
         return durations
-    finally:
-        devices.close()
 
 
 def check_reservoirs(entries, config, snapshot):
@@ -168,27 +179,19 @@ def check_reservoirs(entries, config, snapshot):
     ReservoirUndeclared, before any replay, when anything tracked is
     undeclared. Separate from plan_run, which prices on a full ledger and
     never raises (spec §7)."""
-    from .errors import (OperationError, ReservoirError, ReservoirOverdraw, ReservoirShortfall,
-                         ReservoirUndeclared)
-    from .reservoirs import undeclared_message
     if snapshot.get("undeclared"):
         raise ReservoirUndeclared(undeclared_message(snapshot["undeclared"],
                                                      snapshot.get("definitions", {})))
-    config = config.model_copy(update={"flow_sensors": None})
-    devices = build_devices(config, simulation=True, run_control=_MeteredRunControl(),
-                            instant=True)
-    try:
+    with _twin(config) as (devices, ops, _):
         devices.reservoirs.restore(snapshot)
-        ops = build_operations(config, devices)
         for entry in entries:
             if entry.sequence["type"] == "set_temperature":
                 continue
             try:
                 ops.process_sequence(entry.sequence)
             except ReservoirOverdraw as e:
-                d = snapshot["definitions"][e.key]
-                raise ReservoirShortfall(e.key, e.needed_ul, e.remaining_ul,
-                                         d["loaded_ul"] - d["residual_ul"], entry.label) from e
+                raise ReservoirShortfall(e.key, e.needed_ul, e.remaining_ul, e.usable_ul,
+                                         entry.label) from e
             except ReservoirError as e:
                 # A refill would not help: its own words and remedy, and
                 # the step that met it.
@@ -198,8 +201,6 @@ def check_reservoirs(entries, config, snapshot):
                 raise OperationError(f"{entry.label}: the reservoir check could not replay "
                                      f"this step ({e})") from e
         return devices.reservoirs.rows()
-    finally:
-        devices.close()
 
 
 def _at_step(error, label):

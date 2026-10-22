@@ -21,16 +21,14 @@ class MERFISHOperations():
         # The sipper's robot, None on a rig without a gantry (spec §5), and
         # the reservoir ledger, None only when the operations are built by
         # hand (fixtures, embedders): build_devices builds one on every rig.
-        # The vocabulary spells the wells.
+        # The gantry block goes with the robot: its port is read here, its
+        # wells and push volume where they are used. The vocabulary spells
+        # the wells.
         self.robot = robot
         self.reservoirs = reservoirs
-        g = gantry(config) if robot is not None else None
-        self.sipper_port = g.selector_valve_port if g is not None else None
-        self.priming_well = g.priming_well if g is not None else None
-        self.clean_up_well = g.clean_up_well if g is not None else None
-        self.push_volume_ul = g.push_volume_ul if g is not None else None
+        self._gantry = gantry(config) if robot is not None else None
+        self.sipper_port = None if self._gantry is None else self._gantry.selector_valve_port
         self.vocabulary = sipper_vocabulary(config)
-        self._op = None
         # The run's cancellation signal, borrowed once here rather than read
         # off whichever device is in scope. build_operations passes the
         # DeviceSet's, which every device shares.
@@ -84,14 +82,14 @@ class MERFISHOperations():
             self.push(sequence['flow_rate'], sequence['well'],
                       dip_cycles=sequence.get('dip_cycles') or 0)
         elif seq_type in ("priming", "clean_up"):
-            self._op = seq_type
             self.priming_or_clean_up(
                 sequence['fluidic_port'],
                 sequence['flow_rate'],
                 sequence['volume'],
                 sequence.get('use_ports'),
                 well=sequence.get('well'),
-                sipper_well=sequence.get('sipper_well'))
+                sipper_well=sequence.get('sipper_well'),
+                clean_up=(seq_type == "clean_up"))
         elif seq_type == "set_temperature":
             sequence_utils.set_temperature(self.tc, sequence['temperature'],
                                            self.run_control)
@@ -167,15 +165,17 @@ class MERFISHOperations():
         order, the dips, the dump rule, the draw guard and the wrapper."""
         if self.robot is None:
             raise OperationError("push: this rig has no sipper")
-        self.flow_reagent(self.sipper_port, flow_rate, self.push_volume_ul, None,
+        self.flow_reagent(self.sipper_port, flow_rate, self._gantry.push_volume_ul, None,
                           well=well, dip_cycles=dip_cycles)
 
-    def priming_or_clean_up(self, port, flow_rate, volume, use_ports=None, well=None, sipper_well=None):
+    def priming_or_clean_up(self, port, flow_rate, volume, use_ports=None, well=None, sipper_well=None,
+                            clean_up=False):
         """
         Fill the tubings from reagents to selector valves with the corresponding reagents. Finally, fill the tubings before
         syringe pump with {volume} of the reagent from {port}.
         This method should work for both priming and cleaning. For priming, use a wash buffer for {port}; for cleaning, use water
-        for all ports.
+        for all ports. On a sipper rig, `clean_up` picks the well the sipper's port is primed from when
+        `sipper_well` names none: the config's clean-up well rather than its priming well.
         """
         # A use_ports that leaves out the sipper's port is refused here, as
         # at time zero, before the pump or a valve moves: the sipper is never
@@ -199,7 +199,7 @@ class MERFISHOperations():
                 if i == self.sipper_port:
                     # The sipper's port is primed from a well: the configured
                     # one for this step type, or the row's override (D7).
-                    default = self.priming_well if self._op == "priming" else self.clean_up_well
+                    default = self._gantry.clean_up_well if clean_up else self._gantry.priming_well
                     self._select(i, sipper_well or default, volume_to_port)
                 else:
                     self.sv.open_port(i)

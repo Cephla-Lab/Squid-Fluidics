@@ -8,7 +8,7 @@ import json
 
 from fluidics.events import RunEnded
 
-from ..conftest import hears, wait_until
+from ..conftest import HYB, hears, wait_until
 from .conftest import FLOW_CELL_STEP
 
 
@@ -27,14 +27,9 @@ class TestRunReports:
         assert report["reagent_used_ul"], "the ledger's totals belong in it"
 
 
-def test_the_report_carries_the_reservoirs(plate_sipper_config, instant_devices, tmp_path, real_clock):
-    from fluidics.system import FluidicsSystem
-    system = FluidicsSystem(plate_sipper_config, instant_devices(plate_sipper_config), report_dir=tmp_path)
-    try:
-        system.run([{"type": "flow_reagent", "fluidic_port": 1, "well": "A1", "flow_rate": 2000, "volume": 100}])
-        assert system.wait(5) and system.reports.wait(5)
-        [path] = list(tmp_path.glob("run-*.json"))
-        report = json.loads(path.read_text())
-        assert {"key": "probes/A1", "dispatched_ul": 100, "remaining_ul": 5} in report["reservoirs"]
-    finally:
-        assert system.close() == []
+def test_the_report_carries_the_reservoirs(plate_sipper_system, real_clock, tmp_path):
+    plate_sipper_system.run([HYB])
+    assert plate_sipper_system.wait(5) and plate_sipper_system.reports.wait(5)
+    [path] = list(tmp_path.glob("run-*.json"))
+    report = json.loads(path.read_text())
+    assert {"key": "probes/A1", "dispatched_ul": 100, "remaining_ul": 5} in report["reservoirs"]

@@ -18,10 +18,11 @@ from qtpy.QtWidgets import (QCheckBox, QComboBox, QGridLayout, QGroupBox, QHBoxL
 
 from fluidics.control.config import gantry, save_config
 from fluidics.events import RunStarted, SequenceCompleted
+from fluidics.reservoirs import describe_keys
 from fluidics.vocabulary import sipper_vocabulary
 
 from .deck_map import DeckMapWidget
-from .support import PostsToQtThread, _ask_yes_no, subscribe_until_detached
+from .support import PostsToQtThread, WellCombo, _ask_yes_no, connect_click, subscribe_until_detached
 
 _logger = logging.getLogger(__name__)
 
@@ -32,35 +33,12 @@ JOG_STEPS_MM = (0.1, 1.0, 10.0)
 ROBOT_JOB_SOURCE = "robot"
 
 
-class WellCombo(QComboBox):
-    """An editable well picker whose value is what the operator sees: the
-    typed text, or the picked item's well. QComboBox.currentData() keeps the
-    last picked item while the text says something else, so it is never
-    read here."""
-
-    def __init__(self):
-        super().__init__()
-        self.setEditable(True)
-        self.setInsertPolicy(QComboBox.NoInsert)
-
-    def fill(self, wells):
-        """`wells`: [(well, label)] as SipperVocabulary.well_names gives them."""
-        self.clear()
-        for well, label in wells:
-            self.addItem(label, well)
-
-    def value(self):
-        text = self.currentText().strip()
-        index = self.findText(text)
-        if index >= 0:
-            return self.itemData(index)
-        return text.split(":")[0].strip()
-
-
-def connect_click(button, slot):
-    """`clicked` carries a `checked` bool; a slot with defaulted arguments
-    would take it as its first one. The wrapper drops it."""
-    button.clicked.connect(lambda _checked=False, slot=slot: slot())
+def is_robot_job(session):
+    """Whether the job in flight is one the Robot tab started: a manual job
+    the session labels ROBOT_JOB_SOURCE. The one spelling of the rule, for
+    this tab's STOP and the main window's tabs; read from the session,
+    which sets and clears its source with its kind."""
+    return session.kind == "manual" and session.source == ROBOT_JOB_SOURCE
 
 
 class _ToolWindow(QWidget):
@@ -269,7 +247,7 @@ class RobotControlWidget(PostsToQtThread, QWidget):
         the same manual job the button starts."""
         self.reservoirCombo.setCurrentIndex(self.reservoirCombo.findData(reservoir))
         self.wellCombo.setCurrentText(well)
-        self._run(lambda: self.manual.go_to_well(f"{reservoir}/{well}"))
+        self.goToWell()
 
     def stopMove(self):
         """The session's abort, for this tab's own move: a job from another
@@ -278,9 +256,7 @@ class RobotControlWidget(PostsToQtThread, QWidget):
             self.session.abort()
 
     def _ownsJob(self):
-        """Whether the job in flight is a move this tab started: read from
-        the session, which sets and clears its source with its kind."""
-        return self.session.kind == "manual" and self.session.source == ROBOT_JOB_SOURCE
+        return is_robot_job(self.session)
 
     def _run(self, verb):
         """Hand one verb to the session, off the GUI thread, as the manual
@@ -427,22 +403,16 @@ class RobotControlWidget(PostsToQtThread, QWidget):
         undeclared = ledger.undeclared
         self.undeclaredLabel.setText(
             "" if not undeclared else
-            f"Ledger undeclared for {len(undeclared)} reservoirs ({', '.join(undeclared[:4])}"
-            f"{', …' if len(undeclared) > 4 else ''}): declare refills before running")
+            f"Ledger undeclared for {describe_keys(undeclared, ledger.tracked)}: "
+            "declare refills before running")
 
     def plateReloaded(self):
         name = self.reservoirCombo.currentData()
-        robot = self.system.devices.robot
-        well = robot.current_well
         # Said here, before the question: the verb refuses too, but a
         # dialog after "yes" would read as a failure, not a rule.
-        if well is not None and well.reservoir == name:
-            QMessageBox.warning(self, "Robot", f"The sipper's tip is in {well.reservoir}/{well.well}: "
-                                               f"Retract before reloading {name}.")
-            return
-        if well is None and not robot.is_retracted:
-            QMessageBox.warning(self, "Robot", "The sipper's tip is not known to be retracted: "
-                                               f"Retract before reloading {name}.")
+        refusal = self.manual.refill_refusal(name)
+        if refusal:
+            QMessageBox.warning(self, "Robot", refusal)
             return
         if not _ask_yes_no(self, "Plate reloaded?", f"Mark every well of {name} as full?"):
             return

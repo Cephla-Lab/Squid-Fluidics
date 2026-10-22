@@ -40,13 +40,16 @@ import math
 import numbers
 import os
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 
-from .control.config import port_key
+from .control.config import gantry, port_key
 from .errors import (ReservoirDrawTooLarge, ReservoirError, ReservoirInUse, ReservoirNoWell,
                      ReservoirOverdraw, ReservoirUndeclared, ReservoirWriteError)
 from .events import RunEnded, RunStarted
 from .files import atomic_write
+from .robot.labware import WellRef, plate_of, well_key
+from .run_log import get_default_log_directory
 
 _logger = logging.getLogger(__name__)
 
@@ -116,14 +119,8 @@ class ReservoirLedger:
             if volume_ul == 0:
                 return      # no draw at all: nothing to count, charge or write
             if key in self._defs:
-                self._dispatched[key] += volume_ul
-                try:
-                    self._write()
-                except Exception as e:
-                    self._dispatched[key] -= volume_ul
-                    raise ReservoirWriteError(
-                        f"the reservoir ledger could not be written ({e}); the draw from {key} "
-                        "was not started") from e
+                with self._committed(f"the draw from {key} was not started"):
+                    self._dispatched[key] += volume_ul
                 _logger.info("%s: %.0f uL dispatched, %.0f uL left", key, volume_ul,
                              self._remaining(key))
             # Counted last, once the draw is authorized: a refused draw, a
@@ -182,7 +179,7 @@ class ReservoirLedger:
         if volume_ul > usable:
             raise ReservoirDrawTooLarge(key, volume_ul, usable)
         if volume_ul > self._remaining(key):
-            raise ReservoirOverdraw(key, volume_ul, self._remaining(key))
+            raise ReservoirOverdraw(key, volume_ul, self._remaining(key), usable)
 
     def rows(self):
         """(key, dispatched_ul, remaining_ul) for every touched reservoir."""
@@ -254,26 +251,36 @@ class ReservoirLedger:
         again, and declared, once the file says so. Like a draw, a refill
         that cannot be written changes nothing (ReservoirWriteError)."""
         with self._lock:
-            keys = ([k for k in self._defs if key == "all" or k == key
-                     or k.startswith(key + "/")])
+            # A bottle key has no plate (plate_of is None), so a key that is
+            # not a string -- None -- would match every bottle below.
+            if not isinstance(key, str):
+                raise ValueError(f"nothing to refill named {key!r}")
+            keys = [k for k in self._defs if key == "all" or k == key or plate_of(k) == key]
             if not keys:
                 raise ValueError(f"nothing to refill named {key!r}")
-            balances = {k: self._dispatched[k] for k in keys}
-            undeclared = set(self._undeclared)
-            for k in keys:
-                self._dispatched[k] = 0.0
-                self._undeclared.discard(k)
-            try:
-                self._write()
-            except Exception as e:
-                self._dispatched.update(balances)
-                self._undeclared = undeclared
-                raise ReservoirWriteError(
-                    f"the reservoir ledger could not be written ({e}); the refill of {key!r} "
-                    "was not recorded") from e
+            with self._committed(f"the refill of {key!r} was not recorded"):
+                for k in keys:
+                    self._dispatched[k] = 0.0
+                    self._undeclared.discard(k)
             _logger.info("Refilled: %s", ", ".join(keys))
 
     # --- the disk ---
+
+    @contextmanager
+    def _committed(self, what):
+        """A change to the balances or the undeclared set that stands only
+        once the file holds it: the body changes them, the file is written
+        on the way out, and a write that fails puts both back and raises
+        ReservoirWriteError ending in `what`. Called with _lock held."""
+        balances, undeclared = dict(self._dispatched), set(self._undeclared)
+        yield
+        try:
+            self._write()
+        except Exception as e:
+            self._dispatched.update(balances)
+            self._undeclared = undeclared
+            raise ReservoirWriteError(
+                f"the reservoir ledger could not be written ({e}); {what}") from e
 
     def _write(self):
         if self._path is None:
@@ -376,8 +383,8 @@ def describe_keys(keys, defined):
     keys = set(keys)
     plates = {}
     for key in defined:
-        plate, slash, _ = key.partition("/")
-        if slash:
+        plate = plate_of(key)
+        if plate is not None:
             plates.setdefault(plate, set()).add(key)
     named = []
     for plate, wells in plates.items():
@@ -418,13 +425,7 @@ def _acquire_lock(path):
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     handle = open(lock_path, "a+")
     try:
-        if os.name == "nt":
-            import msvcrt
-            handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _flock(handle, acquire=True)
     except OSError:
         handle.close()
         raise ReservoirInUse(f"the reservoir ledger {path} is in use by another process "
@@ -434,30 +435,34 @@ def _acquire_lock(path):
 
 def _release_lock(handle):
     try:
-        if os.name == "nt":
-            import msvcrt
-            handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        _flock(handle, acquire=False)
     finally:
         handle.close()
 
 
+def _flock(handle, acquire):
+    """Take (without waiting) or release the one-byte advisory lock on
+    `handle`, the platform's way; OSError when another process holds it."""
+    if os.name == "nt":
+        import msvcrt
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK if acquire else msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(handle.fileno(), (fcntl.LOCK_EX | fcntl.LOCK_NB) if acquire else fcntl.LOCK_UN)
+
+
 def default_ledger_path(config_path):
-    """Beside the run reports, named by a hash of the config's absolute path,
-    so two rigs on one machine never share a ledger."""
-    from .reports import default_report_directory
+    """Under the log directory, beside the run reports, named by a hash of
+    the config's absolute path, so two rigs on one machine never share a
+    ledger."""
     digest = hashlib.sha1(os.path.abspath(config_path).encode()).hexdigest()[:12]
-    return default_report_directory().parent / "reservoirs" / f"{digest}.json"
+    return get_default_log_directory() / "reservoirs" / f"{digest}.json"
 
 
 def reservoir_definitions(config):
     """Every reservoir with a declared volume: tracked bottles by port key,
-    every well of every plate by `reservoir/well`."""
-    from .control.config import gantry
-    from .robot.labware import PlateGeometry
+    every well of every plate by its well_key (`reservoir/well`)."""
     sv = config.reagent_selection.selector_valves
     defs = {}
     for key, loaded in (sv.loaded_volume_ul or {}).items():
@@ -467,7 +472,7 @@ def reservoir_definitions(config):
     if g is not None:
         for r in g.reservoirs.values():
             overrides = r.loaded_ul_by_well or {}
-            for well in PlateGeometry.from_well_count(r.number_of_wells).wells():
-                defs[f"{r.name}/{well}"] = {"loaded_ul": overrides.get(well, r.loaded_ul),
-                                            "residual_ul": r.residual_ul}
+            for well in r.geometry.wells():
+                defs[well_key(WellRef(r.name, well))] = {
+                    "loaded_ul": overrides.get(well, r.loaded_ul), "residual_ul": r.residual_ul}
     return defs

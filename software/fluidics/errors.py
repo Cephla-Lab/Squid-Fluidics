@@ -64,9 +64,13 @@ class ReservoirError(FluidicsError):
 
 
 class ReservoirOverdraw(ReservoirError):
-    def __init__(self, key, needed_ul, remaining_ul):
+    """A draw the reservoir cannot supply now; usable_ul is what a full one
+    gives, carried for the gate's verdict (ReservoirShortfall)."""
+
+    def __init__(self, key, needed_ul, remaining_ul, usable_ul):
         super().__init__(f"{key}: {needed_ul:.0f} uL needed, {remaining_ul:.0f} uL left")
         self.key, self.needed_ul, self.remaining_ul = key, needed_ul, remaining_ul
+        self.usable_ul = usable_ul
 
 
 class ReservoirDrawTooLarge(ReservoirError):

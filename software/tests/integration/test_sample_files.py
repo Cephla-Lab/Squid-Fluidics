@@ -103,10 +103,9 @@ class TestQuickstartRunsEndToEnd:
         assert len(plan) == sum(s.get("repeat", 1) for s in included)
 
 
-def test_the_plate_sipper_samples_load_validate_and_run(tmp_path):
+def test_the_plate_sipper_samples_load_validate_and_run(tmp_path, instant_devices):
     """The documented pairing runs end to end on an instant simulated rig
     under the fake clock (the round has a 20-minute incubation)."""
-    from fluidics.devices import build_devices
     from fluidics.events import RunEnded, SequenceCompleted
     from fluidics.sequences import validate_sequences
     from fluidics.system import FluidicsSystem
@@ -115,10 +114,7 @@ def test_the_plate_sipper_samples_load_validate_and_run(tmp_path):
     sequences = get_included_sequences(load_sequences(
         str(SOFTWARE / "sample_sequences" / "seqfish-plate-sipper.yaml")))
     validate_sequences(sequences, config)
-    devices = build_devices(config, simulation=True, instant=True)
-    for sensor in devices.flow_sensors:
-        sensor.close()
-    with FluidicsSystem(config, devices, report_dir=tmp_path) as system:
+    with FluidicsSystem(config, instant_devices(config), report_dir=tmp_path) as system:
         ended = hears(system.session.events, RunEnded)
         completed = hears(system.session.events, SequenceCompleted)
         system.run(sequences)

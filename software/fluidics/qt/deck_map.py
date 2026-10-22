@@ -9,22 +9,30 @@ position, the current well and the named wells, and hears `wellClicked`.
 It knows nothing of the robot, the session or the bus; nothing here polls.
 """
 
+from collections import namedtuple
+
 from qtpy.QtCore import QPointF, QRectF, QSize, Qt, Signal
 from qtpy.QtGui import QColor, QFont, QPainter, QPen
 from qtpy.QtWidgets import QSizePolicy, QWidget
 
-from fluidics.robot.labware import AXIS_DIRECTIONS, WellRef
+from fluidics.robot.labware import AXIS_DIRECTIONS, WellRef, well_key
 
 # The colors: the named wells, and the tip in each of its states.
 ROLE_COLORS = {"priming": QColor("#4a90e2"), "clean-up": QColor("#9b9b9b")}
 TIP_RETRACTED = QColor("#2e8b57")
 TIP_LOWERED = QColor("#d0021b")
 TIP_UNKNOWN = QColor("#e0a800")
+WELL_PEN = QPen(QColor("#999"), 0.8)       # every well's rim
+WELL_EMPTY = QColor("#ffffff")             # a well with no role
 
 WELL_RADIUS_PITCH = 0.36       # a 6.4 mm well on a 9 mm pitch
 HIT_RADIUS_PITCH = 0.45        # a click this close to a centre is that well; farther is nothing
 TEXT_BAND_PX = 20              # the state line above the plates, the legend below
 TIP_RADIUS_PX = 3.0            # the tip's dot: small, so the well under it stays visible
+
+# The mm-to-pixel transform: px/mm, the pixel of the box's low corner,
+# and the mm of that corner.
+Frame = namedtuple("Frame", "scale left bottom x0 y0")
 
 
 class DeckMapWidget(QWidget):
@@ -86,10 +94,9 @@ class DeckMapWidget(QWidget):
         x, y, z = self._position
         if self._retracted:
             over = self.wellAtXY(x, y)
-            state = "retracted" + (f" over {over.reservoir}/{over.well}" if over is not None else "")
+            state = "retracted" + (f" over {well_key(over)}" if over is not None else "")
         else:
-            state = "lowered" + (f" in {self._current_well.reservoir}/{self._current_well.well}"
-                                 if self._current_well else "")
+            state = "lowered" + (f" in {well_key(self._current_well)}" if self._current_well else "")
         return f"sipper: {state}   x {x:.1f}  y {y:.1f}  z {z:.1f} mm"
 
     def wellAtXY(self, x_mm, y_mm):
@@ -115,11 +122,10 @@ class DeckMapWidget(QWidget):
             combos.setdefault(" + ".join(roles), ROLE_COLORS[roles[0]])
         return [(f"{combo} well", combos[combo]) for combo in sorted(combos)]
 
-    def pixel(self, x_mm, y_mm):
+    def pixel(self, x_mm, y_mm, frame=None):
         """Deck mm to widget pixels: X to the right, Y up (the deck seen
-        from above)."""
-        scale, left, bottom = self._frame()
-        (x0, _), (y0, _) = self._box()
+        from above). A paint passes the frame it computed once."""
+        scale, left, bottom, x0, y0 = frame or self._frame()
         return left + (x_mm - x0) * scale, bottom - (y_mm - y0) * scale
 
     def wellAt(self, point):
@@ -129,8 +135,7 @@ class DeckMapWidget(QWidget):
 
     def _mm(self, px, py):
         """Widget pixels back to deck mm (the inverse of pixel())."""
-        scale, left, bottom = self._frame()
-        (x0, _), (y0, _) = self._box()
+        scale, left, bottom, x0, y0 = self._frame()
         return x0 + (px - left) / scale, y0 + (bottom - py) / scale
 
     # --- clicks ---
@@ -153,15 +158,15 @@ class DeckMapWidget(QWidget):
         return (x0 - pad, x1 + pad), (y0 - pad, y1 + pad)
 
     def _frame(self):
-        """(scale px/mm, left px, bottom px) fitting the box between the
-        text bands, centred horizontally."""
+        """The Frame fitting the box between the text bands, centred
+        horizontally."""
         (x0, x1), (y0, y1) = self._box()
         width = max(self.width(), 1)
         height = max(self.height() - 2 * TEXT_BAND_PX, 1)
         scale = min(width / (x1 - x0), height / (y1 - y0))
         left = (width - (x1 - x0) * scale) / 2
         bottom = TEXT_BAND_PX + height - (height - (y1 - y0) * scale) / 2
-        return scale, left, bottom
+        return Frame(scale, left, bottom, x0, y0)
 
     # --- painting ---
 
@@ -169,11 +174,11 @@ class DeckMapWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         painter.fillRect(self.rect(), self.palette().base())
-        scale, _, _ = self._frame()
+        frame = self._frame()
         self._paintState(painter)
         for name, placement in self._placements.items():
-            self._paintPlate(painter, name, placement, scale)
-        self._paintTip(painter, scale)
+            self._paintPlate(painter, name, placement, frame)
+        self._paintTip(painter, frame)
         self._paintLegend(painter)
         painter.end()
 
@@ -187,32 +192,33 @@ class DeckMapWidget(QWidget):
         painter.drawText(QRectF(4, 0, self.width() - 8, TEXT_BAND_PX), Qt.AlignLeft | Qt.AlignVCenter,
                          self.stateText())
 
-    def _paintPlate(self, painter, name, placement, scale):
+    def _paintPlate(self, painter, name, placement, frame):
         geometry = placement.geometry
         pitch = placement.pitch_mm
-        radius = WELL_RADIUS_PITCH * pitch * scale
+        radius = WELL_RADIUS_PITCH * pitch * frame.scale
         corners = [xy for _, xy in placement.corners()]
         xs, ys = [c[0] for c in corners], [c[1] for c in corners]
         pad = 0.75 * pitch
-        left, top = self.pixel(min(xs) - pad, max(ys) + pad)
-        right, bottom = self.pixel(max(xs) + pad, min(ys) - pad)
+        left, top = self.pixel(min(xs) - pad, max(ys) + pad, frame)
+        right, bottom = self.pixel(max(xs) + pad, min(ys) - pad, frame)
         painter.setPen(QPen(QColor("#444"), 1.2))
         painter.setBrush(QColor("#f7f7f7"))
         painter.drawRoundedRect(QRectF(left, top, right - left, bottom - top), 6, 6)
         painter.setFont(QFont("Helvetica", 9, QFont.Bold))
         painter.setPen(QPen(QColor("#222")))
         painter.drawText(QPointF(left, top - 4), f"{name}  (dip {placement.dip_z_mm:g} mm)")
+        painter.setPen(WELL_PEN)
         for well in geometry.wells():
-            cx, cy = self.pixel(*placement.xy_mm(well))
+            cx, cy = self.pixel(*placement.xy_mm(well), frame)
             roles = self._roles.get(WellRef(name, well), ())
-            painter.setPen(QPen(QColor("#999"), 0.8))
-            painter.setBrush(ROLE_COLORS[roles[0]] if roles else QColor("#ffffff"))
+            painter.setBrush(ROLE_COLORS[roles[0]] if roles else WELL_EMPTY)
             painter.drawEllipse(QPointF(cx, cy), radius, radius)
             if len(roles) > 1:
                 # Two roles on one well: the first fills it, the second rings it.
                 painter.setPen(QPen(ROLE_COLORS[roles[1]], 2))
                 painter.setBrush(Qt.NoBrush)
                 painter.drawEllipse(QPointF(cx, cy), radius + 2, radius + 2)
+                painter.setPen(WELL_PEN)
         # Row letters one pitch before column 1 along the column axis, column
         # numbers one pitch before row A along the row axis -- in deck mm, so
         # they sit beside their rows and columns in any orientation.
@@ -223,14 +229,14 @@ class DeckMapWidget(QWidget):
         for row in range(geometry.rows):
             letter = chr(ord("A") + row)
             x, y = placement.xy_mm(f"{letter}1")
-            lx, ly = self.pixel(x - pitch * cx_dir, y - pitch * cy_dir)
+            lx, ly = self.pixel(x - pitch * cx_dir, y - pitch * cy_dir, frame)
             painter.drawText(QRectF(lx - 8, ly - 6, 16, 12), Qt.AlignCenter, letter)
         for column in range(geometry.columns):
             x, y = placement.xy_mm(f"A{column + 1}")
-            lx, ly = self.pixel(x - pitch * rx_dir, y - pitch * ry_dir)
+            lx, ly = self.pixel(x - pitch * rx_dir, y - pitch * ry_dir, frame)
             painter.drawText(QRectF(lx - 8, ly - 6, 16, 12), Qt.AlignCenter, str(column + 1))
 
-    def _paintTip(self, painter, scale):
+    def _paintTip(self, painter, frame):
         if self._position is None:
             return
         x, y, _ = self._position
@@ -241,12 +247,12 @@ class DeckMapWidget(QWidget):
         if (self._current_well is not None and self._current_well.reservoir in self._placements
                 and self.wellAtXY(x, y) == self._current_well):
             placement = self._placements[self._current_well.reservoir]
-            wx, wy = self.pixel(*placement.xy_mm(self._current_well.well))
-            ring = WELL_RADIUS_PITCH * placement.pitch_mm * scale + 4
+            wx, wy = self.pixel(*placement.xy_mm(self._current_well.well), frame)
+            ring = WELL_RADIUS_PITCH * placement.pitch_mm * frame.scale + 4
             painter.setPen(QPen(color, 2))
             painter.setBrush(Qt.NoBrush)
             painter.drawEllipse(QPointF(wx, wy), ring, ring)
-        px, py = self.pixel(x, y)
+        px, py = self.pixel(x, y, frame)
         painter.setPen(QPen(QColor("#111"), 1))
         painter.setBrush(color)
         painter.drawEllipse(QPointF(px, py), TIP_RADIUS_PX, TIP_RADIUS_PX)

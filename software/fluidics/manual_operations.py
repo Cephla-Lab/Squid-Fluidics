@@ -16,6 +16,7 @@ way it stops a run.
 import logging
 
 from .control.config import gantry
+from .robot.labware import agitation_problem, plate_of, unknown_reservoir
 from .robot.stage import MIN_TRAVEL_Z_MM
 from .vocabulary import sipper_vocabulary
 
@@ -27,7 +28,6 @@ class ManualOperations:
         self.sp = devices.syringe_pump
         self.sv = devices.selector_valves
         self.dp = devices.disc_pump
-        self.config = devices.config
         self.robot = devices.robot
         self.reservoirs = devices.reservoirs
         g = gantry(devices.config)
@@ -130,15 +130,7 @@ class ManualOperations:
         """One axis by `mm` from where it is; XY refused below travel height
         or with the position unknown, by the stage itself."""
         self._need_robot()
-        position = self.robot.position()
-        if position is None:
-            raise RuntimeError("the stage position is unknown: home first")
-        x, y, z = position
-        self.robot.current_well = None
-        if axis == "z":
-            self.robot._stage.move_z(z + mm)
-        else:
-            self.robot._stage.move_xy(x + (mm if axis == "x" else 0), y + (mm if axis == "y" else 0))
+        self.robot.jog(axis, mm)
 
     def robot_position(self):
         self._need_robot()
@@ -148,16 +140,15 @@ class ManualOperations:
         """Clear a drive fault from the Robot tab; home again afterwards
         if the fault interrupted a homing."""
         self._need_robot()
-        self.robot.current_well = None
-        self.robot._stage.reset_faults()
+        self.robot.reset_faults()
 
     # --- teaching: the config and the live robot change together, or neither ---
 
     def _reservoir_config(self, name):
         try:
-            return next(r for r in self._gantry.reservoirs.values() if r.name == name)
-        except StopIteration:
-            raise ValueError(f"no reservoir named {name!r}") from None
+            return self._vocabulary.reservoirs[name]
+        except KeyError:
+            raise ValueError(unknown_reservoir(name, self._vocabulary.reservoirs)) from None
 
     def teach_a1(self, name, xy_mm):
         """A1 of `name` is at `xy_mm` now: the live placement first (every
@@ -176,10 +167,9 @@ class ManualOperations:
         self._need_robot()
         r = self._reservoir_config(name)
         z = float(z_mm)
-        if self._gantry.travel_z_mm >= z - self._gantry.agitate_amplitude_mm:
-            raise ValueError(f"a dip depth of {z:.2f} mm leaves no room for the "
-                             f"{self._gantry.agitate_amplitude_mm:g} mm agitation stroke above "
-                             f"travel height {self._gantry.travel_z_mm:.2f}")
+        problem = agitation_problem(name, z, self._gantry.agitate_amplitude_mm, self._gantry.travel_z_mm)
+        if problem is not None:
+            raise ValueError(problem)
         placement = self._vocabulary.placement(name)
         placement.dip_z_mm = z
         self.robot.set_placement(name, placement)
@@ -196,15 +186,11 @@ class ManualOperations:
                              f"(the drives park 0.1 to 0.5 mm past 0, and homing refuses a travel "
                              f"height Z parks below): give {MIN_TRAVEL_Z_MM:g} mm or more")
         for r in self._gantry.reservoirs.values():
-            if z >= r.dip_z_mm - self._gantry.agitate_amplitude_mm:
-                raise ValueError(f"a travel height of {z:.2f} mm is not above {r.name}'s "
-                                 f"agitation stroke (dip {r.dip_z_mm:.2f} less "
-                                 f"{self._gantry.agitate_amplitude_mm:g})")
+            problem = agitation_problem(r.name, r.dip_z_mm, self._gantry.agitate_amplitude_mm, z)
+            if problem is not None:
+                raise ValueError(problem)
         # The live placements too: they are what go_to_well and agitate use.
-        self.robot.check_travel(z)
-        self.robot._stage.check_reach(z=z)
-        self.robot._stage.travel_z_mm = z
-        self.robot.current_well = None
+        self.robot.set_travel(z)
         self._gantry.travel_z_mm = z
         _logger.info("Taught: travel height %.2f mm.", z)
 
@@ -214,32 +200,34 @@ class ManualOperations:
         nothing to refill."""
         if not self.reservoirs.tracked:
             raise RuntimeError("this rig tracks no reservoir volumes")
-        self._refuse_a_refill_under_the_tip(key)
+        refusal = self.refill_refusal(key)
+        if refusal:
+            raise RuntimeError(refusal)
         self.reservoirs.refill(key)
 
-    def _refuse_a_refill_under_the_tip(self, key):
-        """With no park well the tip rests in a well between steps, and
-        lifting that plate with the tip in it bends the tip: a refill of
+    def refill_refusal(self, key):
+        """Why refill(key) would be refused for where the tip is, or None:
+        the one statement of the rule, which the Robot tab asks before its
+        question. With no park well the tip rests in a well between steps,
+        and lifting that plate with the tip in it bends the tip: a refill of
         that plate (or of everything) waits for Retract. The witness names
         the well; without one -- a jog, a halt, a fault reset or teaching
         clears it where the tip is -- only a position known to be retracted
         vouches for the deck, so any plate's reload waits for Retract. A
         bottle is never under the tip."""
-        if self.robot is None or not self._is_a_plate(key):
-            return
+        plate = plate_of(key) or key         # the plate a key names: `ssct` or `ssct/A1`
+        if self.robot is None or not (key == "all" or plate in self._vocabulary.reservoirs):
+            return None                      # a bottle: never under the tip
         well = self.robot.current_well
         if well is not None:
-            if key == "all" or key == well.reservoir or key.startswith(f"{well.reservoir}/"):
+            if key == "all" or plate == well.reservoir:
                 # Any well of that plate: refilling one means the plate was lifted.
-                raise RuntimeError(f"the sipper's tip is in {well.reservoir}/{well.well}: "
-                                   f"Retract before reloading {well.reservoir}")
+                return (f"the sipper's tip is in {well.reservoir}/{well.well}: "
+                        f"Retract before reloading {well.reservoir}")
         elif not self.robot.is_retracted:
-            raise RuntimeError("the sipper's tip is not known to be retracted: "
-                               f"Retract before reloading {key}")
-
-    def _is_a_plate(self, key):
-        """Whether a refill key names a plate, a well of one, or everything."""
-        return key == "all" or key.split("/")[0] in self._vocabulary.reservoirs
+            return ("the sipper's tip is not known to be retracted: "
+                    f"Retract before reloading {key}")
+        return None
 
     def _move(self, op, args, flow_rate_ul_min, on_started):
         """One syringe move: a fresh queue, the op, then the wait.

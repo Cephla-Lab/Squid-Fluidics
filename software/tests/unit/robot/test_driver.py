@@ -1,11 +1,17 @@
 """The one import site of the servo driver, and the adapter's contracts."""
+import dataclasses
+import threading
+import time
 from types import SimpleNamespace
 
 import pytest
 
-from fluidics.errors import DeviceError
+from fluidics.errors import AbortRequested, DeviceError, RunControl
 from fluidics.robot import _driver
+from fluidics.robot.stage import TOLERANCE_MM, XYZStage
 from tests.conftest import driver_or_skip
+
+AXES = {"x": "X1", "y": "Y2", "z": "Z3"}
 
 
 def test_the_shim_says_whether_a_driver_is_present():
@@ -17,7 +23,7 @@ def test_open_service_without_a_driver_raises_a_device_error(monkeypatch):
     bring-up, naming the copy and its VENDORED.md."""
     monkeypatch.setattr(_driver, "DRIVER_AVAILABLE", False)
     with pytest.raises(DeviceError, match="fluidics/control/nimotion.*VENDORED.md"):
-        _driver.open_service("COM5", 115200, {"x": "X1", "y": "Y2", "z": "Z3"})
+        _driver.open_service("COM5", 115200, AXES)
 
 
 def test_the_bring_up_error_names_why_the_driver_did_not_import(monkeypatch):
@@ -27,16 +33,21 @@ def test_the_bring_up_error_names_why_the_driver_did_not_import(monkeypatch):
     monkeypatch.setattr(_driver, "DRIVER_AVAILABLE", False)
     monkeypatch.setattr(_driver, "_IMPORT_ERROR", cause)
     with pytest.raises(DeviceError, match="no module named serial") as info:
-        _driver.open_service("COM5", 115200, {"x": "X1", "y": "Y2", "z": "Z3"})
+        _driver.open_service("COM5", 115200, AXES)
     assert info.value.__cause__ is cause
 
 
-pytestmark_driver = pytest.mark.robot_driver
+@pytest.fixture
+def driver():
+    """The vendored driver, for the tests that need it: a skip when it
+    does not import, a failure under ROBOT_DRIVER_REQUIRED=1."""
+    return driver_or_skip()
 
 
 @pytest.fixture
-def fake_service(monkeypatch):
-    driver = driver_or_skip()
+def fake_service(driver, monkeypatch):
+    """A DriverService opened on the three axes over a recording fake of
+    the driver's ServoService: (service, names, calls)."""
     calls = []
 
     class FakeMotor:
@@ -83,33 +94,28 @@ def fake_service(monkeypatch):
             calls.append(("fault_reset", axis.value))
 
     monkeypatch.setattr(driver, "ServoService", FakeServo)
-    return driver, calls
+    service, names = driver.open_service("COM5", 115200, AXES)
+    return service, names, calls
 
 
-@pytestmark_driver
-def test_the_loaded_driver_is_the_vendored_copy():
+def test_the_loaded_driver_is_the_vendored_copy(driver):
     """Open question 4, decided 2026-10-12: the driver is vendored under
     fluidics/control/nimotion and nothing else is tried, so the driver a
     rig runs is the one in the repository, never whatever is installed."""
-    driver = driver_or_skip()
     assert driver.ServoService.__module__.startswith("fluidics.control.nimotion.")
     assert driver.simulation.__name__ == "fluidics.control.nimotion.simulation"
 
 
-@pytestmark_driver
 def test_connect_selects_a_configured_axis_and_initializes_all_three(fake_service):
-    driver, calls = fake_service
-    service, names = driver.open_service("COM5", 115200, {"x": "X1", "y": "Y2", "z": "Z3"})
+    service, _, calls = fake_service
     service.connect()
     assert calls[0] == ("init", ["X1", "Y2", "Z3"])
     assert calls[1] == ("connect", "Z3")
     assert sorted(c[1] for c in calls if c[0] == "init_axis") == ["X1", "Y2", "Z3"]
 
 
-@pytestmark_driver
 def test_homing_state_reads_the_bits_and_the_mode(fake_service):
-    driver, _ = fake_service
-    service, names = driver.open_service("COM5", 115200, {"x": "X1", "y": "Y2", "z": "Z3"})
+    service, names, _ = fake_service
     assert service.homing_state(names["z"]) == (True, False, False, True)
     service._service.motor.mode = 1
     assert service.homing_state(names["z"]).homing_mode is False
@@ -118,12 +124,10 @@ def test_homing_state_reads_the_bits_and_the_mode(fake_service):
     assert (reading.attained, reading.error, reading.fault) == (False, True, True)
 
 
-@pytestmark_driver
 def test_read_carries_the_limit_inputs_once_the_target_reads_reached(fake_service):
     """60FDh bits 0-1, asked only at a move's end as the driver's own wait
     asks them: a target reached on an active switch is not an arrival."""
-    driver, _ = fake_service
-    service, names = driver.open_service("COM5", 115200, {"x": "X1", "y": "Y2", "z": "Z3"})
+    service, names, _ = fake_service
     motor = service._service.motor
     motor.inputs = 0b10
     assert service.read(names["x"]).on_limit is True
@@ -135,42 +139,33 @@ def test_read_carries_the_limit_inputs_once_the_target_reads_reached(fake_servic
     assert reading.target_reached is False and reading.on_limit is False
 
 
-@pytestmark_driver
 def test_stop_is_the_waited_controlled_stop_and_a_failure_is_a_device_error(fake_service):
-    driver, calls = fake_service
-    service, names = driver.open_service("COM5", 115200, {"x": "X1", "y": "Y2", "z": "Z3"})
+    service, names, calls = fake_service
     service.stop(names["x"])
     assert ("stop", "X1", True) in calls
     with pytest.raises(DeviceError, match="axis Y2: stop failed"):
         service.stop(names["y"])
 
 
-@pytestmark_driver
 def test_reset_fault_is_the_drivers_fault_reset(fake_service):
-    driver, calls = fake_service
-    service, names = driver.open_service("COM5", 115200, {"x": "X1", "y": "Y2", "z": "Z3"})
+    service, names, calls = fake_service
     service.reset_fault(names["z"])
     assert ("fault_reset", "Z3") in calls
 
 
-@pytestmark_driver
 def test_strokes_come_from_the_driver_table(fake_service):
-    driver, _ = fake_service
-    service, names = driver.open_service("COM5", 115200, {"x": "X1", "y": "Y2", "z": "Z3"})
+    service, names, _ = fake_service
     assert service.stroke(names["x"]) == (0.5, 200.0)       # every stroke starts clear of the origin switch
     assert service.stroke(names["y"]) == (0.5, 109.0)       # measured between Y2's switches (nm-servo #15)
     assert service.stroke(names["z"]) == (0.5, 58.5)
 
 
-@pytestmark_driver
-def test_an_axis_the_driver_does_not_know_is_a_device_error(fake_service):
-    driver, _ = fake_service
+def test_an_axis_the_driver_does_not_know_is_a_device_error(driver):
     with pytest.raises(DeviceError, match="no axis named 'X9'"):
-        driver.open_service("COM5", 115200, {"x": "X9", "y": "Y2", "z": "Z3"})
+        driver.open_service("COM5", 115200, {**AXES, "x": "X9"})
 
 
-@pytestmark_driver
-def test_the_adapter_runs_a_leg_end_to_end_on_the_driver_simulator(real_clock):
+def test_the_adapter_runs_a_leg_end_to_end_on_the_driver_simulator(driver, real_clock):
     """nm-servo's own simulator (PR #4) behind the port name sim://: the
     real ServoService, Motor and Modbus client, no hardware. The simulator
     homes to the low end of the stroke and ignores polarity, so Z3 reads
@@ -179,14 +174,11 @@ def test_the_adapter_runs_a_leg_end_to_end_on_the_driver_simulator(real_clock):
     the drives, nm-servo PR #12), so the travel height must sit below the
     park: a travel height of 0 is refused by home(). The stage then clears
     each axis to its stroke's start (0.5 mm)."""
-    driver = driver_or_skip()
-    from fluidics.errors import RunControl
-    from fluidics.robot.stage import XYZStage
     # the simulated drives home in real time (about 7 s an axis at the homing
     # speeds); this bus runs its clock 20 times faster
     driver.simulation.install_bus("sim://fast", driver.simulation.SimulatedBus(
         list(driver.DEFAULT_AXIS_CONFIGS.values()), time_scale=20.0))
-    service, names = driver.open_service("sim://fast", 115200, {"x": "X1", "y": "Y2", "z": "Z3"})
+    service, names = driver.open_service("sim://fast", 115200, AXES)
     stage = XYZStage(service, names, travel_z_mm=1.0, xy_velocity_mm_s=100.0,
                      z_velocity_mm_s=50.0, run_control=RunControl())
     stage.connect()
@@ -203,23 +195,22 @@ def test_the_adapter_runs_a_leg_end_to_end_on_the_driver_simulator(real_clock):
         stage.close(quiescent=True)
 
 
-@pytestmark_driver
-def test_a_move_after_a_halt_goes_to_the_new_target_not_the_old_one(real_clock):
+def test_a_move_after_a_halt_goes_to_the_new_target_not_the_old_one(driver, real_clock):
     """nm-servo PR #4 found that without PR #1 a move after Stop first
     resumes the halted move (Halt released re-arms the old set-point).
     The stage's halt contract needs the driver to have PR #1: pinned here
-    on the driver's own simulator, which models the drive's handshake, on
-    its real-time bus. The cancel waits for a reading (X past 30 mm), not
-    the clock, and the move back is 5 mm short of where X stopped, so a
-    rise past the stop can only be the old move resuming, however loaded
+    on the driver's own simulator, which models the drive's handshake. Its
+    bus runs 3 times real time: homing the three axes is 20 s of the test
+    at real time, and at 3x the cancel still lands near 65 mm, 0.4 s of
+    real time before X would reach 195, the far end of its stroke (at the
+    siblings' 20x it does not land in time). The cancel waits for a reading (X past 30 mm),
+    not the clock, and the move back is 5 mm short of where X stopped, so
+    a rise past the stop can only be the old move resuming, however loaded
     the machine is."""
-    import threading
-    import time
-    driver = driver_or_skip()
-    from fluidics.errors import AbortRequested, RunControl
-    from fluidics.robot.stage import TOLERANCE_MM, XYZStage
     control = RunControl()
-    service, names = driver.open_service("sim://", 115200, {"x": "X1", "y": "Y2", "z": "Z3"})
+    driver.simulation.install_bus("sim://halt", driver.simulation.SimulatedBus(
+        list(driver.DEFAULT_AXIS_CONFIGS.values()), time_scale=3.0))
+    service, names = driver.open_service("sim://halt", 115200, AXES)
     stage = XYZStage(service, names, 1.0, 100.0, 50.0, control)
     stage.connect()
     try:
@@ -236,12 +227,12 @@ def test_a_move_after_a_halt_goes_to_the_new_target_not_the_old_one(real_clock):
         canceller.start()
         try:
             with pytest.raises(AbortRequested):
-                stage.move_xy(150.0, 1.0)             # 1.5 s at 100 mm/s, cancelled past 30 mm
+                stage.move_xy(195.0, 1.0)             # 1.95 s of drive time at 100 mm/s, cancelled past 30 mm
         finally:
             move_over.set()
             canceller.join()
         stopped_at = stage.position()[0]
-        assert 30.0 <= stopped_at < 150.0
+        assert 30.0 <= stopped_at < 195.0
         back_to = stopped_at - 5.0                    # 25 mm or more: inside the stroke
         seen = []
         stage2 = XYZStage(service, names, 1.0, 100.0, 50.0, RunControl())
@@ -260,27 +251,21 @@ def test_a_move_after_a_halt_goes_to_the_new_target_not_the_old_one(real_clock):
         finally:
             done.set()
             sampler.join()
-        assert max(seen) <= stopped_at + 1.0, "the halted move did not resume toward 150"
+        assert max(seen) <= stopped_at + 1.0, "the halted move did not resume toward 195"
         assert service.read(names["x"]).position_mm == pytest.approx(back_to, abs=TOLERANCE_MM)
     finally:
         stage.close(quiescent=True)
 
 
-@pytestmark_driver
-def test_a_limit_stop_on_the_driver_simulator_ends_the_leg_at_once(real_clock):
+def test_a_limit_stop_on_the_driver_simulator_ends_the_leg_at_once(driver, real_clock):
     """nm-servo PR #10: the simulated drive stops on its switch as the
     drives do (enabled, warning bit, alarm 8614h, target never reached).
     The stage polls with wait=False, so it never sees the driver's own
     LimitSwitchError: its poll must read the alarm itself."""
-    import dataclasses
-    import time
-    driver = driver_or_skip()
-    from fluidics.errors import RunControl
-    from fluidics.robot.stage import XYZStage
     y2 = driver.AxisName.Y2
     drive = dataclasses.replace(driver.DEFAULT_AXIS_CONFIGS[y2], stroke_max=50.0)  # its switch at 51 mm
     driver.simulation.install_bus("sim://limit", driver.simulation.SimulatedBus([drive], time_scale=20.0))
-    service, names = driver.open_service("sim://limit", 115200, {"x": "X1", "y": "Y2", "z": "Z3"})
+    service, names = driver.open_service("sim://limit", 115200, AXES)
     stage = XYZStage(service, names, 1.0, 100.0, 50.0, RunControl())
     stage.connect()
     try:

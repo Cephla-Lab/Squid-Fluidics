@@ -16,9 +16,10 @@ import pytest
 import gui
 from qtpy.QtCore import Qt, QEvent
 from qtpy.QtWidgets import QApplication
-from fluidics.control.config import available_port_count
-from fluidics.sequences import SequenceListAdapter
+from fluidics.control.config import available_port_count, available_ports
+from fluidics.sequences import SequenceListAdapter, sequence_problem
 from fluidics.subscribers import Subscribers
+from fluidics.vocabulary import sipper_vocabulary
 
 from .test_gui_helpers import FakeSession
 
@@ -463,7 +464,6 @@ class TestAddSequenceDialog:
         """Every type the rig offers builds a form -- and push, the
         sipper-only type, is offered only with a sipper (types_for_rig)."""
         from fluidics.sequences import types_for_rig
-        from fluidics.vocabulary import sipper_vocabulary
         sipper = sipper_vocabulary(plate_sipper_config) if with_sipper else None
         dialog = gui.AddSequenceDialog(None, application, self.PORTS, sipper=sipper)
         offered = [dialog.typeCombo.itemData(i) for i in range(dialog.typeCombo.count())]
@@ -497,32 +497,6 @@ class TestAddSequenceDialog:
         assert dialog.result_dict["fluidic_port"] == 5
 
 
-def test_the_add_dialog_reveals_the_well_field_for_the_sipper_port_and_takes_the_typed_well(qapp, plate_sipper_config):
-    from fluidics.qt.sequence_editor import AddSequenceDialog
-    from fluidics.vocabulary import sipper_vocabulary
-    v = sipper_vocabulary(plate_sipper_config)
-    dialog = AddSequenceDialog(None, "Flow Cell", [(1, "Port 1: sipper"), (25, "Port 25: 4x SSC")], sipper=v)
-    dialog.typeCombo.setCurrentIndex(dialog.typeCombo.findData("flow_reagent"))
-    port = dialog._field_widgets["fluidic_port"]
-    port.setCurrentIndex(port.findData(25))
-    assert not dialog._field_widgets["well"].isEnabled()
-    port.setCurrentIndex(port.findData(1))
-    well = dialog._field_widgets["well"]
-    assert well.isEnabled()
-    well.setCurrentIndex(well.findData("A1"))
-    well.setCurrentText("A3")                    # typed over the pick
-    dialog.accept()
-    assert dialog.result_dict["well"] == "A3" and dialog.result_dict["fluidic_port"] == 1
-    assert "fill_tubing_with" not in dialog.result_dict
-
-
-def test_the_add_dialog_without_a_sipper_shows_no_well_fields(qapp):
-    from fluidics.qt.sequence_editor import AddSequenceDialog
-    dialog = AddSequenceDialog(None, "Flow Cell", [(1, "Port 1"), (25, "Port 25")])
-    dialog.typeCombo.setCurrentIndex(dialog.typeCombo.findData("flow_reagent"))
-    assert "well" not in dialog._field_widgets and "dip_cycles" not in dialog._field_widgets
-
-
 class TestTheDialogKnowsWells:
     """Spec §9: the well is a string picked or typed, on another plate as
     reservoir/well; the fill combo never offers the sipper and a bulk row
@@ -531,12 +505,35 @@ class TestTheDialogKnowsWells:
     PORTS = [(1, "Port 1: sipper"), (25, "Port 25: 4x SSC"), (26, "Port 26: DAPI")]
 
     def _dialog(self, config, seq_type="flow_reagent"):
-        from fluidics.qt.sequence_editor import AddSequenceDialog
-        from fluidics.vocabulary import sipper_vocabulary
-        dialog = AddSequenceDialog(None, "Flow Cell", self.PORTS,
-                                   sipper=sipper_vocabulary(config))
+        dialog = gui.AddSequenceDialog(None, "Flow Cell", self.PORTS,
+                                       sipper=sipper_vocabulary(config))
         dialog.typeCombo.setCurrentIndex(dialog.typeCombo.findData(seq_type))
         return dialog
+
+    def _problem(self, dialog, config):
+        """The editor's verdict on the row the dialog built -- type, model,
+        ports and wells against this rig, as SequenceList.problem paints it."""
+        return sequence_problem(dialog.result_dict, "Flow Cell", available_ports(config),
+                                sipper=sipper_vocabulary(config))
+
+    def test_the_add_dialog_without_a_sipper_shows_no_well_fields(self, qapp):
+        dialog = gui.AddSequenceDialog(None, "Flow Cell", self.PORTS)
+        dialog.typeCombo.setCurrentIndex(dialog.typeCombo.findData("flow_reagent"))
+        assert "well" not in dialog._field_widgets and "dip_cycles" not in dialog._field_widgets
+
+    def test_the_add_dialog_reveals_the_well_field_for_the_sipper_port_and_takes_the_typed_well(self, qapp, plate_sipper_config):
+        dialog = self._dialog(plate_sipper_config)
+        port = dialog._field_widgets["fluidic_port"]
+        port.setCurrentIndex(port.findData(25))
+        assert not dialog._field_widgets["well"].isEnabled()
+        port.setCurrentIndex(port.findData(1))
+        well = dialog._field_widgets["well"]
+        assert well.isEnabled()
+        well.setCurrentIndex(well.findData("A1"))
+        well.setCurrentText("A3")                    # typed over the pick
+        dialog.accept()
+        assert dialog.result_dict["well"] == "A3" and dialog.result_dict["fluidic_port"] == 1
+        assert "fill_tubing_with" not in dialog.result_dict
 
     def test_a_well_on_another_plate_is_written_with_its_plate(self, qapp, plate_sipper_config):
         dialog = self._dialog(plate_sipper_config)
@@ -552,11 +549,7 @@ class TestTheDialogKnowsWells:
         dialog.accept()
         assert dialog.result_dict["well"] == "ssct/B2"
         assert dialog.result_dict["dip_cycles"] == 3
-        from fluidics.sequences import sequence_problem
-        from fluidics.vocabulary import sipper_vocabulary
-        from fluidics.control.config import available_ports
-        assert sequence_problem(dialog.result_dict, "Flow Cell", available_ports(plate_sipper_config),
-                                sipper=sipper_vocabulary(plate_sipper_config)) is None
+        assert self._problem(dialog, plate_sipper_config) is None
 
     def test_a_bulk_row_keeps_its_fill_and_never_offers_the_sipper(self, qapp, plate_sipper_config):
         dialog = self._dialog(plate_sipper_config)
@@ -606,16 +599,24 @@ class TestTheDialogKnowsWells:
         dialog.accept()
         assert dialog.result_dict["well"] == "ssct/B2"
         assert dialog.result_dict["dip_cycles"] == 3
-        from fluidics.sequences import sequence_problem
-        from fluidics.vocabulary import sipper_vocabulary
-        from fluidics.control.config import available_ports
-        assert sequence_problem(dialog.result_dict, "Flow Cell", available_ports(plate_sipper_config),
-                                sipper=sipper_vocabulary(plate_sipper_config)) is None
+        assert self._problem(dialog, plate_sipper_config) is None
 
 
 def _field_names(widget, row):
     top = widget.tree.topLevelItem(row)
     return {top.child(j).data(0, Qt.UserRole) for j in range(top.childCount())}
+
+
+@pytest.fixture
+def sipper_widget(qapp, plate_sipper_config):
+    system = SimpleNamespace(
+        devices=SimpleNamespace(selector_valves=SimpleNamespace(
+            get_port_names=lambda: [(1, "Port 1: sipper"), (25, "Port 25: 4x SSC")])),
+        session=FakeSession(), warnings=Subscribers("test warnings"))
+    w = gui.SequencesWidget(plate_sipper_config, system)
+    yield w
+    w.deleteLater()
+    QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 
 
 class TestTheTreeShowsWellsOnlyOnASipperRig:
@@ -636,36 +637,16 @@ class TestTheTreeShowsWellsOnlyOnASipperRig:
         assert "dip_cycles" not in _field_names(widget, 0)
         assert "no sipper" in widget._model.problem(0)
 
-    def test_a_sipper_rig_renders_and_judges_the_well_fields(self, qapp, plate_sipper_config):
-        system = SimpleNamespace(
-            devices=SimpleNamespace(selector_valves=SimpleNamespace(
-                get_port_names=lambda: [(1, "Port 1: sipper"), (25, "Port 25: 4x SSC")])),
-            session=FakeSession(), warnings=Subscribers("test warnings"))
-        w = gui.SequencesWidget(plate_sipper_config, system)
-        try:
-            w.setSequences([dict(FLOW, well="A1"), {"type": "priming", "fluidic_port": 25,
-                                                   "flow_rate": 500, "volume": 500}])
-            assert {"well", "dip_cycles"} <= _field_names(w, 0)
-            assert {"well", "sipper_well"} <= _field_names(w, 1)
-            assert w.tree.topLevelItem(0).text(0) == "Flow Reagent: A1"
-            assert w._model.problem(0) is None, "the model knows the sipper's wells"
-            field_item(w, 0, "well").setText(1, "Z9")
-            assert "Z9" in w._model.problem(0)
-        finally:
-            w.deleteLater()
-            QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
-
-
-@pytest.fixture
-def sipper_widget(qapp, plate_sipper_config):
-    system = SimpleNamespace(
-        devices=SimpleNamespace(selector_valves=SimpleNamespace(
-            get_port_names=lambda: [(1, "Port 1: sipper"), (25, "Port 25: 4x SSC")])),
-        session=FakeSession(), warnings=Subscribers("test warnings"))
-    w = gui.SequencesWidget(plate_sipper_config, system)
-    yield w
-    w.deleteLater()
-    QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    def test_a_sipper_rig_renders_and_judges_the_well_fields(self, sipper_widget):
+        w = sipper_widget
+        w.setSequences([dict(FLOW, well="A1"), {"type": "priming", "fluidic_port": 25,
+                                               "flow_rate": 500, "volume": 500}])
+        assert {"well", "dip_cycles"} <= _field_names(w, 0)
+        assert {"well", "sipper_well"} <= _field_names(w, 1)
+        assert w.tree.topLevelItem(0).text(0) == "Flow Reagent: A1"
+        assert w._model.problem(0) is None, "the model knows the sipper's wells"
+        field_item(w, 0, "well").setText(1, "Z9")
+        assert "Z9" in w._model.problem(0)
 
 
 class TestTheTitleFollowsTheWell:

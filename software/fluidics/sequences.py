@@ -11,6 +11,7 @@ from pydantic import (BaseModel, ConfigDict, Discriminator, Field, TypeAdapter,
 
 from .control.config import available_ports, port_range_note
 from .files import atomic_write
+from .vocabulary import sipper_vocabulary
 
 
 # --- Pydantic Models ---
@@ -269,6 +270,12 @@ PORT_FIELDS = {"fluidic_port": False, "fill_tubing_with": True}
 # the live paint and the Add dialog. True = a falsy value means unset.
 WELL_FIELDS = {"well": False, "sipper_well": True}
 
+# The fields only a sipper rig has (spec §6): the well-valued ones and the
+# dips. The Add dialog and the tree offer none of them on a rig without one
+# (D8); the stray-field check in sequence_well_problems names them with the
+# port fields.
+SIPPER_FIELDS = (*WELL_FIELDS, "dip_cycles")
+
 
 def use_ports_problem(use_ports, sipper_port) -> Optional[str]:
     """The refusal for a priming or clean-up row's use_ports on a rig whose
@@ -294,14 +301,16 @@ def sequence_well_problems(seq: dict, vocabulary) -> list[str]:
     `use_ports` refusal among them (D7); empty when there are none. Reads
     the raw dict, so a value the models would refuse is named here too."""
     problems = []
+    seq_type, fill = seq.get("type"), seq.get("fill_tubing_with")
+    sipper_only = seq_type in SIPPER_TYPES
     # The model forbids a field its type lacks; the raw row is not run
     # through the model here, so a stray one would be silently ignored at
     # run time (a priming row's dips never happen; a push row's own port
     # and volume would be drawn past). Named first.
-    model = SEQUENCE_TYPES.get(seq.get("type"))
+    model = SEQUENCE_TYPES.get(seq_type)
     if model is not None:
-        problems.extend(f"{f} is not a field of {seq['type']} rows"
-                        for f in (*WELL_FIELDS, "dip_cycles", *PORT_FIELDS, "volume")
+        problems.extend(f"{f} is not a field of {seq_type} rows"
+                        for f in (*SIPPER_FIELDS, *PORT_FIELDS, "volume")
                         if f in seq and f not in model.model_fields)
     set_fields = [f for f, falsy_unset in WELL_FIELDS.items()
                   if seq.get(f) is not None and not (falsy_unset and not seq.get(f))]
@@ -310,9 +319,10 @@ def sequence_well_problems(seq: dict, vocabulary) -> list[str]:
         problems.append(f"dip_cycles={dips!r}: a whole number of dips, 0 or more")
         dips = 0
     if vocabulary is None:
-        if set_fields or dips or seq.get("type") in SIPPER_TYPES:
+        if set_fields or dips or sipper_only:
             problems.append("this rig has no sipper")
         return problems
+    sipper_port = vocabulary.sipper_port
     port, well = seq.get("fluidic_port"), seq.get("well")
     for field in set_fields:
         if not isinstance(seq[field], str):
@@ -322,23 +332,23 @@ def sequence_well_problems(seq: dict, vocabulary) -> list[str]:
             vocabulary.resolve(seq[field])
         except ValueError as e:
             problems.append(f"{field}={seq[field]}: {e}")
-    if seq.get("type") in SIPPER_TYPES:
+    if sipper_only:
         # The port is implied, the sipper's; the well is the row's to name.
         if well is None:
-            problems.append(f"a {seq['type']} row draws through the sipper: name a well")
+            problems.append(f"a {seq_type} row draws through the sipper: name a well")
     else:
-        if well is not None and port != vocabulary.sipper_port:
-            problems.append(f"well={well} needs fluidic_port={vocabulary.sipper_port} (the sipper)")
-        if well is None and port == vocabulary.sipper_port:
+        if well is not None and port != sipper_port:
+            problems.append(f"well={well} needs fluidic_port={sipper_port} (the sipper)")
+        if well is None and port == sipper_port:
             problems.append(f"fluidic_port={port} is the sipper: name a well")
-    if well is not None and seq.get("fill_tubing_with"):
+    if well is not None and fill:
         problems.append("a sipper row cannot fill tubing: add a flow_reagent row from the paired well")
-    if seq.get("fill_tubing_with") == vocabulary.sipper_port:
-        problems.append(f"fill_tubing_with={vocabulary.sipper_port} is the sipper: the sipper cannot fill tubing")
+    if fill == sipper_port:
+        problems.append(f"fill_tubing_with={sipper_port} is the sipper: the sipper cannot fill tubing")
     if dips and well is None:
         problems.append("dip_cycles needs a well")
-    if seq.get("type") in ("priming", "clean_up"):
-        problem = use_ports_problem(seq.get("use_ports"), vocabulary.sipper_port)
+    if seq_type in ("priming", "clean_up"):
+        problem = use_ports_problem(seq.get("use_ports"), sipper_port)
         if problem is not None:
             problems.append(problem)
     return problems
@@ -351,7 +361,6 @@ def check_wells_against_config(sequences: list[dict], config) -> None:
     row on a rig with no sipper (spec §6), a priming or clean-up row whose
     use_ports skips the sipper (D7). Reached through validate_sequences,
     like the port and type checks."""
-    from .vocabulary import sipper_vocabulary
     vocabulary = sipper_vocabulary(config)
     problems = []
     for index, seq in enumerate(sequences):
@@ -480,10 +489,11 @@ def sequence_problem(seq: dict, application: str, ports, sipper=None) -> Optiona
         first = e.errors()[0]
         field = ".".join(str(part) for part in first["loc"][2:]) or "sequence"
         return f"{field}: {first['msg']}"
-    problems = sequence_port_problems(validated[0].model_dump(), ports)
+    dumped = validated[0].model_dump()
+    problems = sequence_port_problems(dumped, ports)
     if problems:
         return "; ".join(problems) + f": {port_range_note(ports)}"
-    well_problems = sequence_well_problems(validated[0].model_dump(), sipper)
+    well_problems = sequence_well_problems(dumped, sipper)
     if well_problems:
         return "; ".join(well_problems)
     return None
@@ -548,3 +558,13 @@ def get_fields_for_type(seq_type: str) -> dict:
             f"Known types: {list(SEQUENCE_TYPES.keys())}"
         )
     return {k: v for k, v in model.model_fields.items() if k != "type"}
+
+
+def field_default(info):
+    """The default a field of get_fields_for_type renders with, or None where
+    it has none. A required field's FieldInfo.default is pydantic's
+    PydanticUndefined sentinel, not None: tested `is not None`, it reached
+    int()/float() in the Add dialog, which raised for every fluidic type
+    (Add Sequence was dead on arrival), and would reach str() in the tree,
+    printing the sentinel's name for a push row whose well is blank."""
+    return None if info.is_required() else info.default

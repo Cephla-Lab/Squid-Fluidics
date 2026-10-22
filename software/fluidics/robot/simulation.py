@@ -23,9 +23,7 @@ import math
 import time
 from collections import namedtuple
 
-AxisReading = namedtuple("AxisReading", "position_mm target_reached enabled fault error_code on_limit",
-                         defaults=(False,))      # on_limit: a limit input (60FDh) active
-HomingReading = namedtuple("HomingReading", "attained error fault homing_mode")
+from .stage import LIMIT_SWITCH_ALARM, AxisReading, HomingReading
 
 # The XYG321-A's strokes as the driver's axis table has them at the vendored
 # commit (nm-servo #8, #13, #15, #16: switch spacing less a margin, every stroke
@@ -36,7 +34,6 @@ XYG321A_STROKES_MM = {"X1": (0.5, 200.0), "Y2": (0.5, 109.0), "Z3": (0.5, 58.5)}
 
 HOMING_POLLS = 3          # reads between the stale bit clearing and homing attained
 HOMING_PARK_SHORT_MM = 0.3   # where homing parks, short of a stroke that starts above 0
-LIMIT_SWITCH_ALARM = 0x8614   # 603Fh while a limit switch holds the axis (NiMotion B06 table 8-1)
 
 _Move = namedtuple("_Move", "start target velocity t0")
 

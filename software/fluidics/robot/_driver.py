@@ -14,17 +14,16 @@ raise) runs for all of them.
 """
 
 from ..errors import DeviceError
-from .simulation import AxisReading, HomingReading
+from .stage import AxisReading, HomingReading, _label
 
 try:
     from ..control.nimotion import simulation      # the driver's own sim:// drives, for tests
     from ..control.nimotion.high_level_api import AxisName, ServoService
     from ..control.nimotion.high_level_api.axis_config import DEFAULT_AXIS_CONFIGS
-    from ..control.nimotion.motor_control import MotionInterruptedError
     DRIVER_AVAILABLE = True
     _IMPORT_ERROR = None
 except ImportError as e:
-    AxisName = ServoService = DEFAULT_AXIS_CONFIGS = MotionInterruptedError = simulation = None
+    AxisName = ServoService = DEFAULT_AXIS_CONFIGS = simulation = None
     DRIVER_AVAILABLE = False
     _IMPORT_ERROR = e                               # kept for the bring-up error to name
 
@@ -48,12 +47,6 @@ _HOMING_ERROR = 0x2000
 _HOMING_MODE = 6
 
 
-def default_axis_table():
-    if not DRIVER_AVAILABLE:
-        raise DeviceError(_install_line()) from _IMPORT_ERROR
-    return DEFAULT_AXIS_CONFIGS
-
-
 class DriverService:
     """ServoService, in the shape XYZStage speaks (stage.py's service
     protocol): non-blocking moves and homing, a waited controlled stop,
@@ -63,16 +56,14 @@ class DriverService:
 
     def __init__(self, port, baudrate, names):
         self._names = names                       # "x"/"y"/"z" -> AxisName
-        table = default_axis_table()
-        self._configs = {name: table[name] for name in names.values()}
+        self._configs = {name: DEFAULT_AXIS_CONFIGS[name] for name in names.values()}
         self._service = ServoService(port=port, baudrate=baudrate, axis_configs=self._configs)
 
     def _call(self, axis, what, fn):
         try:
             return fn()
         except Exception as e:
-            label = getattr(axis, "value", axis)
-            raise DeviceError(f"axis {label}: {what} failed: {e}") from e
+            raise DeviceError(f"axis {_label(axis)}: {what} failed: {e}") from e
 
     def connect(self):
         # The driver verifies and initializes the *current* axis only, and

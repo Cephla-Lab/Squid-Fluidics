@@ -7,8 +7,11 @@ around it -- what a script or the manual tab asks for is what moves.
 
 import pytest
 
-from fluidics.errors import AbortRequested
+from fluidics.control.config import gantry
+from fluidics.errors import AbortRequested, StageError
 from fluidics.manual_operations import ManualOperations
+from fluidics.robot.stage import MIN_TRAVEL_Z_MM
+from fluidics.vocabulary import sipper_vocabulary
 
 
 @pytest.fixture
@@ -20,6 +23,12 @@ def rig(open_chamber_config, instant_devices):
 @pytest.fixture
 def flow_cell(flow_cell_config, instant_devices):
     devices = instant_devices(flow_cell_config)
+    return devices, ManualOperations(devices)
+
+
+@pytest.fixture
+def sipper(plate_sipper_config, instant_devices):
+    devices = instant_devices(plate_sipper_config)
     return devices, ManualOperations(devices)
 
 
@@ -146,12 +155,9 @@ class TestTheRunsControl:
 
 # --- the sipper's manual verbs (spec §9, Task B7) ---
 
-def test_a_manual_extract_through_the_sipper_needs_a_well(plate_sipper_config, built, tmp_path):
+def test_a_manual_extract_through_the_sipper_needs_a_well(sipper):
     """Review focus 4: the manual tab cannot pull air through the sipper."""
-    devices = built(plate_sipper_config, simulation=True, instant=True,
-                    ledger_path=tmp_path / "ledger.json")
-    devices.reservoirs.refill("all")
-    manual = ManualOperations(devices)
+    _, manual = sipper
     manual.open_port(1)
     with pytest.raises(RuntimeError, match="not in a well"):
         manual.extract(2, 100, 1000)
@@ -163,19 +169,16 @@ def test_a_manual_extract_through_the_sipper_needs_a_well(plate_sipper_config, b
     manual.extract(1, 100, 1000)            # another syringe port never reaches the sipper
 
 
-def test_robot_verbs_refuse_on_a_rig_without_a_robot(flow_cell_config, built):
-    manual = ManualOperations(built(flow_cell_config, simulation=True, instant=True))
+def test_robot_verbs_refuse_on_a_rig_without_a_robot(flow_cell):
+    _, manual = flow_cell
     with pytest.raises(RuntimeError, match="no robot"):
         manual.retract()
 
 
-def test_teaching_changes_the_live_placement_and_the_config_together(plate_sipper_config, built):
+def test_teaching_changes_the_live_placement_and_the_config_together(plate_sipper_config, sipper):
     """Codex finding 11: a taught A1 is where the next go-to-well goes,
     and what save_config will write."""
-    from fluidics.control.config import gantry
-    from fluidics.errors import StageError
-    devices = built(plate_sipper_config, simulation=True, instant=True)
-    manual = ManualOperations(devices)
+    devices, manual = sipper
     manual.teach_a1("probes", (13.0, 2.0))
     manual.teach_dip("probes", 49.0)
     manual.go_to_well("probes/A1")
@@ -191,23 +194,18 @@ def test_teaching_changes_the_live_placement_and_the_config_together(plate_sippe
     assert gantry(plate_sipper_config).travel_z_mm == 2.0
 
 
-def test_jog_refuses_xy_below_travel_height(plate_sipper_config, built):
-    from fluidics.errors import StageError
-    devices = built(plate_sipper_config, simulation=True, instant=True)
-    manual = ManualOperations(devices)
+def test_jog_refuses_xy_below_travel_height(sipper):
+    _, manual = sipper
     manual.jog("z", 10.0)
     with pytest.raises(StageError, match="travel height"):
         manual.jog("x", 1.0)
 
 
-def test_teach_travel_refuses_a_height_homing_may_park_below(plate_sipper_config, built):
+def test_teach_travel_refuses_a_height_homing_may_park_below(plate_sipper_config, sipper):
     """Home, then "Set travel height here", would teach the 0.1 to 0.5 mm
     the drives park at, and the next launch's homing refuses any Z that
     parks below it. Refused before the robot or the config changes."""
-    from fluidics.control.config import gantry
-    from fluidics.robot.stage import MIN_TRAVEL_Z_MM
-    devices = built(plate_sipper_config, simulation=True, instant=True)
-    manual = ManualOperations(devices)
+    devices, manual = sipper
     with pytest.raises(ValueError, match=r"homing.*1 mm or more"):
         manual.teach_travel(0.2)
     assert devices.robot._stage.travel_z_mm == 1.0
@@ -216,31 +214,26 @@ def test_teach_travel_refuses_a_height_homing_may_park_below(plate_sipper_config
 
 
 def test_teach_travel_refuses_a_height_a_plates_agitation_would_reach_and_changes_nothing(
-        plate_sipper_config, built):
+        plate_sipper_config, sipper):
     """The config's rule (travel above every dip less the amplitude), with
     the robot in a well: refused, the robot, its witness and the config
     as they were."""
-    from fluidics.control.config import gantry
-    devices = built(plate_sipper_config, simulation=True, instant=True)
-    manual = ManualOperations(devices)
+    devices, manual = sipper
     manual.go_to_well("ssct/A1")
-    with pytest.raises(ValueError, match="probes's agitation stroke"):
+    with pytest.raises(ValueError, match="plate 'probes'.*agitation stroke"):
         manual.teach_travel(45.0)                 # probes: dip 50 less 5
     assert devices.robot._stage.travel_z_mm == 1.0
     assert gantry(plate_sipper_config).travel_z_mm == 1.0
     assert devices.robot.current_well is not None
 
 
-def test_teach_travel_rechecks_the_sippers_installed_placements(plate_sipper_config, built):
+def test_teach_travel_rechecks_the_sippers_installed_placements(plate_sipper_config, sipper):
     """The live placements are what go_to_well and agitate use: a plate
     installed on the sipper shallower than the config has it (a library
     caller's set_placement) is checked against the new travel height too,
     before anything changes."""
-    from fluidics.control.config import gantry
-    from fluidics.errors import StageError
-    devices = built(plate_sipper_config, simulation=True, instant=True)
-    manual = ManualOperations(devices)
-    shallow = manual._vocabulary.placement("probes")
+    devices, manual = sipper
+    shallow = sipper_vocabulary(plate_sipper_config).placement("probes")
     shallow.dip_z_mm = 20.0                       # agitates up to 15 mm
     devices.robot.set_placement("probes", shallow)
     with pytest.raises(StageError, match="plate 'probes'.*agitation"):

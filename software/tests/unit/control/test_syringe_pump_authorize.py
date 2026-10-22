@@ -1,16 +1,18 @@
 """The pump asks before it dispatches an extract (spec D6)."""
 import json
+from contextlib import closing
 
 import pytest
 
-from fluidics.control.syringe_pump import SyringePumpSimulation
 from fluidics.errors import ReservoirOverdraw
 from fluidics.reservoirs import ReservoirLedger
+
+from .pump_helpers import sim_pump
 
 
 @pytest.fixture
 def pump():
-    return SyringePumpSimulation(sn="SIM", syringe_ul=5000, speed_code_limit=10, waste_port=3)
+    return sim_pump()
 
 
 def test_an_authorizer_that_raises_refuses_the_draw_before_anything_moved(pump, monkeypatch):
@@ -53,8 +55,7 @@ def test_an_attached_ledger_refuses_an_overdraw_before_the_pump_moves(pump, tmp_
     path.write_text(json.dumps({"definitions": defs,
                                 "reservoirs": {"port_25": {"dispatched_ul": 4500}},
                                 "undeclared": []}))
-    ledger = ReservoirLedger.load(path, defs)
-    try:
+    with closing(ReservoirLedger.load(path, defs)) as ledger:
         ledger.attach(pump, sipper_port=1, extract_port=2, current_port=lambda: 25,
                       current_well=lambda: None)
         pump.extract(2, 500, 5)
@@ -62,5 +63,3 @@ def test_an_attached_ledger_refuses_an_overdraw_before_the_pump_moves(pump, tmp_
             pump.execute()
         assert pump.executed_ops == []
         assert json.loads(path.read_text())["reservoirs"]["port_25"]["dispatched_ul"] == 4500
-    finally:
-        ledger.close()

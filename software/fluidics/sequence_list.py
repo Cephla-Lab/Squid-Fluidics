@@ -36,6 +36,13 @@ from .sequences import (SequenceListAdapter, is_included, label_for_type,
 Included = namedtuple("Included", "rows sequences")
 
 
+def _well_suffix(seq):
+    """The ": well" a well row's title carries, spelled once: what title()
+    appends is exactly what set_name() takes off."""
+    well = seq.get("well")
+    return f": {well}" if well else ""
+
+
 class SequenceList:
     """The rows, the verdicts, and the verbs that reorder them.
 
@@ -156,8 +163,7 @@ class SequenceList:
         ask it rather than each composing the fallback."""
         seq = self._rows[row]
         title = seq.get("name") or label_for_type(seq.get("type", ""))
-        well = seq.get("well")
-        return f"{title}: {well}" if well else title
+        return f"{title}{_well_suffix(seq)}"
 
     def set_name(self, row, name):
         """Name the row, or unname it: blank, or the type's own label typed
@@ -165,12 +171,7 @@ class SequenceList:
         the ": well" suffix title() appends is taken off first -- else it
         would pile up on the name with every edit."""
         seq = self._rows[row]
-        name = name or ""
-        well = seq.get("well")
-        suffix = f": {well}" if well else ""
-        if suffix and name.endswith(suffix):
-            name = name[:-len(suffix)]
-        name = name.strip()
+        name = (name or "").removesuffix(_well_suffix(seq)).strip()
         label = label_for_type(seq.get("type", ""))
         seq["name"] = name if name and name != label else None
         self._validate_row(row)

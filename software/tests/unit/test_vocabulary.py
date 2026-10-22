@@ -1,3 +1,5 @@
+import pytest
+
 from fluidics.robot.labware import WellRef
 from fluidics.vocabulary import sipper_vocabulary
 
@@ -12,11 +14,8 @@ def test_resolve_uses_the_default_reservoir_and_checks_the_plate(plate_sipper_co
     assert v.resolve("A3") == WellRef("probes", "A3")
     assert v.resolve("ssct/H12") == WellRef("ssct", "H12")
     for bad in ("water/A1", "A13", "ssct/I1"):
-        try:
+        with pytest.raises(ValueError):
             v.resolve(bad)
-        except ValueError:
-            continue
-        raise AssertionError(bad)
 
 
 def test_well_names_carry_the_labels(plate_sipper_config):

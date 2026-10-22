@@ -11,6 +11,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 from ..files import atomic_write
+from ..robot.labware import RESERVOIR_NAME, PlateGeometry, agitation_problem
 from ..robot.stage import MIN_TRAVEL_Z_MM
 
 
@@ -135,7 +136,7 @@ class SelectorValvesConfig(_StrictModel):
         return self
 
 
-PLATE_AXES = ("+x", "-x", "+y", "-y")
+PlateAxis = Literal["+x", "-x", "+y", "-y"]    # a stage direction a plate's columns or rows run along
 
 
 class ReservoirConfig(_StrictModel):
@@ -151,23 +152,27 @@ class ReservoirConfig(_StrictModel):
     # No default: the only deck runs its columns along +y and its rows along
     # +x, so a block that leaves these out is refused at load rather than
     # placed on a guess the corner reach check cannot catch.
-    column_axis: Literal["+x", "-x", "+y", "-y"]   # columns 1..12 run along this
-    row_axis: Literal["+x", "-x", "+y", "-y"]      # rows A..H run along this
+    column_axis: PlateAxis      # columns 1..12 run along this
+    row_axis: PlateAxis         # rows A..H run along this
     loaded_ul: int = Field(gt=0)
     residual_ul: int = Field(ge=0)
     well_names: Optional[Dict[str, str]] = None
     loaded_ul_by_well: Optional[Dict[str, int]] = None
 
+    @property
+    def geometry(self):
+        """The plate's wells, from number_of_wells."""
+        return PlateGeometry.from_well_count(self.number_of_wells)
+
     @model_validator(mode='after')
     def _check_wells_and_volumes(self):
-        from ..robot.labware import PlateGeometry
-        if not re.fullmatch(r"[A-Za-z0-9_-]+", self.name):
+        if not re.fullmatch(RESERVOIR_NAME, self.name):
             raise ValueError(f"reservoir name {self.name!r}: letters, digits, _ and - only")
         if self.name == "all" or re.fullmatch(r"port_\d+", self.name):
             raise ValueError(f"reservoir name {self.name!r} is reserved (all, port_N)")
         if self.column_axis[1] == self.row_axis[1]:
             raise ValueError(f"{self.name}: column_axis and row_axis must be perpendicular")
-        geometry = PlateGeometry.from_well_count(self.number_of_wells)
+        geometry = self.geometry
         for field_name in ('well_names', 'loaded_ul_by_well'):
             for well in (getattr(self, field_name) or {}):
                 if not geometry.is_well(well):
@@ -200,7 +205,7 @@ class GantryConfig(_StrictModel):
 
     @model_validator(mode='after')
     def _check_names_and_wells(self):
-        from ..robot.labware import PlateGeometry, parse_ref
+        from ..vocabulary import SipperVocabulary      # function-time: vocabulary imports this module
         if (self.serial_number is None) == (self.port is None):
             raise ValueError("nimotion_gantry_system: give exactly one of serial_number or port")
         if set(self.axes) != {"x", "y", "z"}:
@@ -213,19 +218,16 @@ class GantryConfig(_StrictModel):
         by_name = {r.name: r for r in self.reservoirs.values()}
         if self.default_reservoir not in by_name:
             raise ValueError(f"default_reservoir {self.default_reservoir!r} names no reservoir")
+        vocabulary = SipperVocabulary(self.selector_valve_port, self.default_reservoir, by_name)
         for field_name in ('priming_well', 'clean_up_well'):
-            text = getattr(self, field_name)
-            ref = parse_ref(text, self.default_reservoir)
-            if ref.reservoir not in by_name:
-                raise ValueError(f"{field_name}: no reservoir named {ref.reservoir!r}")
-            if not PlateGeometry.from_well_count(by_name[ref.reservoir].number_of_wells).is_well(ref.well):
-                raise ValueError(f"{field_name}: {ref.well} is not a well on {ref.reservoir}")
+            try:
+                vocabulary.resolve(getattr(self, field_name))
+            except ValueError as e:
+                raise ValueError(f"{field_name}: {e}") from None
         for r in by_name.values():
-            if self.travel_z_mm >= r.dip_z_mm - self.agitate_amplitude_mm:
-                raise ValueError(
-                    f"{r.name}: the agitation stroke must stay in the well: travel_z_mm "
-                    f"({self.travel_z_mm}) must be below dip_z_mm - agitate_amplitude_mm "
-                    f"({r.dip_z_mm} - {self.agitate_amplitude_mm})")
+            problem = agitation_problem(r.name, r.dip_z_mm, self.agitate_amplitude_mm, self.travel_z_mm)
+            if problem is not None:
+                raise ValueError(problem)
         return self
 
 

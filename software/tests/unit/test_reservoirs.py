@@ -2,6 +2,7 @@
 import json
 import logging
 import re
+from contextlib import closing
 from types import SimpleNamespace
 
 import pytest
@@ -229,11 +230,8 @@ class TestPersistence:
     def test_a_matching_file_restores(self, rig, tmp_path):
         ledger, pump, _ = rig
         pump.extract(EXTRACT_PORT, 500)
-        again = ReservoirLedger.load(tmp_path / "ledger.json", DEFS)
-        try:
+        with closing(ReservoirLedger.load(tmp_path / "ledger.json", DEFS)) as again:
             assert again.declared and again.remaining("port_25") == 4300
-        finally:
-            again.close()
 
     def test_a_changed_entry_is_undeclared_and_the_others_keep_their_balances(self, rig, tmp_path):
         """Review focus 3: an edited loaded volume must not resurrect a
@@ -244,8 +242,7 @@ class TestPersistence:
         pump.extract(EXTRACT_PORT, 300)
         changed = dict(DEFS, port_25={"loaded_ul": 6000, "residual_ul": 200},
                        **{"ssct/A3": {"loaded_ul": 1800, "residual_ul": 50}})
-        again = ReservoirLedger.load(tmp_path / "ledger.json", changed)
-        try:
+        with closing(ReservoirLedger.load(tmp_path / "ledger.json", changed)) as again:
             assert again.undeclared == ["port_25", "ssct/A3"]
             assert again.remaining("ssct/A1") == 1450, "an unchanged entry kept its balance"
             with pytest.raises(ReservoirUndeclared, match="port_25"):
@@ -253,33 +250,21 @@ class TestPersistence:
             again.refill("port_25")
             again.refill("ssct/A3")
             assert again.declared and again.remaining("port_25") == 5800
-        finally:
-            again.close()
 
     def test_a_missing_or_corrupt_file_leaves_everything_undeclared(self, tmp_path):
-        ledger = ReservoirLedger.load(tmp_path / "none.json", DEFS)
-        try:
+        with closing(ReservoirLedger.load(tmp_path / "none.json", DEFS)) as ledger:
             assert ledger.undeclared == sorted(DEFS)
             ledger.refill("all")
             assert ledger.declared
-        finally:
-            ledger.close()
         (tmp_path / "bad.json").write_text("{not json")
-        ledger = ReservoirLedger.load(tmp_path / "bad.json", DEFS)
-        try:
+        with closing(ReservoirLedger.load(tmp_path / "bad.json", DEFS)) as ledger:
             assert not ledger.declared
-        finally:
-            ledger.close()
 
     def test_a_second_process_cannot_hold_the_same_ledger(self, tmp_path):
-        first = ReservoirLedger.load(tmp_path / "ledger.json", DEFS)
-        try:
+        with closing(ReservoirLedger.load(tmp_path / "ledger.json", DEFS)):
             with pytest.raises(ReservoirInUse, match="in use"):
                 ReservoirLedger.load(tmp_path / "ledger.json", DEFS)
-        finally:
-            first.close()
-        second = ReservoirLedger.load(tmp_path / "ledger.json", DEFS)
-        second.close()
+        ReservoirLedger.load(tmp_path / "ledger.json", DEFS).close()
 
     def test_refilling_a_reservoir_name_fills_every_well_of_it(self, rig):
         ledger, pump, state = rig
@@ -287,6 +272,13 @@ class TestPersistence:
         pump.extract(EXTRACT_PORT, 1000)
         ledger.refill("ssct")
         assert ledger.remaining("ssct/A1") == 1750
+
+    def test_a_refill_of_nothing_or_of_an_unknown_name_is_refused(self, rig):
+        """A bottle has no plate, so a None key must not match every bottle."""
+        ledger, pump, state = rig
+        for key in (None, "water", "ssct/Z9"):
+            with pytest.raises(ValueError, match="nothing to refill"):
+                ledger.refill(key)
 
     def test_a_refill_that_cannot_be_written_changes_nothing(self, tmp_path):
         """Like a draw: a refill the file does not hold is not one, or memory
@@ -312,11 +304,8 @@ class TestPersistence:
             self, tmp_path, on_disk):
         path = tmp_path / "ledger.json"
         path.write_text(json.dumps(on_disk))
-        ledger = ReservoirLedger.load(path, DEFS)
-        try:
+        with closing(ReservoirLedger.load(path, DEFS)) as ledger:
             assert ledger.undeclared == sorted(DEFS)
-        finally:
-            ledger.close()
 
     def test_an_unexpected_failure_inside_load_releases_the_lock(self, tmp_path, monkeypatch):
         def fail(*args):
@@ -328,8 +317,7 @@ class TestPersistence:
                 ReservoirLedger.load(tmp_path / "ledger.json", DEFS)
         # `failure` keeps the traceback, and the half-built ledger in it, alive:
         # the lock must have been released by load, not by the garbage collector.
-        again = ReservoirLedger.load(tmp_path / "ledger.json", DEFS)
-        again.close()
+        ReservoirLedger.load(tmp_path / "ledger.json", DEFS).close()
         assert failure.value is not None
 
     @pytest.mark.parametrize("balance", ["NaN", "-500", "5001"],
@@ -340,16 +328,13 @@ class TestPersistence:
         path = tmp_path / "ledger.json"
         path.write_text('{"definitions": %s, "reservoirs": {"port_25": {"dispatched_ul": %s}}, '
                         '"undeclared": []}' % (json.dumps(DEFS), balance))
-        ledger = ReservoirLedger.load(path, DEFS)
-        try:
+        with closing(ReservoirLedger.load(path, DEFS)) as ledger:
             assert ledger.undeclared == ["port_25"]
             pump = FakePump()
             ledger.attach(pump, SIPPER_PORT, EXTRACT_PORT, lambda: 25, lambda: None)
             with pytest.raises(ReservoirUndeclared, match="port_25"):
                 pump.extract(EXTRACT_PORT, 100)
             assert pump.started == []
-        finally:
-            ledger.close()
 
 
 class TestTheRunTally:

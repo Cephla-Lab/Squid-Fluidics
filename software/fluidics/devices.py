@@ -31,7 +31,6 @@ from .experiment_worker import ExperimentWorker
 from .merfish_operations import MERFISHOperations
 from .open_chamber_operations import OpenChamberOperations
 from .reservoirs import ReservoirLedger, default_ledger_path, reservoir_definitions
-from .robot.labware import well_key
 from .robot.sipper import RobotSipper
 from .robot.stage import POLL_SECONDS, XYZStage
 from .vocabulary import sipper_vocabulary
@@ -210,8 +209,7 @@ def _build_robot(config, simulation, run_control, instant):
     stage = XYZStage(service, names, g.travel_z_mm, g.xy_velocity_mm_s,
                      g.z_velocity_mm_s, run_control,
                      poll_seconds=0.0 if instant else POLL_SECONDS)
-    robot = RobotSipper(stage, vocabulary.placements(), g.default_reservoir,
-                        g.agitate_amplitude_mm)
+    robot = RobotSipper(stage, vocabulary.placements(), g.agitate_amplitude_mm)
     try:
         stage.connect()
         robot.home()
@@ -345,7 +343,8 @@ def build_devices(config, simulation=False, on_issue=None, run_control=None,
         # The robot before the valves: its own port, no Teensy dependence,
         # and a wrong adapter fails before the valves spend their homing
         # time. Not survivable: a sipper that cannot home cannot select.
-        if gantry(config) is not None:
+        g = gantry(config)
+        if g is not None:
             robot = _build_robot(config, simulation, run_control, instant)
 
         selector_valves = SelectorValveSystem(controller, config, run_control)
@@ -356,11 +355,11 @@ def build_devices(config, simulation=False, on_issue=None, run_control=None,
         # valves' port and the sipper's well, and names a port's reagent
         # as the valves do.
         reservoirs.attach(
-            syringe_pump, None if robot is None else gantry(config).selector_valve_port,
-            config.syringe_pump.extract_port, selector_valves.get_current_port,
-            (lambda: None) if robot is None else
-            (lambda: None if robot.current_well is None
-             else well_key(robot.current_well)),
+            syringe_pump,
+            sipper_port=None if robot is None else g.selector_valve_port,
+            extract_port=config.syringe_pump.extract_port,
+            current_port=selector_valves.get_current_port,
+            current_well=(lambda: None) if robot is None else robot.current_well_key,
             port_to_reagent=selector_valves.port_to_reagent)
     except BaseException:
         # A pump that is not found, a dead controller, a stuck valve, or a

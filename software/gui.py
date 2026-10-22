@@ -38,7 +38,7 @@ from fluidics.qt.support import (WorkerEvent, PostsToQtThread, GuiLogHandler,  #
                                  _ask_yes_no, _hms)
 from fluidics.qt.sequence_editor import AddSequenceDialog, SequencesWidget  # noqa: E402,F401
 from fluidics.qt.manual_control import PortNamesDialog, ManualControlWidget  # noqa: E402,F401
-from fluidics.qt.robot_control import ROBOT_JOB_SOURCE, RobotControlWidget  # noqa: E402,F401
+from fluidics.qt.robot_control import RobotControlWidget, is_robot_job  # noqa: E402,F401
 from fluidics.qt.sensor_plots import (_safe_filename_part, TimeSeriesPlotWidget,  # noqa: E402,F401
                                       TemperatureControlWidget, FlowSensorWidget,
                                       FlowSensorControlWidget)
@@ -175,7 +175,7 @@ class FluidicsControlGUI(PostsToQtThread, QMainWindow):
         Reads the session rather than the announcement it was posted
         with -- the rule for deferred subscribers, on RunSession.state."""
         kind = self.session.kind
-        robot_job = kind == "manual" and self.session.source == ROBOT_JOB_SOURCE
+        robot_job = is_robot_job(self.session)
         self.tabWidget.setTabEnabled(self.RUN_TAB, kind != "manual")
         self.tabWidget.setTabEnabled(self.MANUAL_TAB, kind != "run" and not robot_job)
         if self.ROBOT_TAB is not None:

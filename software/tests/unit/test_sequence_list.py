@@ -7,14 +7,23 @@ and every structural verb can be exercised (or driven by a script, or a
 headless embedder) with no GUI in the process.
 """
 
+from fluidics.control.config import available_ports
 from fluidics.sequence_list import SequenceList
 from fluidics.sequences import label_for_type
+from fluidics.vocabulary import sipper_vocabulary
 
-from ..conftest import FLOW, TEMP, in_a_fresh_interpreter
+from ..conftest import FLOW, HYB, TEMP, in_a_fresh_interpreter
 
 
 def flow_cell(*sequences):
     return SequenceList("Flow Cell", ports=range(1, 25), sequences=sequences)
+
+
+def sipper_rig(config, *sequences):
+    """The list over the plate-sipper fixture rig, where FLOW's port (1) is
+    the sipper's: FLOW is the sipper row with no well, HYB the one with."""
+    return SequenceList("Flow Cell", available_ports(config), sequences,
+                        sipper=sipper_vocabulary(config))
 
 
 class TestWhatARunWouldTake:
@@ -202,14 +211,7 @@ def test_the_model_needs_no_qt():
 
 
 def test_a_sipper_row_is_titled_by_its_well_and_validated_with_the_sipper(plate_sipper_config):
-    from fluidics.control.config import available_ports
-    from fluidics.vocabulary import sipper_vocabulary
-    rows = SequenceList("Flow Cell", available_ports(plate_sipper_config),
-                        [{"type": "flow_reagent", "fluidic_port": 1, "well": "A1",
-                          "flow_rate": 2000, "volume": 100, "name": "hyb"},
-                         {"type": "flow_reagent", "fluidic_port": 1,
-                          "flow_rate": 2000, "volume": 100}],
-                        sipper=sipper_vocabulary(plate_sipper_config))
+    rows = sipper_rig(plate_sipper_config, dict(HYB, name="hyb"), FLOW)
     assert rows.title(0) == "hyb: A1"
     assert rows.problem(0) is None
     assert rows.problem(1) == "fluidic_port=1 is the sipper: name a well"
@@ -219,14 +221,7 @@ def test_a_well_rows_title_typed_back_leaves_its_name_alone(plate_sipper_config)
     """The editor hands set_name the item's text -- the title, well and
     all -- on every change to a top-level item: the well must not pile up
     on the name, and an unnamed row stays unnamed."""
-    from fluidics.control.config import available_ports
-    from fluidics.vocabulary import sipper_vocabulary
-    rows = SequenceList("Flow Cell", available_ports(plate_sipper_config),
-                        [{"type": "flow_reagent", "fluidic_port": 1, "well": "A1",
-                          "flow_rate": 2000, "volume": 100, "name": "hyb"},
-                         {"type": "flow_reagent", "fluidic_port": 1, "well": "ssct/A1",
-                          "flow_rate": 2000, "volume": 100}],
-                        sipper=sipper_vocabulary(plate_sipper_config))
+    rows = sipper_rig(plate_sipper_config, dict(HYB, name="hyb"), dict(HYB, well="ssct/A1"))
     for _ in range(2):
         rows.set_name(0, rows.title(0))
         rows.set_name(1, rows.title(1))

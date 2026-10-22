@@ -27,7 +27,6 @@ from qtpy.QtWidgets import (
 )
 
 from fluidics.control.config import available_ports, port_key, save_config
-from fluidics.qt.robot_control import connect_click
 from fluidics.qt.support import PostsToQtThread, subscribe_until_detached
 
 _logger = logging.getLogger("fluidics.gui")
@@ -268,7 +267,7 @@ class ManualControlWidget(PostsToQtThread, QWidget):
             row.addWidget(self._remainingLabels[key])
         row.addStretch()
         self.bottleRefilledButton = QPushButton("Bottle refilled…")
-        connect_click(self.bottleRefilledButton, self.bottleRefilled)
+        self.bottleRefilledButton.clicked.connect(self.bottleRefilled)
         row.addWidget(self.bottleRefilledButton)
         self._controls.append(self.bottleRefilledButton)
         return row

@@ -2,7 +2,7 @@
 import pytest
 
 from fluidics.robot.labware import (PlateGeometry, PlatePlacement, WellRef,
-                                    expand_wells, parse_ref, well_key)
+                                    parse_ref, well_key)
 
 
 G96 = PlateGeometry.from_well_count(96)
@@ -40,22 +40,10 @@ class TestGeometry:
     def test_the_corners(self):
         assert G96.corners() == ["A1", "A12", "H1", "H12"]
 
-    def test_a_range_expands_column_major_and_mixes_with_singles(self):
-        assert expand_wells(["A1:C1", "H12"], G96) == ["A1", "B1", "C1", "H12"]
-        assert expand_wells(["G12:H12"], G96) == ["G12", "H12"]
-
     def test_a_trailing_newline_is_not_a_well(self):
         assert not G96.is_well("A1\n")
         with pytest.raises(ValueError, match="not a well name"):
-            expand_wells(["A1\n"], G96)
-        with pytest.raises(ValueError, match="not a well name"):
-            expand_wells(["A1:B1\n"], G96)
-
-    def test_a_backwards_or_unknown_range_is_refused(self):
-        with pytest.raises(ValueError):
-            expand_wells(["C1:A1"], G96)
-        with pytest.raises(ValueError):
-            expand_wells(["A1:Z1"], G96)
+            G96.index("A1\n")
 
 
 class TestPlacement:

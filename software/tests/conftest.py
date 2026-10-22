@@ -21,7 +21,25 @@ def qapp():
     from qtpy.QtWidgets import QApplication
     yield QApplication.instance() or QApplication([])
 
+
+def settle(system):
+    """The job over, its thread gone, every report it posted delivered: for a
+    widget test that reads the GUI after a manual job. Untimed, as the suite
+    waits on a session: under the fake clock a timed wait cannot block, and
+    wait_until's budget is fake seconds, which other threads spend and a job's
+    error path (a logged traceback) can outlast. The join matters too: the
+    job's on_finished is posted after `busy` already reads False."""
+    from qtpy.QtWidgets import QApplication
+    assert system.wait()
+    QApplication.processEvents()
+
+
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
+# The shipped sample configs. The plate sipper's config is read from here,
+# not from a fixture copy: one rig definition, so the suite cannot pass on
+# numbers the documented sample no longer has.
+SAMPLE_CONFIG_DIR = Path(__file__).parent.parent / "sample_config"
 
 
 # The two sequences the editor suites are built from: one fluidic row with
@@ -46,6 +64,30 @@ def flow_cell_config():
 def open_chamber_config():
     from fluidics.control.config import load_config
     return load_config(str(FIXTURES_DIR / "open_chamber_config.yaml"))
+
+
+@pytest.fixture
+def simulated_system(tmp_path):
+    """A FluidicsSystem over an instant simulated rig for `config`, closed
+    clean at teardown -- the rig the widget suites hold. The flow sensors
+    are closed at once: none of these tests reads flow, and under the fake
+    clock the publish thread's per-reading wait is a busy spin (close() is
+    idempotent, so the teardown's close is unharmed). Run reports land in
+    the test's tmp_path, never the user's log directory."""
+    from fluidics.devices import build_devices
+    from fluidics.system import FluidicsSystem
+    systems = []
+
+    def _build(config):
+        devices = build_devices(config, simulation=True, instant=True)
+        for sensor in devices.flow_sensors:
+            sensor.close()
+        system = FluidicsSystem(config, devices, report_dir=tmp_path)
+        systems.append(system)
+        return system
+
+    yield _build
+    assert [error for system in systems for error in system.close()] == []
 
 
 # Captured at import, before _fast_clock patches them.
@@ -337,16 +379,10 @@ def driver_or_skip(require_axes=("X1", "Y2", "Z3")):
     CI job, where a skip would hide a broken import behind a green run.
     A driver that imports but lacks an axis this rig maps (nm-servo before
     PR #8 had no X1) skips the same way."""
-    import os
-    try:
-        import fluidics.robot._driver as driver
-    except ImportError as e:
-        driver, error = None, e
-    else:
-        error = driver._IMPORT_ERROR
+    import fluidics.robot._driver as driver   # the shim catches the vendored driver's ImportError itself
     missing = None
-    if driver is None or not driver.DRIVER_AVAILABLE:
-        missing = f"the servo driver did not import: {error}"
+    if not driver.DRIVER_AVAILABLE:
+        missing = f"the servo driver did not import: {driver._IMPORT_ERROR}"
     else:
         names = {axis.value for axis in driver.AxisName}
         absent = [axis for axis in require_axes if axis not in names]
@@ -362,4 +398,24 @@ def driver_or_skip(require_axes=("X1", "Y2", "Z3")):
 @pytest.fixture
 def plate_sipper_config():
     from fluidics.control.config import load_config
-    return load_config(str(FIXTURES_DIR / "plate_sipper_config.yaml"))
+    return load_config(str(SAMPLE_CONFIG_DIR / "plate_sipper_config.yaml"))
+
+
+@pytest.fixture
+def vocabulary(plate_sipper_config):
+    """The fixture sipper rig's well vocabulary -- what the gate, the live
+    paint and the editor are handed on that rig (None is a rig without one)."""
+    from fluidics.vocabulary import sipper_vocabulary
+    return sipper_vocabulary(plate_sipper_config)
+
+
+# The rows the sipper suites are built from, against the sipper fixture
+# config: a well draw from the default plate's A1 through the sipper's port
+# (1); the push that follows one (490 uL, the fixture's push_volume_ul); a
+# priming from the bulk bottle (port 25); and the words a priming or
+# clean-up whose use_ports leaves out the sipper's port is refused with.
+HYB = {"type": "flow_reagent", "fluidic_port": 1, "well": "A1", "flow_rate": 2000, "volume": 100}
+PUSH = {"type": "push", "well": "ssct/A1", "flow_rate": 2000}
+PRIME = {"type": "priming", "fluidic_port": 25, "flow_rate": 5000, "volume": 800}
+SKIPS_THE_SIPPER = ("use_ports leaves out port 1 (the sipper): "
+                    "priming and clean-up never skip the sipper")

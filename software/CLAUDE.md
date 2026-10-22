@@ -157,7 +157,7 @@ A Flow Cell rig may carry an XYZ robot that moves a sipper on one selector-valve
 
 `gui.py` is the standalone application: it builds the `FluidicsSystem`, lays the tabs out, and owns the window's lifecycle. The widgets themselves live in `fluidics/qt/`, so an embedding application (Squid's fluidics-protocol GUI) can import them without the standalone app:
 
-- **`fluidics/qt/support.py`** — `PostsToQtThread` (the one cross-thread idiom: `_post_event(name, *args)` runs a method on the Qt thread), `GuiLogHandler` (feeds the run tab's log pane), `subscribe_until_detached`, and the small dialog/format helpers
+- **`fluidics/qt/support.py`** — `PostsToQtThread` (the one cross-thread idiom: `_post_event(name, *args)` runs a method on the Qt thread), `GuiLogHandler` (feeds the run tab's log pane), `subscribe_until_detached`, `WellCombo` and `connect_click` (the widget helpers the editor and the Robot tab share), and the small dialog/format helpers
 - **`fluidics/qt/sequence_editor.py`** — `SequencesWidget` (renders the sequence list, the run controls, the log pane) and `AddSequenceDialog`
 - **`fluidics/qt/manual_control.py`** — `ManualControlWidget`
 - **`fluidics/qt/robot_control.py`** — `RobotControlWidget`, the Robot tab (see Plate Sipper)

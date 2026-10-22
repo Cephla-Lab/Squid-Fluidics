@@ -27,12 +27,17 @@ never shows an axis in flight, such a move ends in the timeout instead.
 
 import logging
 import time
+from collections import namedtuple
 
 from ..errors import DeviceError, StageError
 from ..subscribers import Subscribers
-from .simulation import AxisReading, HomingReading  # noqa: F401  (what both services return)
 
 _logger = logging.getLogger(__name__)
+
+# What both services (simulation.SimulatedService, _driver.DriverService) return.
+AxisReading = namedtuple("AxisReading", "position_mm target_reached enabled fault error_code on_limit",
+                         defaults=(False,))      # on_limit: a limit input (60FDh) active
+HomingReading = namedtuple("HomingReading", "attained error fault homing_mode")
 
 POLL_SECONDS = 0.05
 TOLERANCE_MM = 0.05
@@ -163,9 +168,7 @@ class XYZStage:
         held = 0
         for _ in range(budget):
             self._control.sleep(self._poll)
-            reading = self._service.read(axis)
-            if reading.fault or not reading.enabled:
-                raise DeviceError(self._describe(axis, reading))
+            reading = self._read_checked(axis)
             if abs(reading.position_mm - reference) > SETTLE_WINDOW_MM:
                 reference, held = reading.position_mm, 0
             else:
@@ -175,23 +178,19 @@ class XYZStage:
         _logger.warning("axis %s: still moving %.0f s after homing attained (last read %.3f mm); going on",
                         _label(axis), SETTLE_BUDGET_S, reference)
 
-    def close(self, quiescent=True, retract=True):
-        """Quiescent: retract, brake, disable, disconnect. Under a job that
-        did not stop in time: no moves at all, a halt instead. Returns the
-        exceptions the steps raised, each shielded.
-        retract=False: a quiescent close makes no move (the tip rests in its well).
+    def close(self, quiescent=True):
+        """Brake, disable, disconnect; no move either way (the tip rests in
+        its well: the lead screw holds Z, and the next launch homes upward
+        first). Under a job that did not stop in time, or before homing
+        ended, a halt first. Returns the exceptions the steps raised, each
+        shielded.
         Threading: that halt runs on the closer's thread while the stuck job
         may still poll this service; the vendored driver serializes each
         Modbus request with its response (the client's RLock in
         control/nimotion/modbus_rtu/client.py, over serial_comm/serial_port.py's
         per read/write RLock), and the interleaving on the drives is a bench
         item."""
-        steps = []
-        if quiescent and self._homed:
-            if retract:
-                steps.append(self.retract)
-        else:
-            steps.append(self.halt)
+        steps = [] if quiescent and self._homed else [self.halt]
         steps.append(lambda: self._service.engage_brake(self._z))
         steps.extend(lambda axis=axis: self._service.disable(axis)
                      for axis in (self._x, self._y, self._z))
@@ -270,9 +269,7 @@ class XYZStage:
                 # Left out of the leg, but not out of the pre-check: a
                 # faulted or disabled axis refuses the move like one that
                 # was going to travel.
-                reading = self._service.read(axis)
-                if reading.fault or not reading.enabled:
-                    raise DeviceError(self._describe(axis, reading))
+                self._read_checked(axis)
         if not targets:
             return
         self._leg(targets)
@@ -330,9 +327,7 @@ class XYZStage:
         self._control.checkpoint()
         longest = 0.0
         for axis, (target, velocity) in targets.items():
-            reading = self._service.read(axis)
-            if reading.fault or not reading.enabled:
-                raise DeviceError(self._describe(axis, reading))
+            reading = self._read_checked(axis)
             longest = max(longest, abs(target - reading.position_mm) / velocity)
         self._control.check()          # a cancel that landed during the reads: dispatch nothing
         started = []
@@ -347,9 +342,7 @@ class XYZStage:
             while pending:
                 self._control.sleep(self._poll)
                 for axis, (target, _) in targets.items():
-                    reading = self._service.read(axis)
-                    if reading.fault or not reading.enabled:
-                        raise DeviceError(self._describe(axis, reading))
+                    reading = self._read_checked(axis)
                     if reading.error_code == LIMIT_SWITCH_ALARM:
                         raise DeviceError(f"axis {_label(axis)}: move to {target:.2f} mm stopped by a "
                                           f"limit switch at {reading.position_mm:.2f} mm")
@@ -412,11 +405,17 @@ class XYZStage:
             _logger.error("The stage position could not be read after a halt: %s", e)
         self._publish()
 
-    @staticmethod
-    def _describe(axis, reading):
+    def _read_checked(self, axis):
+        """The axis's reading, or DeviceError for a faulted or disabled
+        drive: the one health rule every pre-check and poll applies. The
+        reads that only witness where an axis is (home, _refresh_position)
+        stay unchecked, so a fault still leaves the position known."""
+        reading = self._service.read(axis)
         if reading.fault:
-            return f"axis {_label(axis)}: drive fault, error code 0x{reading.error_code:04X}"
-        return f"axis {_label(axis)}: drive is not enabled"
+            raise DeviceError(f"axis {_label(axis)}: drive fault, error code 0x{reading.error_code:04X}")
+        if not reading.enabled:
+            raise DeviceError(f"axis {_label(axis)}: drive is not enabled")
+        return reading
 
     def _publish(self):
         self.moves.notify(self._position)

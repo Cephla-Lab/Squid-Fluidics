@@ -16,8 +16,11 @@ from collections import namedtuple
 
 WellRef = namedtuple("WellRef", "reservoir well")
 
+# What a reservoir (a plate) may be called: the config refuses any other
+# name, and a well reference names one by it (`ssct/A3`).
+RESERVOIR_NAME = r"[A-Za-z0-9_-]+"
 _WELL = re.compile(r"^([A-Z])([1-9][0-9]?)$")
-_REF = re.compile(r"^(?:([A-Za-z0-9_-]+)/)?([A-Z][1-9][0-9]?)$")
+_REF = re.compile(rf"^(?:({RESERVOIR_NAME})/)?([A-Z][1-9][0-9]?)$")
 
 SBS_PITCH_MM = 9.0
 
@@ -90,25 +93,16 @@ def well_key(ref):
     return f"{ref.reservoir}/{ref.well}"
 
 
-def expand_wells(items, geometry):
-    """`["A1:H6", "C8"]` -> the wells, column-major within each range."""
-    order = geometry.wells()
-    out = []
-    for item in items:
-        if ":" in item:
-            start, end = item.split(":", 1)
-            first, last = order.index(_checked(start, geometry)), order.index(_checked(end, geometry))
-            if last < first:
-                raise ValueError(f"range {item} runs backwards")
-            out.extend(order[first:last + 1])
-        else:
-            out.append(_checked(item, geometry))
-    return out
+def plate_of(key):
+    """The inverse of well_key: the plate a ledger key names a well of, or
+    None for a bottle's key (`port_25`)."""
+    plate, slash, _ = key.partition("/")
+    return plate if slash else None
 
 
-def _checked(well, geometry):
-    geometry.index(well)        # raises for a well the plate lacks
-    return well
+def unknown_reservoir(name, known):
+    """The refusal for a reservoir this rig has not got, naming the ones it has."""
+    return f"no reservoir named {name!r}: this rig has {', '.join(sorted(known))}"
 
 
 class PlatePlacement:
@@ -140,3 +134,17 @@ class PlatePlacement:
     def corners(self):
         """(well, (x, y)) for the four corner wells."""
         return [(well, self.xy_mm(well)) for well in self.geometry.corners()]
+
+
+def agitation_problem(name, dip_z_mm, agitate_amplitude_mm, travel_z_mm):
+    """Why plate `name` could not be agitated under `travel_z_mm`, or None.
+    Z grows toward the deck: the top of the stroke, dip less the amplitude,
+    must be deeper than travel height, or agitate (and a draw after it) runs
+    with the tip in air. The one spelling of the rule: the config refuses a
+    load by it, the sipper a placement or a travel height, the teach verbs
+    a taught depth or height."""
+    if dip_z_mm - agitate_amplitude_mm > travel_z_mm:
+        return None
+    return (f"plate {name!r}: a dip depth of {dip_z_mm:.2f} mm leaves no room for the "
+            f"{agitate_amplitude_mm:g} mm agitation stroke below travel height "
+            f"{travel_z_mm:.2f} mm (the tip would agitate in air)")

@@ -37,13 +37,14 @@ from fluidics.control.config import available_ports
 from fluidics.errors import FluidicsError
 from fluidics.events import RunEnded, RunStarted, SequenceCompleted, SequenceStarted, plan_seconds, repeat_suffix
 from fluidics.files import atomic_write
-from fluidics.qt.robot_control import WellCombo
-from fluidics.qt.support import GuiLogHandler, PostsToQtThread, _ask_yes_no, _hms, subscribe_until_detached
+from fluidics.qt.support import GuiLogHandler, PostsToQtThread, WellCombo, _ask_yes_no, _hms, subscribe_until_detached
 from fluidics.run_log import LOGGER_NAME
 from fluidics.sequence_list import SequenceList
 from fluidics.sequences import (
     PORT_FIELDS,
+    SIPPER_FIELDS,
     WELL_FIELDS,
+    field_default,
     get_fields_for_type,
     is_included,
     label_for_type,
@@ -55,10 +56,6 @@ from fluidics.sequences import (
 from fluidics.vocabulary import sipper_vocabulary
 
 _logger = logging.getLogger("fluidics.gui")
-
-# The fields only a sipper rig has (spec §6): the well-valued ones and the
-# dips. A rig without the sipper is offered none of them (D8).
-SIPPER_FIELDS = (*WELL_FIELDS, "dip_cycles")
 
 
 class AddSequenceDialog(QDialog):
@@ -128,12 +125,7 @@ class AddSequenceDialog(QDialog):
             if field_name in SIPPER_FIELDS and self.sipper is None:
                 continue  # no sipper on this rig: nothing to offer (D8)
 
-            # A required field has no default, and pydantic spells that
-            # PydanticUndefined -- which is not None, so it used to reach
-            # int()/float() below and raise. Every fluidic type has required
-            # fields, so the dialog raised for all of them: Add Sequence was
-            # dead on arrival.
-            default = None if field_info.is_required() else field_info.default
+            default = field_default(field_info)
 
             if field_name in ('name', 'round'):
                 widget = QLineEdit()
@@ -533,14 +525,11 @@ class SequencesWidget(PostsToQtThread, QWidget):
         for fname, finfo in type_fields.items():
             if fname in ('include', 'name'):
                 continue
-            # A required field has no default -- pydantic's PydanticUndefined,
-            # not None -- so a push row added with its well left blank gets an
-            # empty cell (red: the model wants a well), not the sentinel's name.
-            default = None if finfo.is_required() else finfo.default
-            if (fname in SIPPER_FIELDS and self._sipper is None
-                    and seq.get(fname, default) in (None, default)):
-                continue
+            default = field_default(finfo)
             value = seq.get(fname, default)
+            if (fname in SIPPER_FIELDS and self._sipper is None
+                    and value in (None, default)):
+                continue
             child = QTreeWidgetItem([self.FIELD_LABELS.get(fname, fname),
                                      '' if value is None else str(value)])
             child.setData(0, Qt.UserRole, fname)

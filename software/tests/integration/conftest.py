@@ -22,9 +22,10 @@ def instant_devices(built):
     """A simulated DeviceSet with its pacing switched off (build_devices'
     instant knob): the controller's one-second commands and the pump's
     five-second moves would otherwise be spent for real under real_clock.
-    The gates are untouched."""
-    def _build(config):
-        devices = built(config, simulation=True, instant=True)
+    The gates are untouched; any other build_devices keyword (ledger_path)
+    passes through."""
+    def _build(config, **build_kwargs):
+        devices = built(config, simulation=True, instant=True, **build_kwargs)
         # The publish thread has nothing to say to these tests (none read
         # flow), and under the fake clock its per-reading wait is a busy
         # spin; close() is idempotent, so the teardown's close is unharmed.
@@ -45,15 +46,37 @@ def plate_sipper_rig(plate_sipper_config, instant_devices):
 
 
 @pytest.fixture
-def system(flow_cell_config, instant_devices, tmp_path):
-    """A FluidicsSystem on the instant simulated DeviceSet, torn down clean
-    -- the shape test_system and test_usage share. Run reports land in the
-    test's own tmp_path, never the user's log directory."""
+def make_system(instant_devices, tmp_path):
+    """FluidicsSystem(config, **build_kwargs) on the instant simulated
+    DeviceSet, each one torn down clean -- the shape test_system, test_usage
+    and the sipper modules share, whichever config or ledger they build on.
+    Run reports land in the test's own tmp_path, never the user's log
+    directory."""
     from fluidics.system import FluidicsSystem
-    built = FluidicsSystem(flow_cell_config, instant_devices(flow_cell_config),
-                           report_dir=tmp_path)
-    yield built
-    assert built.close() == []
+    systems = []
+
+    def _make(config, **build_kwargs):
+        system = FluidicsSystem(config, instant_devices(config, **build_kwargs),
+                                report_dir=tmp_path)
+        systems.append(system)
+        return system
+
+    yield _make
+    assert [e for s in systems for e in s.close()] == []
+
+
+@pytest.fixture
+def system(flow_cell_config, make_system):
+    """The flow cell rig as a FluidicsSystem: what most modules take."""
+    return make_system(flow_cell_config)
+
+
+@pytest.fixture
+def plate_sipper_system(plate_sipper_config, make_system):
+    """`system` on the sipper fixture config: a FluidicsSystem over an
+    instant simulated sipper rig with a fresh in-memory ledger, every well
+    full, torn down clean; its run reports land in the test's tmp_path."""
+    return make_system(plate_sipper_config)
 
 
 @pytest.fixture

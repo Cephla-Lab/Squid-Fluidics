@@ -1,23 +1,20 @@
 """Bench check for the sipper robot: python -m tests.hardware.robot_check --config ../config.yaml
 
-Home (watch Z go UP first), jog each axis, teach A1 and the dip depth on
-each plate, visit every corner, agitate in a full well and stay there. Run with the
-deck clear of anything but the plates. Afterwards de-energize the Z drive
-and confirm the stage holds with the sipper and tubing mounted: Z3 has no
-brake and relies on its lead screw (nm-servo PR #6). The 12 columns span
-99 mm of Y2's 0.5 to 109 mm stroke.
+Home, jog each axis, teach A1 and the dip depth on each plate, visit every
+corner, agitate in a full well and stay there. Run with the deck clear of
+anything but the plates. What to watch at each step -- the order homing
+moves the axes, the settle error against the stage's and the driver's
+tolerances, what a limit stop looks like (the script never provokes one),
+the tip at each corner, Z3 holding unpowered (it has no brake: nm-servo
+PR #6) -- is the CHECKLIST printed when the script starts.
 
 Nothing moves until Enter is pressed at this console, and the jogs are
 typed here: the script holds the robot's port and the reservoir ledger's
 lock, so the GUI (and its Robot tab) must be closed while it runs. After
 every move it prints each axis's settle error -- where the drive reads
 the axis once the move has ended, less where the stage sent it -- and
-their worst at the end: the stage fails a move that ends more than
-TOLERANCE_MM (0.05 mm) off its target, while the driver's own wait,
-which the stage does not use, allows 1000 counts (0.076 mm), so settle
-errors between the two would fail moves the driver passes. The printed
-checklist says what a limit stop looks like; the script never provokes
-one. A failure or Ctrl+C closes without moving (a halt, no retract).
+their worst at the end. A failure or Ctrl+C closes without moving (a
+halt, no retract).
 
 Run from software/ as a module, so `fluidics` imports without the package
 being installed:
@@ -32,7 +29,8 @@ from fluidics.control.config import gantry, load_config, save_config
 from fluidics.control.controller import FluidControllerSimulation
 from fluidics.control.syringe_pump import SyringePumpSimulation
 from fluidics.errors import DeviceError
-from fluidics.robot.stage import LIMIT_SWITCH_ALARM, TOLERANCE_MM
+from fluidics.robot.labware import well_key
+from fluidics.robot.stage import LIMIT_SWITCH_ALARM, TOLERANCE_MM, _label
 from fluidics.run_log import configure_console
 from fluidics.system import FluidicsSystem
 from fluidics.vocabulary import sipper_vocabulary
@@ -88,7 +86,7 @@ class Settle:
             return
         parts = []
         for axis, target in zip((stage._x, stage._y, stage._z), commanded):
-            label = getattr(axis, "value", axis)
+            label = _label(axis)
             error = stage._service.read(axis).position_mm - target
             self.worst[label] = max(self.worst.get(label, 0.0), abs(error))
             parts.append(f"{label} {error:+.3f}" + (" (over)" if abs(error) > TOLERANCE_MM else ""))
@@ -150,7 +148,7 @@ def main():
         ref = vocabulary.resolve(agitate_well)
     except ValueError as e:
         sys.exit(f"--agitate-well {agitate_well}: {e}")
-    agitate_well = f"{ref.reservoir}/{ref.well}"
+    agitate_well = well_key(ref)
     if args.simulation:
         # A self-check of the script: the valves' one-second commands and the
         # pump's moves need not be waited out. The stage keeps its pacing.
@@ -159,74 +157,72 @@ def main():
 
     print(CHECKLIST)
     input("Deck clear of anything but the plates? Enter to bring the rig up and home (Z goes UP first)...")
-    with FluidicsSystem.build(config, args.simulation) as system:
-        try:
-            manual = system.manual
-            robot = system.devices.robot
-            settle = Settle(robot)
-            print("homed; position", fmt(robot.position()), "-- Z should read 0.1 to 0.5 mm at the top")
-            input("Enter to jog X +10, Y +10 and Z +5 mm, each and back...")
-            for axis, mm in (("x", 10.0), ("y", 10.0), ("z", 5.0)):
-                manual.jog(axis, mm)
-                settle.report(f"jog {axis} {mm:+g}")
-                manual.jog(axis, -mm)
-                settle.report(f"jog {axis} {-mm:+g}")
-            taught = {}
-            corners = ("A1", "A12", "H1", "H12")
-            for name in sorted(vocabulary.reservoirs):
-                while True:
-                    jog_until_enter(
-                        manual, robot, settle,
-                        f"Jog the tip to {name} A1 at the V bottom. An empty line teaches the "
-                        f"position there as the A1 and dip depth of {name}, then tours its "
-                        f"corners: {', '.join(corners)}, each a retract, a move and a re-dip.",
-                        f"teach here and tour the {name} corners")
-                    position = robot.position()
-                    if position is None:
-                        print("  the position is unknown: type `home`")
-                        continue
-                    x, y, z = position
-                    try:
-                        manual.teach_a1(name, (x, y))
-                        manual.teach_dip(name, z)
-                    except (DeviceError, ValueError) as e:
-                        print(f"  not taught: {e}")
-                        continue
-                    break
-                taught[name] = ((x, y), z)
-                print("taught", name, "A1 at", (x, y), "dip", z)
-                for i, well in enumerate(corners):
-                    manual.go_to_well(f"{name}/{well}")
-                    settle.report(f"{name}/{well}")
-                    following = (f"retract and go to {name}/{corners[i + 1]}" if i + 1 < len(corners)
-                                 else "go on (nothing moves)")
-                    input(f"At {name}/{well}: is the tip centred and at the V bottom? Enter to {following}...")
-            input(f"Enter to go to {agitate_well} (it must be full) and agitate twice...")
-            manual.go_to_well(agitate_well)
-            robot.agitate(2)
-            settle.report(f"agitate in {agitate_well}")
-            print(settle.summary())
-            for name, ((x, y), z) in taught.items():
-                print(f"  {name}: a1_xy_mm: [{x:.2f}, {y:.2f}]  dip_z_mm: {z:.2f}")
-            if args.simulation:
-                # The docstring's own example runs the committed sample.
-                print("Simulation: the taught values are not saved.")
-            elif input(f"Write the taught values into {config.source_path}? [y/N] ").strip().lower() == "y":
-                print("written to", save_config(config))
-            input(f"Enter to close: no move (the tip stays in {agitate_well}, as it does between "
-                  "sessions), then every drive is disabled. Then check that Z holds there "
-                  "unpowered, and that X and Y hold under the tubing...")
-        except BaseException as e:
-            # A failure or Ctrl+C: the stage halted any leg it was in. Close
-            # without a move -- the with's quiescent close would also clear
-            # the abort latch and, on a Flow Cell rig, park the syringe to
-            # waste, a pump move.
-            print("Stopped: closing without moving.")
-            system.devices.close(quiescent=False)
-            if isinstance(e, KeyboardInterrupt):
-                sys.exit(130)
-            raise
-        errors = system.close()
+    system = FluidicsSystem.build(config, args.simulation)
+    try:
+        manual = system.manual
+        robot = system.devices.robot
+        settle = Settle(robot)
+        print("homed; position", fmt(robot.position()), "-- Z should read 0.1 to 0.5 mm at the top")
+        input("Enter to jog X +10, Y +10 and Z +5 mm, each and back...")
+        for axis, mm in (("x", 10.0), ("y", 10.0), ("z", 5.0)):
+            manual.jog(axis, mm)
+            settle.report(f"jog {axis} {mm:+g}")
+            manual.jog(axis, -mm)
+            settle.report(f"jog {axis} {-mm:+g}")
+        for name in sorted(vocabulary.reservoirs):
+            corners = vocabulary.placement(name).geometry.corners()
+            while True:
+                jog_until_enter(
+                    manual, robot, settle,
+                    f"Jog the tip to {name} A1 at the V bottom. An empty line teaches the "
+                    f"position there as the A1 and dip depth of {name}, then tours its "
+                    f"corners: {', '.join(corners)}, each a retract, a move and a re-dip.",
+                    f"teach here and tour the {name} corners")
+                position = robot.position()
+                if position is None:
+                    print("  the position is unknown: type `home`")
+                    continue
+                x, y, z = position
+                try:
+                    manual.teach_a1(name, (x, y))
+                    manual.teach_dip(name, z)
+                except (DeviceError, ValueError) as e:
+                    print(f"  not taught: {e}")
+                    continue
+                break
+            for i, well in enumerate(corners):
+                manual.go_to_well(f"{name}/{well}")
+                settle.report(f"{name}/{well}")
+                following = (f"retract and go to {name}/{corners[i + 1]}" if i + 1 < len(corners)
+                             else "go on (nothing moves)")
+                input(f"At {name}/{well}: is the tip centred and at the V bottom? Enter to {following}...")
+        input(f"Enter to go to {agitate_well} (it must be full) and agitate twice...")
+        manual.go_to_well(agitate_well)
+        robot.agitate(2)
+        settle.report(f"agitate in {agitate_well}")
+        print(settle.summary())
+        for name, r in sorted(vocabulary.reservoirs.items()):
+            x, y = r.a1_xy_mm
+            print(f"  {name}: a1_xy_mm: [{x:.2f}, {y:.2f}]  dip_z_mm: {r.dip_z_mm:.2f}")
+        if args.simulation:
+            # The docstring's own example runs the committed sample.
+            print("Simulation: the taught values are not saved.")
+        elif input(f"Write the taught values into {config.source_path}? [y/N] ").strip().lower() == "y":
+            print("written to", save_config(config))
+        input(f"Enter to close: no move (the tip stays in {agitate_well}, as it does between "
+              "sessions), then every drive is disabled. Then check that Z holds there "
+              "unpowered, and that X and Y hold under the tubing...")
+    except BaseException as e:
+        # A failure or Ctrl+C: the stage halted any leg it was in. Close
+        # without a move -- system.close()'s quiescent close would also
+        # clear the abort latch and, on a Flow Cell rig, park the syringe
+        # to waste, a pump move.
+        print("Stopped: closing without moving.")
+        system.devices.close(quiescent=False)
+        if isinstance(e, KeyboardInterrupt):
+            sys.exit(130)
+        raise
+    errors = system.close()
     print("Every drive is disabled now: confirm Z holds on its lead screw (Z3 has no brake).")
     if errors:
         sys.exit(2)
