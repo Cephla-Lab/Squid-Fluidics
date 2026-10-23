@@ -6,8 +6,8 @@ import re
 from typing import Annotated, Literal, Optional, Union, get_args
 
 import yaml
-from pydantic import (BaseModel, ConfigDict, Discriminator, Field, TypeAdapter,
-                      ValidationError)
+from pydantic import (BaseModel, BeforeValidator, ConfigDict, Discriminator, Field,
+                      TypeAdapter, ValidationError)
 
 from .control.config import available_ports, port_range_note
 from .files import atomic_write
@@ -69,14 +69,47 @@ class WashConstantFlowSequence(FluidicSequence):
     fill_tubing_with: Optional[int] = None
 
 
-class PrimingSequence(FluidicSequence):
-    type: Literal["priming"]
+def _ports_as_typed(value):
+    """A port list as the editor types it, "1, 3" (commas or spaces;
+    brackets allowed, a stray comma ignored), as the list it spells; blank
+    is every port, and "[]" the empty list, which is refused."""
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text:
+        return None
+    return [part for part in re.split(r"[\s,]+", text.strip("[]")) if part]
+
+
+# A priming or clean-up row's use_ports: a list of one port or more, typed
+# or given; None is every port the rig offers.
+PortList = Annotated[Optional[Annotated[list[int], Field(min_length=1)]],
+                     BeforeValidator(_ports_as_typed)]
+_PORT_LIST = TypeAdapter(PortList)
+
+
+def port_list(value):
+    """`value`, the editor's text or a list, as the list of ports a run
+    takes, or None for every port. ValueError if it spells no port list."""
+    try:
+        return _PORT_LIST.validate_python(value)
+    except ValidationError as e:
+        raise ValueError(f"use_ports={value!r}: {e.errors()[0]['msg']}") from None
+
+
+class _PortPriming(FluidicSequence):
+    """Priming and clean-up: each port the rig offers, or each one
+    `use_ports` lists, drawn through to waste, then the row's own draw."""
     sipper_well: Optional[str] = None          # where the sipper sits while its port is primed
+    use_ports: PortList = None                 # the ports primed; left out, every port
 
 
-class CleanUpSequence(FluidicSequence):
+class PrimingSequence(_PortPriming):
+    type: Literal["priming"]
+
+
+class CleanUpSequence(_PortPriming):
     type: Literal["clean_up"]
-    sipper_well: Optional[str] = None
 
 
 class SetTemperatureSequence(SequenceBase):
@@ -277,28 +310,9 @@ WELL_FIELDS = {"well": False, "sipper_well": True}
 SIPPER_FIELDS = (*WELL_FIELDS, "dip_cycles")
 
 
-def use_ports_problem(use_ports, sipper_port) -> Optional[str]:
-    """The refusal for a priming or clean-up row's use_ports on a rig whose
-    sipper is on `sipper_port`, or None. The sipper's port is never skipped
-    (D7): its line would hold air at the first draw, so a row that leaves it
-    out is refused rather than given a draw it did not list. With no sipper
-    (None) there is nothing to skip and selective priming stands. The
-    models do not know the field, so the time-zero gate and the operation
-    each ask this, and refuse in its words."""
-    if sipper_port is None or use_ports is None:
-        return None
-    if not isinstance(use_ports, (list, tuple)):
-        return f"use_ports={use_ports!r}: a list of ports"
-    if sipper_port not in use_ports:
-        return (f"use_ports leaves out port {sipper_port} (the sipper): "
-                "priming and clean-up never skip the sipper")
-    return None
-
-
 def sequence_well_problems(seq: dict, vocabulary) -> list[str]:
     """The well complaints for one sequence under `vocabulary` (None on a
-    rig without a sipper), as messages, a priming or clean-up row's
-    `use_ports` refusal among them (D7); empty when there are none. Reads
+    rig without a sipper), as messages; empty when there are none. Reads
     the raw dict, so a value the models would refuse is named here too."""
     problems = []
     seq_type, fill = seq.get("type"), seq.get("fill_tubing_with")
@@ -347,10 +361,11 @@ def sequence_well_problems(seq: dict, vocabulary) -> list[str]:
         problems.append(f"fill_tubing_with={sipper_port} is the sipper: the sipper cannot fill tubing")
     if dips and well is None:
         problems.append("dip_cycles needs a well")
-    if seq_type in ("priming", "clean_up"):
-        problem = use_ports_problem(seq.get("use_ports"), sipper_port)
-        if problem is not None:
-            problems.append(problem)
+    use_ports = seq.get("use_ports")
+    if (seq.get("sipper_well") and isinstance(use_ports, (list, tuple))
+            and sipper_port not in use_ports):
+        problems.append(f"sipper_well={seq['sipper_well']} is not used: "
+                        f"use_ports leaves out port {sipper_port} (the sipper)")
     return problems
 
 
@@ -358,9 +373,8 @@ def check_wells_against_config(sequences: list[dict], config) -> None:
     """Raise ValueError if a sequence's well fields do not fit this rig:
     a well without the sipper's port, the sipper's port without a well, a
     sipper-only row (SIPPER_TYPES) without a well, a well or a sipper-only
-    row on a rig with no sipper (spec §6), a priming or clean-up row whose
-    use_ports skips the sipper (D7). Reached through validate_sequences,
-    like the port and type checks."""
+    row on a rig with no sipper (spec §6). Reached through
+    validate_sequences, like the port and type checks."""
     vocabulary = sipper_vocabulary(config)
     problems = []
     for index, seq in enumerate(sequences):
@@ -377,7 +391,11 @@ def sequence_port_problems(seq: dict, ports) -> list[str]:
     A falsy fill_tubing_with (None, or the GUI dialog's 0) means "no fill"
     and is skipped, matching how the operations interpret it.
 
-    The fields come from PORT_FIELDS, which is the one copy of that list.
+    The fields come from PORT_FIELDS, which is the one copy of that list;
+    a priming or clean-up row's use_ports is a list of ports, each checked.
+    A run takes its rows as given, so a use_ports in any other shape (the
+    editor's text, a number, an empty list) is named rather than reaching
+    the operation, which would fail on it or prime nothing.
     """
     problems = []
     for field, falsy_means_unset in PORT_FIELDS.items():
@@ -386,6 +404,13 @@ def sequence_port_problems(seq: dict, ports) -> list[str]:
             continue
         if port not in ports:
             problems.append(f"{field}={port}")
+    use_ports = seq.get("use_ports")
+    if use_ports is not None:
+        if not (isinstance(use_ports, (list, tuple)) and use_ports
+                and all(type(port) is int for port in use_ports)):
+            problems.append(f"use_ports={use_ports!r}: a list of ports")
+        else:
+            problems.extend(f"use_ports includes {port}" for port in use_ports if port not in ports)
     return problems
 
 

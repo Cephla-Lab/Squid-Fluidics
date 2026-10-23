@@ -433,10 +433,7 @@ def vocabulary(plate_sipper_config):
 # The rows the sipper suites are built from, against the sample sipper
 # config: a well draw from the default plate's A1 through the sipper's port
 # (1); the push that follows one (the config's push_volume_ul); a priming
-# from the 4x SSC bottle (port 3, untracked); and the words a priming or
-# clean-up whose use_ports leaves out the sipper's port is refused with.
+# from the 4x SSC bottle (port 3, untracked).
 HYB = {"type": "flow_reagent", "fluidic_port": 1, "well": "A1", "flow_rate": 2000, "volume": 100}
 PUSH = {"type": "push", "well": "ssct/A1", "flow_rate": 2000}
 PRIME = {"type": "priming", "fluidic_port": 3, "flow_rate": 5000, "volume": 800}
-SKIPS_THE_SIPPER = ("use_ports leaves out port 1 (the sipper): "
-                    "priming and clean-up never skip the sipper")

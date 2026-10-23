@@ -524,6 +524,26 @@ class TestAddSequenceDialog:
             assert isinstance(widget, QComboBox), f"{field} is not a port combo"
             assert [widget.itemData(i) for i in range(widget.count())] == [1, 5, 9]
 
+    @pytest.mark.parametrize("seq_type", ["priming", "clean_up"])
+    def test_use_ports_is_typed_and_blank_primes_every_port(self, qapp, seq_type):
+        """A text box, typed as the table types it, handed back as the run's
+        list (an embedder runs the dialog's row as it is); left blank, the
+        row carries no use_ports, so it primes every port; text that spells
+        no list stays as typed, for the row's verdict to name."""
+        from qtpy.QtWidgets import QLineEdit
+        dialog = gui.AddSequenceDialog(None, "Flow Cell", self.PORTS)
+        dialog.typeCombo.setCurrentIndex(dialog.typeCombo.findData(seq_type))
+        box = dialog._field_widgets["use_ports"]
+        assert isinstance(box, QLineEdit) and box.text() == ""
+        dialog.accept()
+        assert "use_ports" not in dialog.result_dict
+        box.setText(" 1, 5 ")
+        dialog.accept()
+        assert dialog.result_dict["use_ports"] == [1, 5]
+        box.setText("1, x")
+        dialog.accept()
+        assert dialog.result_dict["use_ports"] == "1, x"
+
     def test_a_chosen_port_survives_accept(self, qapp):
         """The combo carries the port as data, so what accept() stores is
         the port and not the row it sat on."""
@@ -534,6 +554,19 @@ class TestAddSequenceDialog:
         combo.setCurrentIndex(combo.findData(5))
         dialog.accept()
         assert dialog.result_dict["fluidic_port"] == 5
+
+
+def test_a_port_list_is_shown_as_typed_and_edited_in_place(widget):
+    """A file's use_ports (a list) shows as "1, 3"; typed back in the
+    table, it is kept as typed and runs as the list."""
+    widget.setSequences([{"type": "priming", "fluidic_port": 3, "flow_rate": 5000,
+                          "volume": 800, "use_ports": [1, 3]}])
+    item = field_item(widget, 0, "use_ports")
+    assert item.text(0) == "Use Ports" and item.text(1) == "1, 3"
+    item.setText(1, "2, 3")
+    assert widget.getSequences()[0]["use_ports"] == [2, 3]
+    item.setText(1, "")
+    assert widget.getSequences()[0]["use_ports"] is None
 
 
 class TestTheDialogKnowsWells:

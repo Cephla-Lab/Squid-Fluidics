@@ -8,7 +8,7 @@ from fluidics.errors import (OperationError, ReservoirDrawTooLarge, ReservoirNoW
                             ReservoirShortfall, ReservoirUndeclared)
 from fluidics.vocabulary import sipper_vocabulary
 
-from ..conftest import HYB, PRIME, PUSH, SKIPS_THE_SIPPER
+from ..conftest import HYB, PRIME, PUSH
 from .conftest import FLOW_CELL_STEP
 
 WASH = {"type": "flow_reagent", "fluidic_port": 1, "well": "ssct/A1", "flow_rate": 5000,
@@ -205,18 +205,17 @@ def test_a_step_the_check_cannot_replay_refuses_the_run_naming_the_step(plate_si
     assert not plate_sipper_system.busy
 
 
-def test_selective_priming_that_leaves_out_the_sipper_is_refused_at_time_zero(plate_sipper_system):
-    """Codex finding 3: the raw-dict run path took a priming row whose
-    use_ports skipped the sipper's port (D7). validate_sequences refuses it,
-    before the plan is replayed, and nothing is charged."""
-    prime = dict(PRIME, use_ports=[3])
+def test_a_priming_that_leaves_out_the_sipper_passes_the_gate_and_runs(plate_sipper_system, plate_sipper_config,
+                                                                       real_clock):
+    """The gate takes a priming row whose use_ports skips the sipper's
+    port, and the run leaves the priming well as it was."""
     reservoirs = plate_sipper_system.devices.reservoirs
-    balances = reservoirs.balances()
-    with pytest.raises(ValueError) as refused:
-        plate_sipper_system.run([prime, HYB])
-    assert str(refused.value) == f"sequence 0 (priming): {SKIPS_THE_SIPPER}"
-    assert not plate_sipper_system.busy
-    assert reservoirs.balances() == balances
+    before = reservoirs.remaining("ssct/H11")
+    plate_sipper_system.run([dict(PRIME, use_ports=[3]), HYB])
+    assert plate_sipper_system.wait(10)
+    assert reservoirs.remaining("ssct/H11") == before
+    loaded = sipper_vocabulary(plate_sipper_config).reservoirs["probes"].loaded_ul
+    assert reservoirs.remaining("probes/A1") == loaded - HYB["volume"], "the run went on to its well draw"
 
 
 def test_a_run_is_refused_at_time_zero_while_do_not_lower_tip_is_on(plate_sipper_system):

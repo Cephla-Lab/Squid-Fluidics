@@ -19,12 +19,13 @@ from fluidics.sequences import (
     types_for_rig,
     validate_sequences,
     load_sequences,
+    port_list,
     save_sequences_yaml,
     get_included_sequences,
     get_fields_for_type,
 )
 
-from ..conftest import HYB, PRIME, PUSH, SKIPS_THE_SIPPER
+from ..conftest import HYB, PRIME, PUSH
 
 
 class TestSequenceModels:
@@ -492,30 +493,67 @@ class TestPairingRules:
 
 
 class TestSelectivePriming:
-    """Codex finding 3: use_ports, a raw-dict option the models do not
-    know, may not leave out the sipper's port, whose line would then hold
-    air at the first draw (D7). Such a row is refused, not given a draw
-    from a well it did not list."""
+    """use_ports, a field of priming and clean-up rows, picks the ports the
+    row primes, on any rig: it may leave out the sipper's port."""
+
+    @pytest.mark.parametrize("typed, ports", [
+        ("1, 3", [1, 3]), ("1 3", [1, 3]), ("[1, 3]", [1, 3]), ("3", [3]),
+        ("1, 3,", [1, 3]), (" [3] ", [3]), ([1, 3], [1, 3]), ("", None), (None, None),
+    ])
+    def test_use_ports_reads_as_typed(self, typed, ports):
+        """The editor's text is the list it spells; blank is every port."""
+        [row] = SequenceListAdapter.validate_python([dict(PRIME, use_ports=typed)])
+        assert row.use_ports == ports
+        assert port_list(typed) == ports
+
+    @pytest.mark.parametrize("typed", ["1, x", [], "[]", "1;3"])
+    def test_what_is_not_a_list_of_ports_is_refused(self, typed):
+        problem = sequence_problem(dict(PRIME, use_ports=typed), "Flow Cell", range(1, 7))
+        assert problem is not None and problem.startswith("use_ports"), problem
+        with pytest.raises(ValueError, match="use_ports="):
+            port_list(typed)
+
+    @pytest.mark.parametrize("given", ["1, 3", 3, [], ["3"], [True]])
+    def test_the_gate_refuses_a_port_list_in_any_other_shape(self, flow_cell_config, given):
+        """A run takes its rows as given, so the gate names a use_ports the
+        operation could not loop over, or would loop over priming nothing,
+        before anything moves."""
+        with pytest.raises(ValueError, match=r"sequence 0 \(priming\): use_ports=.*: a list of ports"):
+            validate_sequences([dict(PRIME, use_ports=given)], flow_cell_config)
+
+    def test_a_sipper_well_the_row_does_not_use_is_named(self, vocabulary):
+        """A row that skips the sipper's port never sits the sipper in its
+        sipper_well, so naming one is a contradiction, not silently dropped."""
+        row = dict(PRIME, sipper_well="ssct/A12")
+        assert sequence_well_problems(dict(row, use_ports=[3]), vocabulary) == [
+            "sipper_well=ssct/A12 is not used: use_ports leaves out port 1 (the sipper)"]
+        assert sequence_well_problems(dict(row, use_ports=[1, 3]), vocabulary) == []
+        assert sequence_well_problems(row, vocabulary) == []
+
+    def test_a_port_the_rig_does_not_offer_is_named(self, plate_sipper_config, vocabulary):
+        from fluidics.control.config import available_ports
+        ports = available_ports(plate_sipper_config)
+        problem = sequence_problem(dict(PRIME, use_ports="3, 7"), "Flow Cell", ports, sipper=vocabulary)
+        assert problem.startswith("use_ports includes 7:"), problem
+        with pytest.raises(ValueError, match=r"sequence 0 \(priming\): use_ports includes 7"):
+            validate_sequences([dict(PRIME, use_ports=[3, 7])], plate_sipper_config)
+
+    def test_a_file_carries_use_ports_both_ways(self, tmp_path):
+        path = tmp_path / "s.yaml"
+        path.write_text("sequences:\n  - {type: clean_up, fluidic_port: 3, flow_rate: 5000, "
+                        "volume: 800, use_ports: [1, 3]}\n")
+        [row] = load_sequences(str(path))
+        assert row["use_ports"] == [1, 3]
+        save_sequences_yaml([row], str(path))
+        assert load_sequences(str(path)) == [row]
 
     @pytest.mark.parametrize("seq_type", ["priming", "clean_up"])
-    def test_a_row_that_leaves_out_the_sipper_is_refused(self, vocabulary, seq_type):
+    def test_a_row_may_leave_out_the_sipper(self, vocabulary, plate_sipper_config, seq_type):
         row = dict(PRIME, type=seq_type)
-        assert sequence_well_problems(dict(row, use_ports=[3]), vocabulary) == [SKIPS_THE_SIPPER]
+        assert sequence_well_problems(dict(row, use_ports=[3]), vocabulary) == []
         assert sequence_well_problems(dict(row, use_ports=[1, 3]), vocabulary) == []
-        assert sequence_well_problems(dict(row, use_ports=(3, 1)), vocabulary) == []
-        assert sequence_well_problems(dict(row, use_ports=None), vocabulary) == []
-
-    def test_the_gate_names_the_row(self, plate_sipper_config):
-        with pytest.raises(ValueError, match=r"sequence 0 \(prime\): use_ports leaves out port 1 "):
-            validate_sequences([dict(PRIME, name="prime", use_ports=[3])], plate_sipper_config)
-
-    def test_use_ports_must_be_a_list(self, vocabulary):
-        assert sequence_well_problems(dict(PRIME, use_ports=3), vocabulary) == [
-            "use_ports=3: a list of ports"]
-        assert sequence_well_problems(dict(PRIME, use_ports="1,3"), vocabulary) == [
-            "use_ports='1,3': a list of ports"]
+        validate_sequences([dict(row, use_ports=[3])], plate_sipper_config)
 
     def test_a_rig_without_a_sipper_keeps_selective_priming(self, flow_cell_config):
         assert sequence_well_problems(dict(PRIME, use_ports=[3]), None) == []
-        assert sequence_well_problems(dict(PRIME, use_ports=3), None) == []
         validate_sequences([dict(PRIME, use_ports=[3])], flow_cell_config)

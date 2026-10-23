@@ -46,6 +46,7 @@ from fluidics.sequences import (
     WELL_FIELDS,
     field_default,
     get_fields_for_type,
+    port_list,
     is_included,
     label_for_type,
     load_sequences,
@@ -131,6 +132,10 @@ class AddSequenceDialog(QDialog):
                 widget = QLineEdit()
                 if default is not None:
                     widget.setText(str(default))
+            elif field_name == 'use_ports':
+                # Typed as the table types it; blank primes every port.
+                widget = QLineEdit()
+                widget.setPlaceholderText("every port, or e.g. 1, 3")
             elif field_name in WELL_FIELDS:
                 self._addWellRow(field_name)
                 continue
@@ -235,7 +240,18 @@ class AddSequenceDialog(QDialog):
         seq_type = self.typeCombo.currentData()
         d = {'type': seq_type}
         for field_name, widget in self._field_widgets.items():
-            if isinstance(widget, QLineEdit):
+            if field_name == 'use_ports':
+                # The run's list, as the other fields hand back what a run
+                # takes; text that spells none stays as typed, for the
+                # row's verdict to name.
+                val = widget.text().strip()
+                try:
+                    ports = port_list(val)
+                except ValueError:
+                    ports = val
+                if ports:
+                    d[field_name] = ports
+            elif isinstance(widget, QLineEdit):
                 val = widget.text().strip()
                 if val:
                     d[field_name] = val
@@ -276,8 +292,11 @@ def is_run_tab_job(session):
 
 def _field_text(seq, fname, finfo):
     """A field's cell: the row's value, or its type's default where the row
-    leaves the field out -- rows are kept as typed."""
+    leaves the field out -- rows are kept as typed. A list (use_ports) is
+    shown as it is typed, "1, 3"."""
     value = seq.get(fname, field_default(finfo))
+    if isinstance(value, (list, tuple)):
+        return ", ".join(str(v) for v in value)
     return '' if value is None else str(value)
 
 
@@ -484,6 +503,7 @@ class SequencesWidget(PostsToQtThread, QWidget):
         'well': 'Well',
         'dip_cycles': 'Dip Cycles',
         'sipper_well': 'Sipper Well',
+        'use_ports': 'Use Ports',
     }
 
     def _onItemDoubleClicked(self, item, column):

@@ -7,7 +7,7 @@ from fluidics.errors import OperationError, ReservoirError, ReservoirNoWell, Res
 from fluidics.robot.labware import WellRef
 from fluidics.vocabulary import sipper_vocabulary
 
-from ..conftest import HYB, PRIME, PUSH, SKIPS_THE_SIPPER
+from ..conftest import HYB, PRIME, PUSH
 
 
 @pytest.fixture
@@ -200,30 +200,21 @@ def test_a_fault_on_an_axis_that_arrived_stops_the_step_before_the_dip_and_the_d
     devices.robot.reset_faults()                   # the Robot tab's verb; the rig closes clean
 
 
-@pytest.mark.parametrize("seq_type, use_ports, message", [
-    ("priming", [3], SKIPS_THE_SIPPER),
-    ("clean_up", [3], SKIPS_THE_SIPPER),
-    ("priming", 3, "use_ports=3: a list of ports"),
-], ids=["priming", "clean_up", "not_a_list"])
-def test_selective_priming_that_leaves_out_the_sipper_is_refused_before_the_pump_moves(
-        rig, seq_type, use_ports, message):
-    """Codex finding 3: the sipper's port is never skipped (D7), or its
-    line holds air at the first draw. A row whose use_ports leaves it out
-    is refused before any pump or valve action, not given a draw from a
-    well it did not list; so is a use_ports that is not a list."""
+@pytest.mark.parametrize("seq_type", ["priming", "clean_up"])
+def test_selective_priming_may_leave_out_the_sipper(rig, seq_type):
+    """A priming or clean-up row whose use_ports leaves out the sipper's
+    port primes only the ports it lists: the tip never moves, and neither
+    the priming nor the clean-up well is drawn from."""
     devices, ops = rig
-    before = list(devices.syringe_pump.executed_ops)
-    balances = devices.reservoirs.balances()
+    wells = {key: devices.reservoirs.remaining(key) for key in ("ssct/H11", "ssct/H12")}
     opened = []
     open_port = devices.selector_valves.open_port
     devices.selector_valves.open_port = lambda port: opened.append(port) or open_port(port)
-    with pytest.raises(OperationError) as refused:
-        ops.process_sequence({"type": seq_type, "fluidic_port": 3, "flow_rate": 5000,
-                              "volume": 800, "use_ports": use_ports})
-    assert str(refused.value) == message
-    assert devices.syringe_pump.executed_ops == before
-    assert opened == []
-    assert devices.reservoirs.balances() == balances
+    ops.process_sequence(dict(PRIME, type=seq_type, use_ports=[3]))
+    assert opened == [3, 3], "port 3, then the final draw: not the sipper's port"
+    assert devices.robot.current_well is None
+    assert {key: devices.reservoirs.remaining(key) for key in wells} == wells
+    assert _given(devices, "port_3") == _tubing(devices.config, 3) + PRIME["volume"]
 
 
 def test_selective_priming_that_lists_the_sipper_primes_it_from_the_priming_well(rig):

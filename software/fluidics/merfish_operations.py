@@ -4,7 +4,6 @@ from .errors import Cancelled, OperationError, ReservoirError
 from .flow_monitor import DrawGuard
 from .reservoirs import VolumeTracker
 from .robot.labware import well_key
-from .sequences import use_ports_problem
 from .vocabulary import sipper_vocabulary
 from . import sequence_utils
 
@@ -177,14 +176,9 @@ class MERFISHOperations():
         syringe pump with {volume} of the reagent from {port}.
         This method should work for both priming and cleaning. For priming, use a wash buffer for {port}; for cleaning, use water
         for all ports. On a sipper rig, `clean_up` picks the well the sipper's port is primed from when
-        `sipper_well` names none: the config's clean-up well rather than its priming well.
+        `sipper_well` names none: the config's clean-up well rather than its priming well. `use_ports`,
+        where given, is the ports primed; one that leaves out the sipper's port leaves its line as it is.
         """
-        # A use_ports that leaves out the sipper's port is refused here, as
-        # at time zero, before the pump or a valve moves: the sipper is never
-        # skipped (D7), and the row is not given a draw it did not list.
-        problem = use_ports_problem(use_ports, self.sipper_port)
-        if problem is not None:
-            raise OperationError(problem)
         speed_code = self.sp.flow_rate_to_speed_code(flow_rate)
         try:
             self.sp.reset_chain()
@@ -200,7 +194,7 @@ class MERFISHOperations():
                 volume_to_port = self.sv.get_tubing_fluid_amount_to_port(i)
                 if i == self.sipper_port:
                     # The sipper's port is primed from a well: the configured
-                    # one for this step type, or the row's override (D7).
+                    # one for this step type, or the row's override.
                     default = self._gantry.clean_up_well if clean_up else self._gantry.priming_well
                     self._select(i, sipper_well or default, volume_to_port)
                 else:

@@ -111,6 +111,17 @@ class TestWhatSetFieldTakes:
         model.set_field(0, "fill_tubing_with", "")
         assert model[0]["fill_tubing_with"] is None
 
+    def test_a_typed_port_list_is_kept_as_typed_and_validates_as_a_list(self):
+        model = flow_cell(dict(FLOW, type="priming"))
+        model.set_field(0, "use_ports", "1, 3")
+        assert model[0]["use_ports"] == "1, 3"
+        assert model.problem(0) is None, model.problem(0)
+        assert model.validated()[0]["use_ports"] == [1, 3]
+        model.set_field(0, "use_ports", "1, 30")
+        assert model.problem(0).startswith("use_ports includes 30:"), model.problem(0)
+        model.set_field(0, "use_ports", "")
+        assert model[0]["use_ports"] is None and model.problem(0) is None
+
     def test_the_row_holds_what_was_typed_not_what_validates(self):
         """A half-typed field must stay as typed -- rewriting it under the
         operator is how an edit becomes unfinishable."""
