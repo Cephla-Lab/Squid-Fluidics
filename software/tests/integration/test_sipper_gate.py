@@ -3,8 +3,10 @@ import logging
 
 import pytest
 
+from fluidics.control.config import gantry
 from fluidics.errors import (OperationError, ReservoirDrawTooLarge, ReservoirNoWell,
                             ReservoirShortfall, ReservoirUndeclared)
+from fluidics.vocabulary import sipper_vocabulary
 
 from ..conftest import HYB, PRIME, PUSH, SKIPS_THE_SIPPER
 from .conftest import FLOW_CELL_STEP
@@ -13,24 +15,36 @@ WASH = {"type": "flow_reagent", "fluidic_port": 1, "well": "ssct/A1", "flow_rate
         "volume": 1000, "dip_cycles": 3}
 
 
-def test_a_round_that_fits_runs_and_the_report_lists_its_wells(plate_sipper_system, real_clock):
+def _ssct_a1_round(config):
+    """(what ssct/A1 holds when loaded, what HYB, PUSH, WASH draw from it):
+    HYB draws from probes/A1, so ssct/A1 gives the config's push volume,
+    then the wash's."""
+    return (sipper_vocabulary(config).reservoirs["ssct"].loaded_ul,
+            gantry(config).push_volume_ul + WASH["volume"])
+
+
+def test_a_round_that_fits_runs_and_the_report_lists_its_wells(plate_sipper_system, plate_sipper_config,
+                                                               real_clock):
+    loaded, drawn = _ssct_a1_round(plate_sipper_config)
     plan = plate_sipper_system.plan([HYB, PUSH, WASH])
     report = plate_sipper_system.check_reservoirs(plan)
-    assert ("ssct/A1", 1490, 1800 - 1490) in report
+    assert ("ssct/A1", drawn, loaded - drawn) in report
     plate_sipper_system.run([HYB, PUSH, WASH], plan=plan)
     assert plate_sipper_system.wait(5)
-    assert plate_sipper_system.devices.reservoirs.remaining("ssct/A1") == 1800 - 1490
+    assert plate_sipper_system.devices.reservoirs.remaining("ssct/A1") == loaded - drawn
 
 
-def test_a_short_well_refuses_at_time_zero_naming_the_step(plate_sipper_system):
+def test_a_short_well_refuses_at_time_zero_naming_the_step(plate_sipper_system, plate_sipper_config):
+    loaded, _ = _ssct_a1_round(plate_sipper_config)
     with pytest.raises(ReservoirShortfall, match=r"wash2.*ssct/A1"):
         plate_sipper_system.run([HYB, PUSH, WASH, dict(WASH, name="wash2")])
-    assert plate_sipper_system.devices.reservoirs.remaining("ssct/A1") == 1800, "nothing was charged"
+    assert plate_sipper_system.devices.reservoirs.remaining("ssct/A1") == loaded, "nothing was charged"
 
 
 def test_a_short_bottle_refuses_at_time_zero_too(plate_sipper_system):
-    bulk = {"type": "flow_reagent", "fluidic_port": 25, "flow_rate": 5000, "volume": 4000}
-    with pytest.raises(ReservoirShortfall, match="port_25"):
+    """Port 5's bottle (5000 uL loaded) gives one 4000 uL draw, not two."""
+    bulk = {"type": "flow_reagent", "fluidic_port": 5, "flow_rate": 5000, "volume": 4000}
+    with pytest.raises(ReservoirShortfall, match="port_5"):
         plate_sipper_system.run([dict(bulk, repeat=200)])
 
 
@@ -48,11 +62,11 @@ def test_a_resumed_tail_is_refused_when_the_well_is_short(plate_sipper_system, r
 def test_undeclared_volume_tracking_refuses_the_run(plate_sipper_config, make_system, tmp_path, real_clock):
     """Review focus 3, end to end: a mismatched file at bring-up."""
     (tmp_path / "volumes.json").write_text(
-        '{"format": 2, "definitions": {"port_25": {"loaded_ul": 1}}, "reservoirs": {}}')
+        '{"format": 2, "definitions": {"port_4": {"loaded_ul": 1}}, "reservoirs": {}}')
     system = make_system(plate_sipper_config, volume_tracking_path=tmp_path / "volumes.json")
     # every entry undeclared: the plates named once each, not 192 wells
     with pytest.raises(ReservoirUndeclared,
-                       match="not declared for port_25, every well of probes, every well of ssct: "):
+                       match="not declared for port_4, port_5, every well of probes, every well of ssct: "):
         system.run([HYB])
     system.refill("all")
     system.run([HYB])
@@ -77,63 +91,80 @@ def test_a_rig_that_tracks_nothing_skips_the_gate(system, monkeypatch, caplog):
                 if record.getMessage().startswith("Reservoirs after this run")]
 
 
-def test_a_run_start_logs_the_projected_balances(plate_sipper_system, caplog):
+def test_a_run_start_logs_the_projected_balances(plate_sipper_system, plate_sipper_config, caplog):
     """The general notice at the start of a run, once, at INFO: what the
     gate's replay says each touched reservoir has left when the run is
     done."""
+    probes = sipper_vocabulary(plate_sipper_config).reservoirs["probes"]
+    loaded, drawn = _ssct_a1_round(plate_sipper_config)
     with caplog.at_level(logging.INFO, logger="fluidics.system"):
         plate_sipper_system.run([HYB, PUSH, WASH])
         assert plate_sipper_system.wait()
     assert [record.getMessage() for record in caplog.records
             if record.name == "fluidics.system"
             and record.getMessage().startswith("Reservoirs after this run")] == \
-        ["Reservoirs after this run: probes/A1 10 uL left; ssct/A1 310 uL left."]
+        [f"Reservoirs after this run: probes/A1 {probes.loaded_ul - HYB['volume']} uL left; "
+         f"ssct/A1 {loaded - drawn} uL left."]
 
 
 def test_the_plan_prices_the_robots_travel(plate_sipper_config):
-    """From home, probes/A1 is 0.24 s of XY (12 mm at 50 mm/s, Y shorter
-    and concurrent) and 2.5 s of Z; probes/H12 is 2.01 s of XY (y = 100.5
-    mm) and the same Z: 1.77 s more, and nothing else differs."""
+    """From home, the XY leg to a well lasts its longer axis's travel at
+    the config's XY velocity (the axes move together), and Z dips the same
+    depth into either well: probes/H12 costs more than probes/A1 by the
+    difference in that travel, and by nothing else. Home is the same
+    distance from the origin on X and Y, so it cancels."""
     from fluidics.time_estimate import plan_run
+    probes = sipper_vocabulary(plate_sipper_config).placement("probes")
+
+    def xy_seconds(well):
+        return max(probes.xy_mm(well)) / gantry(plate_sipper_config).xy_velocity_mm_s
+
     [near] = plan_run(plate_sipper_config, [HYB])
     [far] = plan_run(plate_sipper_config, [dict(HYB, well="H12")])
-    assert far.duration_seconds - near.duration_seconds == pytest.approx(2.01 - 0.24, abs=0.01)
+    assert far.duration_seconds - near.duration_seconds == pytest.approx(
+        xy_seconds("H12") - xy_seconds("A1"), abs=0.01)
 
 
-def test_a_short_well_is_told_what_it_would_have_left_at_that_step(plate_sipper_system):
+def test_a_short_well_is_told_what_it_would_have_left_at_that_step(plate_sipper_system, plate_sipper_config):
     """The figures are the step's: the well's projected remainder when the
     step comes round, against what it holds when loaded -- not one twice."""
+    loaded, drawn = _ssct_a1_round(plate_sipper_config)
     with pytest.raises(ReservoirShortfall) as refused:
         plate_sipper_system.check_reservoirs(
             plate_sipper_system.plan([HYB, PUSH, WASH, dict(WASH, name="wash2")]))
     e = refused.value
     assert (e.step_label, e.key, e.needed_ul, e.remaining_ul, e.loaded_ul) == (
-        "wash2", "ssct/A1", 1000, 310, 1800)
-    assert str(e) == ("wash2: ssct/A1 cannot supply 1000 uL (it would have 310 uL left of "
-                      "1800 loaded at this step); refill or reload before starting")
+        "wash2", "ssct/A1", 1000, loaded - drawn, loaded)
+    assert str(e) == (f"wash2: ssct/A1 cannot supply 1000 uL (it would have {loaded - drawn} uL left of "
+                      f"{loaded} loaded at this step); refill or reload before starting")
 
 
 def test_a_short_bottle_is_told_its_own_loaded_volume(plate_sipper_system):
-    bulk = {"type": "flow_reagent", "fluidic_port": 25, "flow_rate": 5000, "volume": 4000,
+    """Port 5's bottle (5000 uL loaded) has 1000 uL left after one 4000 uL
+    draw."""
+    bulk = {"type": "flow_reagent", "fluidic_port": 5, "flow_rate": 5000, "volume": 4000,
             "name": "bulk"}
     with pytest.raises(ReservoirShortfall) as refused:
         plate_sipper_system.check_reservoirs(plate_sipper_system.plan([dict(bulk, repeat=200)]))
     e = refused.value
-    assert (e.key, e.needed_ul, e.remaining_ul, e.loaded_ul) == ("port_25", 4000, 0, 500000)
-    assert "it would have 0 uL left of 500000 loaded at this step" in str(e)
+    assert (e.key, e.needed_ul, e.remaining_ul, e.loaded_ul) == ("port_5", 4000, 1000, 5000)
+    assert "it would have 1000 uL left of 5000 loaded at this step" in str(e)
 
 
-def test_a_draw_no_full_well_can_give_keeps_its_own_remedy(plate_sipper_system):
+def test_a_draw_no_full_well_can_give_keeps_its_own_remedy(plate_sipper_system, plate_sipper_config):
     """Refilling cannot help a draw larger than a full well: the step must
-    be split, and the refusal says so, with the step named."""
+    be split, and the refusal says so, with the step named. The draw is
+    50 uL more than a probes well holds when loaded."""
+    loaded = sipper_vocabulary(plate_sipper_config).reservoirs["probes"].loaded_ul
+    big = loaded + 50
     with pytest.raises(ReservoirDrawTooLarge) as refused:
-        plate_sipper_system.run([dict(HYB, volume=200, name="big")])
-    assert str(refused.value) == ("big: probes/A1: a draw of 200 uL exceeds the 110 uL it "
+        plate_sipper_system.run([dict(HYB, volume=big, name="big")])
+    assert str(refused.value) == (f"big: probes/A1: a draw of {big} uL exceeds the {loaded} uL it "
                                   "holds when loaded; split the step")
     assert refused.value.step_label == "big"
-    assert (refused.value.volume_ul, refused.value.loaded_ul) == (200, 110)
+    assert (refused.value.volume_ul, refused.value.loaded_ul) == (big, loaded)
     assert not plate_sipper_system.busy
-    assert plate_sipper_system.devices.reservoirs.remaining("probes/A1") == 110, "nothing was charged"
+    assert plate_sipper_system.devices.reservoirs.remaining("probes/A1") == loaded, "nothing was charged"
 
 
 def _twin_whose_step_raises(monkeypatch, make_error):
@@ -178,14 +209,14 @@ def test_selective_priming_that_leaves_out_the_sipper_is_refused_at_time_zero(pl
     """Codex finding 3: the raw-dict run path took a priming row whose
     use_ports skipped the sipper's port (D7). validate_sequences refuses it,
     before the plan is replayed, and nothing is charged."""
-    prime = dict(PRIME, use_ports=[25])
+    prime = dict(PRIME, use_ports=[3])
     reservoirs = plate_sipper_system.devices.reservoirs
-    balances = {key: reservoirs.remaining(key) for key in ("port_25", "ssct/H11")}
+    balances = reservoirs.balances()
     with pytest.raises(ValueError) as refused:
         plate_sipper_system.run([prime, HYB])
     assert str(refused.value) == f"sequence 0 (priming): {SKIPS_THE_SIPPER}"
     assert not plate_sipper_system.busy
-    assert {key: reservoirs.remaining(key) for key in balances} == balances
+    assert reservoirs.balances() == balances
 
 
 def test_a_run_is_refused_at_time_zero_while_do_not_lower_tip_is_on(plate_sipper_system):
@@ -212,5 +243,6 @@ def test_a_push_is_priced_by_replay_like_the_draw_it_stands_for(plate_sipper_con
     from fluidics.time_estimate import FALLBACK_SEQUENCE_SECONDS, plan_run
     [push] = plan_run(plate_sipper_config, [PUSH])
     [same] = plan_run(plate_sipper_config, [{"type": "flow_reagent", "fluidic_port": 1, "well": "ssct/A1",
-                                             "flow_rate": 2000, "volume": 490}])
+                                             "flow_rate": 2000,
+                                             "volume": gantry(plate_sipper_config).push_volume_ul}])
     assert push.duration_seconds == same.duration_seconds != FALLBACK_SEQUENCE_SECONDS

@@ -5,6 +5,7 @@ import pytest
 
 from fluidics.devices import build_devices
 from fluidics.errors import DeviceError, ReservoirInUse
+from fluidics.vocabulary import sipper_vocabulary
 
 
 def test_a_gantry_rig_builds_a_homed_retracted_sipper_and_declared_volume_tracking(plate_sipper_config, built, tmp_path):
@@ -17,9 +18,10 @@ def test_a_gantry_rig_builds_a_homed_retracted_sipper_and_declared_volume_tracki
     # Loaded from its file, as on a real rig, the tracker still lists every
     # bottle the valves can draw from (the sipper's port 1 left out).
     assert [key for key, *_ in devices.reservoirs.balances() if "/" not in key] == [
-        "port_24", "port_25", "port_26", "port_27", "port_28"]
+        "port_2", "port_3", "port_4", "port_5", "port_6"]
     devices.reservoirs.refill("all")
-    assert devices.reservoirs.remaining("ssct/A1") == 1800
+    ssct = sipper_vocabulary(plate_sipper_config).reservoirs["ssct"]
+    assert devices.reservoirs.remaining("ssct/A1") == ssct.loaded_ul
 
 
 def test_a_simulated_rig_without_a_path_starts_declared(plate_sipper_config, built):

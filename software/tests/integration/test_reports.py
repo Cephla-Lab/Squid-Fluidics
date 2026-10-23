@@ -7,6 +7,7 @@ pinned per field in tests/unit/test_reports.py; this is the wiring."""
 import json
 
 from fluidics.events import RunEnded
+from fluidics.vocabulary import sipper_vocabulary
 
 from ..conftest import HYB, hears, wait_until
 from .conftest import FLOW_CELL_STEP
@@ -27,9 +28,11 @@ class TestRunReports:
         assert report["reagent_used_ul"], "the volume tracker's totals belong in it"
 
 
-def test_the_report_carries_the_reservoirs(plate_sipper_system, real_clock, tmp_path):
+def test_the_report_carries_the_reservoirs(plate_sipper_system, plate_sipper_config, real_clock, tmp_path):
+    loaded = sipper_vocabulary(plate_sipper_config).reservoirs["probes"].loaded_ul
     plate_sipper_system.run([HYB])
     assert plate_sipper_system.wait(5) and plate_sipper_system.reports.wait(5)
     [path] = list(tmp_path.glob("run-*.json"))
     report = json.loads(path.read_text())
-    assert {"key": "probes/A1", "dispatched_ul": 100, "remaining_ul": 10} in report["reservoirs"]
+    assert {"key": "probes/A1", "dispatched_ul": HYB["volume"], "remaining_ul": loaded - HYB["volume"]} \
+        in report["reservoirs"]

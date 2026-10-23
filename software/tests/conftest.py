@@ -36,6 +36,12 @@ def settle(system):
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
+# The suite's plate-sipper rig is the shipped sample, a real rig's config.
+# A test reads the rig's figures (positions, volumes, ports) from the loaded
+# config where it can, so re-teaching the sample breaks only the tests that
+# are about a number.
+SIPPER_CONFIG = Path(__file__).parents[1] / "sample_config" / "plate_sipper_config.yaml"
+
 
 # The two sequences the editor suites are built from: one fluidic row with
 # every port field, one that has none.
@@ -393,44 +399,44 @@ def driver_or_skip(require_axes=("X1", "Y2", "Z3")):
 @pytest.fixture
 def plate_sipper_config():
     from fluidics.control.config import load_config
-    return load_config(str(FIXTURES_DIR / "plate_sipper_config.yaml"))
+    return load_config(str(SIPPER_CONFIG))
 
 
 @pytest.fixture
 def config_on_file(tmp_path):
-    """load(name): the fixture config `name` loaded from a byte-for-byte
+    """load(source): the config file `source` loaded from a byte-for-byte
     copy in the test's tmp_path, for a test that saves the config (a
     loaded volume set, Save in the Teach window), so the save lands in the
-    copy, never in tests/fixtures."""
-    def load(name):
+    copy, never in the original."""
+    def load(source):
         import shutil
         from fluidics.control.config import load_config
-        path = tmp_path / name
-        shutil.copy(FIXTURES_DIR / name, path)
+        path = tmp_path / source.name
+        shutil.copy(source, path)
         return load_config(str(path))
     return load
 
 
 @pytest.fixture
 def plate_sipper_config_on_file(config_on_file):
-    return config_on_file("plate_sipper_config.yaml")
+    return config_on_file(SIPPER_CONFIG)
 
 
 @pytest.fixture
 def vocabulary(plate_sipper_config):
-    """The fixture sipper rig's well vocabulary -- what the gate, the live
+    """The sample sipper rig's well vocabulary -- what the gate, the live
     paint and the editor are handed on that rig (None is a rig without one)."""
     from fluidics.vocabulary import sipper_vocabulary
     return sipper_vocabulary(plate_sipper_config)
 
 
-# The rows the sipper suites are built from, against the sipper fixture
+# The rows the sipper suites are built from, against the sample sipper
 # config: a well draw from the default plate's A1 through the sipper's port
-# (1); the push that follows one (490 uL, the fixture's push_volume_ul); a
-# priming from the bulk bottle (port 25); and the words a priming or
+# (1); the push that follows one (the config's push_volume_ul); a priming
+# from the 4x SSC bottle (port 3, untracked); and the words a priming or
 # clean-up whose use_ports leaves out the sipper's port is refused with.
 HYB = {"type": "flow_reagent", "fluidic_port": 1, "well": "A1", "flow_rate": 2000, "volume": 100}
 PUSH = {"type": "push", "well": "ssct/A1", "flow_rate": 2000}
-PRIME = {"type": "priming", "fluidic_port": 25, "flow_rate": 5000, "volume": 800}
+PRIME = {"type": "priming", "fluidic_port": 3, "flow_rate": 5000, "volume": 800}
 SKIPS_THE_SIPPER = ("use_ports leaves out port 1 (the sipper): "
                     "priming and clean-up never skip the sipper")

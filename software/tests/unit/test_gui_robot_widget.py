@@ -34,6 +34,19 @@ def widget(qapp, plate_sipper_config, simulated_system):
     QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 
 
+def _plate(config, name):
+    """The config's block for the plate `name`."""
+    return next(r for r in gantry(config).reservoirs.values() if r.name == name)
+
+
+@pytest.fixture
+def named_a1(plate_sipper_config):
+    """probes/A1 labelled "hyb R01", as a plate's well_names labels a well:
+    the sample rig names none. Asked for before `widget`, so the widget is
+    built with the label."""
+    _plate(plate_sipper_config, "probes").well_names = {"A1": "hyb R01"}
+
+
 @pytest.fixture
 def main_window(qapp, simulated_system, monkeypatch):
     """The real window over a simulated system for `config`: (window,
@@ -63,6 +76,16 @@ def _go_to_well(w, system, reservoir, well):
     settle(system)
 
 
+def _ssct_a2(w):
+    """ssct/A2's (x, y), ssct's dip depth and the travel height, worked out
+    from the config: A2 is one 9 mm pitch along ssct's column axis (+y)
+    from its A1. Read, never pinned, since ssct's A1 and dip depth are
+    placeholders still to be taught."""
+    ssct = _plate(w.config, "ssct")
+    x, y = ssct.a1_xy_mm
+    return x, y + 9.0, ssct.dip_z_mm, gantry(w.config).travel_z_mm
+
+
 def _click_well(w, system, reservoir, well):
     """A click on the map at the well's centre; the move it starts settled."""
     w.deckMap.resize(640, 360)
@@ -75,7 +98,8 @@ def test_go_to_well_runs_as_a_manual_job_and_paints_the_position(widget):
     w, system = widget
     _go_to_well(w, system, "ssct", "A2")
     assert system.devices.robot.current_well.well == "A2"
-    assert w.positionLabel.text() == "x 102.50  y 10.50  z 52.00"
+    x, y, dip, _ = _ssct_a2(w)
+    assert w.positionLabel.text() == f"x {x:.2f}  y {y:.2f}  z {dip:.2f}"
 
 
 def test_home_through_the_tab_lifts_the_tip_and_repaints_the_position(widget):
@@ -94,9 +118,10 @@ def test_home_through_the_tab_lifts_the_tip_and_repaints_the_position(widget):
     assert w.positionLabel.text() == "x 0.50  y 0.50  z 0.50"
 
 
-def test_the_well_picker_takes_the_typed_well_over_the_last_pick(widget):
+def test_the_well_picker_takes_the_typed_well_over_the_last_pick(named_a1, widget):
     w, _ = widget
     w.wellCombo.setCurrentIndex(w.wellCombo.findData("A1"))
+    assert w.wellCombo.currentText() == "A1: hyb R01"
     w.wellCombo.setCurrentText("B3")
     assert w.wellCombo.value() == "B3"
     w.wellCombo.setCurrentIndex(w.wellCombo.findData("A1"))
@@ -293,11 +318,15 @@ def test_set_names_a_dedicated_well_in_the_config_and_the_map_marks_it(widget, c
 @pytest.mark.parametrize("reservoir, typed, refusal", [
     ("ssct", "Z9", "not a well"),
     ("ssct", "nope/A1", "no reservoir named 'nope'"),
-    # 110 uL loaded, against the sipper's 250 uL line.
-    ("probes", "C3", "probes/C3 holds 110 uL when loaded, less than the 250 uL"),
+    # What probes' wells hold when loaded, against the sipper's line (the
+    # tip-to-valve tubing of port_1), both read from the config.
+    ("probes", "C3", "probes/C3 holds {loaded} uL when loaded, less than the {line} uL"),
 ])
 def test_a_refused_dedicated_well_is_a_dialog_and_changes_nothing(widget, monkeypatch, reservoir, typed, refusal):
     w, system = widget
+    refusal = refusal.format(
+        loaded=_plate(w.config, "probes").loaded_ul,
+        line=w.config.reagent_selection.selector_valves.tubing_fluid_amount_ul["port_1"])
     said = []
     monkeypatch.setattr("fluidics.qt.robot_control.QMessageBox.critical",
                         lambda parent, title, text: said.append(text))
@@ -315,8 +344,9 @@ def test_the_next_priming_row_primes_the_sipper_from_the_well_set(widget):
     system.run([PRIME])
     settle(system)
     tracker = system.devices.reservoirs
-    assert tracker.remaining("ssct/H10") < 1800, "the sipper's port primed from the well set"
-    assert tracker.remaining("ssct/H11") == 1800
+    loaded = _plate(w.config, "ssct").loaded_ul
+    assert tracker.remaining("ssct/H10") < loaded, "the sipper's port primed from the well set"
+    assert tracker.remaining("ssct/H11") == loaded
 
 
 def test_save_writes_the_dedicated_wells_to_the_config_file(
@@ -345,9 +375,10 @@ def test_the_map_judges_the_published_position_not_the_live_stage(widget):
     w, system = widget
     stage = system.devices.robot._stage
     stage._position = None                     # a leg in flight
-    w._paintPosition((102.5, 10.5, 1.0))
+    x, y, dip, travel = _ssct_a2(w)
+    w._paintPosition((x, y, travel))
     assert w.deckMap.stateText().startswith("sipper: retracted over ssct/A2")
-    w._paintPosition((102.5, 10.5, 52.0))
+    w._paintPosition((x, y, dip))
     assert w.deckMap.stateText().startswith("sipper: lowered")
 
 
@@ -363,12 +394,13 @@ def test_the_deck_map_follows_the_sipper(widget):
     with no well after a retract -- from the stage's publish, not a poll."""
     w, system = widget
     _go_to_well(w, system, "ssct", "A2")
+    x, y, dip, travel = _ssct_a2(w)
     assert w.deckMap.currentWell == WellRef("ssct", "A2")
-    assert w.deckMap.stateText() == "sipper: lowered in ssct/A2   x 102.5  y 10.5  z 52.0 mm"
+    assert w.deckMap.stateText() == f"sipper: lowered in ssct/A2   x {x:.1f}  y {y:.1f}  z {dip:.1f} mm"
     w._run(w.manual.retract)
     settle(system)
     assert w.deckMap.currentWell is None
-    assert w.deckMap.stateText() == "sipper: retracted over ssct/A2   x 102.5  y 10.5  z 1.0 mm"
+    assert w.deckMap.stateText() == f"sipper: retracted over ssct/A2   x {x:.1f}  y {y:.1f}  z {travel:.1f} mm"
 
 
 def test_a_click_on_a_well_of_the_map_goes_there_as_a_manual_job(widget):
@@ -396,8 +428,9 @@ def test_do_not_lower_tip_stops_go_to_well_over_the_well_and_refuses_a_run(widge
     w.lowerTipBox.setChecked(True)
     assert robot.lower_tip is False
     _go_to_well(w, system, "ssct", "A2")
-    assert robot.current_well is None and robot.position() == (102.5, 10.5, 1.0)
-    assert w.deckMap.stateText() == "sipper: retracted over ssct/A2   x 102.5  y 10.5  z 1.0 mm"
+    x, y, _, travel = _ssct_a2(w)
+    assert robot.current_well is None and robot.position() == (x, y, travel)
+    assert w.deckMap.stateText() == f"sipper: retracted over ssct/A2   x {x:.1f}  y {y:.1f}  z {travel:.1f} mm"
     with pytest.raises(OperationError, match="Do not lower tip"):
         system.run([HYB])
     assert not system.busy
@@ -461,15 +494,18 @@ def test_the_do_not_lower_tip_box_shows_the_robots_state_when_built(widget):
 def test_teaching_moves_the_drawn_plate(widget):
     """The map re-reads the live placements when the teach job ends."""
     w, system = widget
-    before = w.deckMap.pixel(*system.devices.robot.placements["probes"].xy_mm("A1"))
+    robot = system.devices.robot
+    a1 = robot.placements["probes"].xy_mm("A1")
+    before = w.deckMap.pixel(*a1)
     w.teachPlateCombo.setCurrentIndex(w.teachPlateCombo.findData("probes"))
-    w._run(lambda: w.manual.jog("x", 10.0))
+    # Taught 1.5 mm nearer the stage origin along X than the config has it,
+    # which the map's half turn puts to the right.
+    distance = a1[0] - 1.5 - robot.position()[0]
+    w._run(lambda: w.manual.jog("x", distance))
     settle(system)
     w.setA1Here()
     settle(system)
-    after = w.deckMap.pixel(*system.devices.robot.placements["probes"].xy_mm("A1"))
-    # Taught 1.5 mm nearer the stage origin, which the map's half turn
-    # puts to the right.
+    after = w.deckMap.pixel(*robot.placements["probes"].xy_mm("A1"))
     assert after[0] > before[0], "A1 taught nearer the stage origin moves the drawn plate"
 
 

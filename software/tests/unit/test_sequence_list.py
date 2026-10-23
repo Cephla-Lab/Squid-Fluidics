@@ -20,7 +20,7 @@ def flow_cell(*sequences):
 
 
 def sipper_rig(config, *sequences):
-    """The list over the plate-sipper fixture rig, where FLOW's port (1) is
+    """The list over the sample plate-sipper rig, where FLOW's port (1) is
     the sipper's: FLOW is the sipper row with no well, HYB the one with."""
     return SequenceList("Flow Cell", available_ports(config), sequences,
                         sipper=sipper_vocabulary(config))

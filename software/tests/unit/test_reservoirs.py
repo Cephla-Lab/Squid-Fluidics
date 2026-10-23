@@ -803,7 +803,7 @@ def test_snapshot_round_trips_through_restore():
 
 
 def test_the_undeclared_refusal_names_a_wholly_undeclared_plate_once():
-    """A first run has every well undeclared (193 entries on the sample
+    """A first run has every well undeclared (194 entries on the sample
     rig): a plate none of whose wells is declared is named once, a plate
     partly declared by its undeclared wells, a bottle by its key."""
     defs = dict(DEFS, **{"probes/A1": {"loaded_ul": 110}, "probes/A2": {"loaded_ul": 110}})
@@ -833,7 +833,7 @@ def test_bottle_keys_are_the_plumbed_ports_but_the_sippers(plate_sipper_config, 
     tubing volume, the sipper's left out (its draws are its wells'), and a
     port whose tubing volume is 0 left out as unplumbed."""
     from fluidics.control.config import bottle_keys
-    assert bottle_keys(plate_sipper_config) == ["port_24", "port_25", "port_26", "port_27", "port_28"]
+    assert bottle_keys(plate_sipper_config) == ["port_2", "port_3", "port_4", "port_5", "port_6"]
     assert bottle_keys(flow_cell_config) == [f"port_{n}" for n in range(1, 29)]
-    plate_sipper_config.reagent_selection.selector_valves.tubing_fluid_amount_ul["port_28"] = 0
-    assert "port_28" not in bottle_keys(plate_sipper_config)
+    plate_sipper_config.reagent_selection.selector_valves.tubing_fluid_amount_ul["port_6"] = 0
+    assert "port_6" not in bottle_keys(plate_sipper_config)

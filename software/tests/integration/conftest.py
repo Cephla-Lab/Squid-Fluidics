@@ -38,8 +38,8 @@ def instant_devices(built):
 
 @pytest.fixture
 def plate_sipper_rig(plate_sipper_config, instant_devices):
-    """(MERFISHOperations with a sipper, syringe_pump) over the sipper
-    fixture config: an instant simulated rig with a fresh in-memory volume
+    """(MERFISHOperations with a sipper, syringe_pump) over the sample
+    sipper config: an instant simulated rig with a fresh in-memory volume
     tracker, every well full, for the rows only a sipper rig can run."""
     devices = instant_devices(plate_sipper_config)
     return build_operations(plate_sipper_config, devices), devices.syringe_pump
@@ -73,7 +73,7 @@ def system(flow_cell_config, make_system):
 
 @pytest.fixture
 def plate_sipper_system(plate_sipper_config, make_system):
-    """`system` on the sipper fixture config: a FluidicsSystem over an
+    """`system` on the sample sipper config: a FluidicsSystem over an
     instant simulated sipper rig with a fresh in-memory volume tracker,
     every well full, torn down clean; its run reports land in the test's
     tmp_path."""
