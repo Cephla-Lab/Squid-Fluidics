@@ -30,7 +30,8 @@ from .errors import RunControl
 from .experiment_worker import ExperimentWorker
 from .merfish_operations import MERFISHOperations
 from .open_chamber_operations import OpenChamberOperations
-from .reservoirs import VolumeTracker, default_volume_tracking_path, reservoir_definitions
+from .reservoirs import (VolumeTracker, bottle_keys, default_volume_tracking_path,
+                         reservoir_definitions)
 from .robot.sipper import RobotSipper
 from .robot.stage import POLL_SECONDS, XYZStage
 from .vocabulary import sipper_vocabulary
@@ -223,11 +224,11 @@ def _build_volume_tracker(config, simulation, volume_tracking_path):
     """The volume tracker for everything this config tracks, placed as
     build_devices' note on volume_tracking_path says: its file on disk
     under its lock, or in memory."""
-    definitions = reservoir_definitions(config)
+    definitions, bottles = reservoir_definitions(config), bottle_keys(config)
     if not definitions or (simulation and volume_tracking_path is None):
-        return VolumeTracker(definitions)
+        return VolumeTracker(definitions, bottles=bottles)
     path = volume_tracking_path or default_volume_tracking_path(config.source_path or "in-memory")
-    return VolumeTracker.load(path, definitions)
+    return VolumeTracker.load(path, definitions, bottles=bottles)
 
 
 def build_devices(config, simulation=False, on_issue=None, run_control=None,

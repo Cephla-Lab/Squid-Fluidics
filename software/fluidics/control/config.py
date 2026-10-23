@@ -136,7 +136,6 @@ class ReservoirConfig(_StrictModel):
     name: str
     type: Literal["plate"]
     number_of_wells: Literal[96]
-    well_spacing: int = Field(default=1, ge=1)       # pitch multiplier; 1 = every well
     a1_xy_mm: Tuple[float, float]
     dip_z_mm: float
     # No default: the only deck runs its columns along +y and its rows along

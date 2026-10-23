@@ -76,10 +76,6 @@ class TestPlacement:
         with pytest.raises(ValueError, match="column_axis"):
             PlatePlacement((0.0, 0.0), 50.0, G96, column_axis="x")
 
-    def test_well_spacing_multiplies_the_pitch(self):
-        plate = PlatePlacement((0.0, 0.0), 55.0, G96, well_spacing=2)
-        assert plate.xy_mm("A2") == (18.0, 0.0)
-
     def test_the_corners_come_with_their_coordinates(self):
         plate = PlatePlacement((10.0, 20.0), 50.0, G96)
         assert plate.corners() == [("A1", (10.0, 20.0)), ("A12", (109.0, 20.0)),

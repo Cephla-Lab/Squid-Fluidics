@@ -79,6 +79,13 @@ class ManualOperations:
         if (syringe_port == self._extract_port and self._sipper_port is not None
                 and self.sv.get_current_port() == self._sipper_port
                 and self.robot.current_well is None):
+            # The switch first: with it on, Go to well stops above the well,
+            # and "go to a well" would send the operator back to the move
+            # they just made.
+            if not self.robot.lower_tip:
+                raise RuntimeError("Do not lower tip is on: Go to well stops above the well, so "
+                                   "nothing can be drawn through the sipper; switch it off on "
+                                   "the Robot tab")
             raise RuntimeError("the sipper is not in a well: go to a well first")
         _logger.info("Manual: extract %s uL through port %d at %s uL/min.",
                      volume_ul, syringe_port, flow_rate_ul_min)

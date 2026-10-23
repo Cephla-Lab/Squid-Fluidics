@@ -115,8 +115,7 @@ class PlatePlacement:
     """Where a plate's wells are: A1 as taught, then the pitch along
     `column_axis` per column and along `row_axis` per row."""
 
-    def __init__(self, a1_xy_mm, dip_z_mm, geometry, well_spacing=1,
-                 pitch_mm=SBS_PITCH_MM, column_axis="+x", row_axis="+y"):
+    def __init__(self, a1_xy_mm, dip_z_mm, geometry, column_axis="+x", row_axis="+y"):
         for name, value in (("column_axis", column_axis), ("row_axis", row_axis)):
             if value not in AXIS_DIRECTIONS:
                 raise ValueError(f"{name} must be one of {sorted(AXIS_DIRECTIONS)}, not {value!r}")
@@ -126,7 +125,7 @@ class PlatePlacement:
         self.a1_xy_mm = (float(a1_xy_mm[0]), float(a1_xy_mm[1]))
         self.dip_z_mm = float(dip_z_mm)
         self.geometry = geometry
-        self.pitch_mm = pitch_mm * well_spacing
+        self.pitch_mm = SBS_PITCH_MM
         self.column_axis = column_axis
         self.row_axis = row_axis
 

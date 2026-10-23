@@ -117,9 +117,10 @@ class ReservoirsWindow(PostsToQtThread, QWidget):
     def refresh(self):
         """Paint the volumes and the resets as they stand. A row's cells are
         rewritten in place, so a tick does not disturb the selection; when
-        the rows themselves change (an untracked bottle's first draw, or its
-        reset), the selection follows the reservoirs rather than the row
-        numbers."""
+        the rows themselves change (a volume tracker built without its
+        bottles lists one at its first draw), the selection follows the
+        reservoirs rather than the row numbers, so a reset of the selection
+        resets what the operator picked."""
         if not self.isVisible():
             return
         rows = self.tracker.balances()

@@ -38,7 +38,6 @@ class SipperVocabulary:
         """The plate as the config has it now."""
         r = self.reservoirs[name]
         return PlatePlacement(r.a1_xy_mm, r.dip_z_mm, r.geometry,
-                              well_spacing=r.well_spacing,
                               column_axis=r.column_axis, row_axis=r.row_axis)
 
     def placements(self):

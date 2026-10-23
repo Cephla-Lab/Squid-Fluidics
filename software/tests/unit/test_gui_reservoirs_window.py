@@ -1,6 +1,7 @@
 """The Reservoirs window, opened from the Run Experiments tab, over a
 simulated system: one row for every tracked reservoir and every bottle
-drawn from since its reset, blank where no volume is declared and
+the valves can draw from (the sipper's port left out), at 0 until drawn
+from and again after a reset, blank where no volume is declared and
 `undeclared` where a volume is yet to be declared; Reset selected, Reset
 <plate> and Reset all as manual jobs the Run tab owns, the verb's refusal
 said before the question; and the repaints that keep it current."""
@@ -104,24 +105,26 @@ def _draws(system, *draws):
     settle(system)
 
 
-def test_every_tracked_reservoir_has_a_row_and_a_bottle_drawn_from_joins_them(
-        reservoirs, plate_sipper_config):
-    """The tracked bottle and every well of both plates before any draw;
-    after a well draw and one from an untracked bottle, the bottle's row
-    (blank volumes) among the bottles and the well's figures, repainted by
-    the job's end."""
+def test_every_bottle_and_every_well_has_a_row_before_any_draw(reservoirs, plate_sipper_config):
+    """Every bottle the valves can draw from (the plumbed ports but the
+    sipper's) and every well of both plates before any draw, an untracked
+    bottle with blank volumes; after a well draw and a bottle draw, their
+    figures, repainted by the job's end."""
     window, _, system = reservoirs(plate_sipper_config)
     assert window.isVisible() and window.windowTitle() == "Reservoirs"
     rows = _rows(window)
-    assert len(rows) == 1 + 2 * 96
+    assert len(rows) == 5 + 2 * 96
+    assert "port_1" not in rows, "the sipper's port: its draws are its wells'"
     assert rows["port_25"] == ("4x SSC", "0", "500000", "500000")
+    assert rows["port_26"] == ("DAPI", "0", "", "")
     assert rows["probes/A1"] == ("hyb R01", "0", "110", "110")
     assert rows["ssct/B3"] == ("sipper", "0", "1800", "1800")
     _draws(system, (1, "probes/A1", 50), (26, None, 100))
     rows = _rows(window)
     assert rows["port_26"] == ("DAPI", "100", "", "")
     assert rows["probes/A1"] == ("hyb R01", "50", "60", "110")
-    assert _keys(window)[:5] == ["port_25", "port_26", "probes/A1", "probes/B1", "probes/C1"], \
+    assert _keys(window)[:7] == ["port_24", "port_25", "port_26", "port_27", "port_28",
+                                 "probes/A1", "probes/B1"], \
         "the bottles by port, then each plate's wells column-major"
 
 
@@ -202,13 +205,13 @@ def test_reset_all_resets_everything_the_untracked_bottles_included(
     window, _, system = reservoirs(plate_sipper_config)
     _draws(system, (1, "probes/A1", 50), (26, None, 100))
     system.manual.retract()                        # the tip leaves probes/A1 before its plate is lifted
-    assert "port_26" in _rows(window)
+    assert _rows(window)["port_26"] == ("DAPI", "100", "", "")
     asked = _agrees(monkeypatch)
     window.resetAllButton.click()
     settle(system)
     assert asked == [f"Reset every reservoir? {QUESTION}"]
     rows = _rows(window)
-    assert "port_26" not in rows, "an untracked bottle reset has given nothing since"
+    assert rows["port_26"] == ("DAPI", "0", "", ""), "an untracked bottle's reset zeroes it and keeps its row"
     assert rows["probes/A1"] == ("hyb R01", "0", "110", "110")
 
 
@@ -332,9 +335,12 @@ def test_the_window_keeps_itself_current_while_open_and_a_closed_one_waits_to_be
 
 
 def test_the_selection_follows_the_reservoirs_when_a_bottle_joins_the_rows(
-        reservoirs, plate_sipper_config):
-    """A first draw from an untracked bottle inserts its row among the
-    bottles, above every well: the highlighted well stays highlighted."""
+        reservoirs, plate_sipper_config, monkeypatch):
+    """A volume tracker built without its bottles (by hand, say) lists a
+    bottle at its first draw, its row inserted among the bottles above
+    every well: the highlighted well stays highlighted, so a reset of the
+    selection resets what the operator picked."""
+    monkeypatch.setattr("fluidics.devices.bottle_keys", lambda config: [])
     window, _, system = reservoirs(plate_sipper_config)
     _select(window, "probes/A1")
     _draws(system, (26, None, 100))
@@ -342,21 +348,24 @@ def test_the_selection_follows_the_reservoirs_when_a_bottle_joins_the_rows(
     assert window.selectedKeys() == ["probes/A1"]
 
 
-def test_a_rig_that_tracks_nothing_lists_and_resets_the_bottles_drawn_from(
+def test_a_rig_that_tracks_nothing_lists_and_resets_its_bottles(
         reservoirs, flow_cell_config, monkeypatch):
-    """No declared volume and no plate: an empty table (nothing to reset
-    all of), then a row per bottle drawn from with every volume blank and
-    nothing undeclared; Reset all zeroes it, and the row goes."""
+    """No declared volume and no plate: a row per plumbed bottle from the
+    start, every volume blank and nothing undeclared; a draw counts on its
+    row, and Reset all zeroes it and keeps the row."""
     window, _, system = reservoirs(flow_cell_config)
     assert system.devices.reservoirs.tracked == () and window.resetPlateButtons == {}
-    assert _rows(window) == {} and not window.resetAllButton.isEnabled()
+    rows = _rows(window)
+    assert len(rows) == 28 and rows["port_3"] == ("z", "0", "", "")
+    assert window.resetAllButton.isEnabled()
     _draws(system, (3, None, 100))
-    assert _rows(window) == {"port_3": ("z", "100", "", "")}
+    assert _rows(window)["port_3"] == ("z", "100", "", "")
     assert window.undeclaredLabel.isHidden()
     _agrees(monkeypatch)
     window.resetAllButton.click()
     settle(system)
-    assert _rows(window) == {} and system.devices.reservoirs.balances() == []
+    assert _rows(window)["port_3"] == ("z", "0", "", "")
+    assert all(accumulated == 0 for _, _, accumulated, *_ in system.devices.reservoirs.balances())
 
 
 def test_a_tracked_bottle_on_a_rig_without_a_robot_resets_from_its_row(
@@ -366,10 +375,11 @@ def test_a_tracked_bottle_on_a_rig_without_a_robot_resets_from_its_row(
     assert system.devices.robot is None and system.devices.reservoirs.tracked == ("port_2",)
     system.devices.reservoirs.restore({"reservoirs": {"port_2": {"dispatched_ul": 400}}})
     window.refresh()
-    assert _rows(window) == {"port_2": ("y", "400", "9600", "10000")}
+    assert _rows(window)["port_2"] == ("y", "400", "9600", "10000")
+    assert _rows(window)["port_3"] == ("z", "0", "", ""), "the untracked bottles beside it"
     _agrees(monkeypatch)
     _select(window, "port_2")
     window.resetSelectedButton.click()
     settle(system)
     assert system.devices.reservoirs.remaining("port_2") == 10000
-    assert _rows(window) == {"port_2": ("y", "0", "10000", "10000")}
+    assert _rows(window)["port_2"] == ("y", "0", "10000", "10000")

@@ -319,8 +319,8 @@ class TestPersistence:
             failing.refill("ssct/A1", "port_25")
         assert failing.remaining("ssct/A1") == 1100 and failing.remaining("port_25") == 4700
 
-    def test_all_on_a_rig_that_tracks_and_has_drawn_nothing_says_so(self):
-        with pytest.raises(ValueError, match="tracks no reservoir volumes, and no bottle"):
+    def test_all_on_a_rig_with_no_bottle_or_well_says_so(self):
+        with pytest.raises(ValueError, match="no bottle or well to reset"):
             VolumeTracker({}).refill("all")
 
     @pytest.mark.parametrize("on_disk", [
@@ -446,6 +446,38 @@ class TestTheUntrackedFigure:
     counted on every draw, run after run, in memory alone; its reset zeroes
     it with no write and nothing to declare."""
 
+    def test_a_bottle_the_rig_can_draw_from_is_listed_before_its_first_draw(self):
+        """The rig's bottles come in with the definitions: each listed at 0
+        from the start, in port order among the tracked one, untracked ones
+        with no volumes, and none of it on the file."""
+        tracker = VolumeTracker(DEFS, bottles=["port_26", "port_3", "port_25"])
+        assert [(key, accumulated, current, loaded)
+                for key, _, accumulated, current, loaded, _ in tracker.balances()] == [
+            ("port_3", 0.0, None, None), ("port_25", 0.0, 5000, 5000),
+            ("port_26", 0.0, None, None), ("ssct/A1", 0.0, 1800, 1800),
+            ("ssct/A2", 0.0, 1800, 1800)]
+        assert tracker.rows() == [] and tracker.snapshot()["reservoirs"] == {}
+
+    def test_a_tracker_loaded_from_its_file_lists_its_bottles_too(self, tmp_path):
+        """A real rig's tracker comes from load(): the bottles come with it,
+        listed at 0 and kept off the file."""
+        with closing(VolumeTracker.load(tmp_path / "volumes.json", DEFS,
+                                        bottles=["port_26"])) as tracker:
+            assert ("port_26", None, 0.0, None, None, False) in tracker.balances()
+            assert "port_26" not in tracker.snapshot()["reservoirs"]
+
+    def test_a_bottle_never_drawn_from_resets_without_a_write(self, tmp_path):
+        """Listed from launch, a bottle can be reset before its first draw
+        (Reset selected on a fresh row, --refilled port_26), and Reset all
+        on a rig with bottles and nothing tracked is not refused."""
+        tracker = VolumeTracker(DEFS, path=tmp_path / "volumes.json", bottles=["port_26"])
+        tracker.refill("port_26")
+        assert ("port_26", None, 0.0, None, None, False) in tracker.balances()
+        assert not (tmp_path / "volumes.json").exists(), "nothing tracked was reset: no write"
+        untracked = VolumeTracker({}, bottles=["port_3"])
+        untracked.refill("all")
+        assert [key for key, *_ in untracked.balances()] == ["port_3"]
+
     def test_an_untracked_bottle_accumulates_across_runs_and_never_reaches_the_file(self, rig, tmp_path):
         tracker, pump, state = rig
         state["port"] = 26
@@ -457,14 +489,14 @@ class TestTheUntrackedFigure:
         assert tracker.rows() == [] and tracker.snapshot()["reservoirs"] == {}
         assert not (tmp_path / "volumes.json").exists()
 
-    def test_its_reset_zeroes_it_without_a_write_and_takes_it_off_the_rows(self, rig, tmp_path):
+    def test_its_reset_zeroes_it_without_a_write_and_keeps_its_row(self, rig, tmp_path):
         """The run's own figure is the run's: the report and the run-end
         line keep what this run drew."""
         tracker, pump, state = rig
         state["port"] = 26
         pump.extract(EXTRACT_PORT, 300)
         tracker.refill("port_26")
-        assert "port_26" not in [key for key, *_ in tracker.balances()]
+        assert ("port_26", None, 0.0, None, None, False) in tracker.balances()
         assert not (tmp_path / "volumes.json").exists(), "nothing tracked was reset: no write"
         assert tracker.used_rows() == [(26, None, 300.0)]
         pump.extract(EXTRACT_PORT, 50)
@@ -477,7 +509,7 @@ class TestTheUntrackedFigure:
         pump.extract(EXTRACT_PORT, 300)
         tracker.refill("all")
         assert [(key, accumulated) for key, _, accumulated, *_ in tracker.balances()] == [
-            ("port_25", 0.0), ("ssct/A1", 0.0), ("ssct/A2", 0.0)]
+            ("port_25", 0.0), ("port_26", 0.0), ("ssct/A1", 0.0), ("ssct/A2", 0.0)]
         assert json.loads((tmp_path / "volumes.json").read_text())["reservoirs"] == {}
 
     def test_a_reset_all_that_cannot_be_written_leaves_the_untracked_figure_too(self, tmp_path):
@@ -499,16 +531,17 @@ class TestTheUntrackedFigure:
         tally.pump.extract(EXTRACT_PORT, 100)
         assert tally.tracker.balances() == [("port_3", "DAPI", 600.0, None, None, False)]
         tally.tracker.refill("all")
-        assert tally.tracker.balances() == []
+        assert tally.tracker.balances() == [("port_3", "DAPI", 0.0, None, None, False)]
         assert tally.tracker.used_rows() == [(3, "DAPI", 100.0)]
 
 
 class TestBalances:
-    """balances(): the Reservoirs window's rows -- every tracked reservoir,
-    drawn from or not, and every untracked bottle drawn from since launch
-    or its reset: what each has given since its reset and, where a volume
-    is declared, what is left and what was loaded; and whether the volume tracker
-    lacks its declaration."""
+    """balances(): the Reservoirs window's rows -- every tracked reservoir
+    and every bottle the volume tracker was given, drawn from or not, a
+    reset keeping its row (built without them, a bottle joins at its first
+    draw): what each has given since its reset and, where a volume is
+    declared, what is left and what was loaded; and whether the volume
+    tracker lacks its declaration."""
 
     @pytest.fixture
     def named(self, tmp_path):
@@ -652,3 +685,14 @@ def test_describe_keys_keeps_a_label_to_a_line_or_two():
     assert describe_keys(wells[:5], defined) == "5 wells of probes"
     assert describe_keys(wells[:4] + ["ssct/A2"], defined) == \
         "probes/A1, probes/B1, probes/C1, probes/D1, ssct/A2"
+
+
+def test_bottle_keys_are_the_plumbed_ports_but_the_sippers(plate_sipper_config, flow_cell_config):
+    """What the Reservoirs window lists before any draw: every port with a
+    tubing volume, the sipper's left out (its draws are its wells'), and a
+    port whose tubing volume is 0 left out as unplumbed."""
+    from fluidics.reservoirs import bottle_keys
+    assert bottle_keys(plate_sipper_config) == ["port_24", "port_25", "port_26", "port_27", "port_28"]
+    assert bottle_keys(flow_cell_config) == [f"port_{n}" for n in range(1, 29)]
+    plate_sipper_config.reagent_selection.selector_valves.tubing_fluid_amount_ul["port_28"] = 0
+    assert "port_28" not in bottle_keys(plate_sipper_config)

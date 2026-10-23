@@ -101,6 +101,13 @@ class FluidicsControlGUI(PostsToQtThread, QMainWindow):
         self.session.state.subscribe(lambda kind: self._post_event("_renderTabs"))
         self.temperatureController = self.system.devices.temperature_controller
         self.flowSensors = self.system.devices.flow_sensors
+        # "Do not lower tip" starts on in this window, so a Go to well
+        # before the taught positions are checked never dips; the operator
+        # switches it off to draw or run. Set on the robot before the Robot
+        # tab is built to show it. A run from the command line or a script
+        # lowers the tip as before.
+        if self.system.devices.robot is not None:
+            self.system.manual.set_lower_tip(False)
 
         self.initUI()
 

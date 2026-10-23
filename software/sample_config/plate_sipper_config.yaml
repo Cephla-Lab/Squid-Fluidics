@@ -65,7 +65,6 @@ reagent_selection:
         name: probes
         type: plate
         number_of_wells: 96
-        well_spacing: 1
         a1_xy_mm: [12.0, 1.5]
         dip_z_mm: 50.0
         # Required, no default: this deck turns the plates from the SBS
@@ -79,7 +78,6 @@ reagent_selection:
         name: ssct
         type: plate
         number_of_wells: 96
-        well_spacing: 1
         a1_xy_mm: [102.5, 1.5]
         dip_z_mm: 52.0
         column_axis: "+y"

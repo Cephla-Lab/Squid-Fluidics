@@ -593,7 +593,9 @@ class TestGantryConfig:
          "reagent_selection.nimotion_gantry_system.reservoirs.1.residual_ul"),
         (lambda d: _valves_block(d).__setitem__("residual_volume_ul", {"port_25": 20000}),
          "reagent_selection.selector_valves.residual_volume_ul"),
-    ], ids=["plate", "bottle"])
+        (lambda d: _gantry_block(d)["reservoirs"][1].__setitem__("well_spacing", 9),
+         "reagent_selection.nimotion_gantry_system.reservoirs.1.well_spacing"),
+    ], ids=["plate-residual", "bottle-residual", "well-spacing"])
     def test_a_config_still_carrying_a_removed_key_is_refused_naming_it(self, tmp_path, plant, key):
         """A file written before these keys went fails to load, and the
         message names the key to delete."""

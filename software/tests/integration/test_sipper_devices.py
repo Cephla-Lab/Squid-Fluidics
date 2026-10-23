@@ -14,6 +14,10 @@ def test_a_gantry_rig_builds_a_homed_retracted_sipper_and_declared_volume_tracki
     assert devices.robot.position() == (0.5, 0.5, 0.5)           # every axis read after homing, cleared into its stroke
     assert devices.reservoirs.undeclared == list(devices.reservoirs.tracked), \
         "no file yet: undeclared until declared"
+    # Loaded from its file, as on a real rig, the tracker still lists every
+    # bottle the valves can draw from (the sipper's port 1 left out).
+    assert [key for key, *_ in devices.reservoirs.balances() if "/" not in key] == [
+        "port_24", "port_25", "port_26", "port_27", "port_28"]
     devices.reservoirs.refill("all")
     assert devices.reservoirs.remaining("ssct/A1") == 1800
 

@@ -475,6 +475,19 @@ def test_teaching_moves_the_drawn_plate(widget):
     assert after[0] > before[0], "A1 taught nearer the stage origin moves the drawn plate"
 
 
+def test_the_window_starts_with_do_not_lower_tip_on(main_window, plate_sipper_config, simulated_system):
+    """A Go to well before the taught positions are checked never dips: the
+    standalone window turns the switch on at start and the Robot tab shows
+    it, so a run from the window is refused until it is off; a system built
+    without the window lowers the tip, so a command-line run is not."""
+    window, system = main_window(plate_sipper_config)
+    assert system.devices.robot.lower_tip is False
+    assert window.tabWidget.widget(window.ROBOT_TAB).lowerTipBox.isChecked()
+    with pytest.raises(OperationError, match="Do not lower tip"):
+        system.run([HYB])
+    assert simulated_system(plate_sipper_config).devices.robot.lower_tip is True
+
+
 def test_one_job_on_the_rig_greys_the_other_tabs(main_window, plate_sipper_config, real_clock):
     """The real window: a Robot-tab move greys the run and manual tabs; a
     manual-tab move greys the run and Robot tabs; all come back after."""

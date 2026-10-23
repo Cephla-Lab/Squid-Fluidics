@@ -48,7 +48,7 @@ import threading
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
-from .control.config import gantry, port_key, port_of
+from .control.config import available_ports, gantry, port_key, port_of
 from .errors import (ReservoirDrawTooLarge, ReservoirError, ReservoirInUse, ReservoirNoWell,
                      ReservoirOverdraw, ReservoirUndeclared, ReservoirWriteError)
 from .events import RunEnded, RunStarted
@@ -68,11 +68,15 @@ def _no_name(key):
 
 
 class VolumeTracker:
-    def __init__(self, definitions, path=None, declared=True):
+    def __init__(self, definitions, path=None, declared=True, bottles=()):
         self._defs = {key: {"loaded_ul": int(d["loaded_ul"])} for key, d in definitions.items()}
-        # reservoir key -> uL given since its last reset: every tracked key,
-        # and an untracked bottle from its first draw (never on the file).
-        self._dispatched = {key: 0.0 for key in self._defs}
+        # reservoir key -> uL given since its last reset: every tracked key
+        # and every bottle the rig can draw from (`bottles`, the port keys
+        # bottle_keys gives), from launch, so the Reservoirs window lists a
+        # bottle before its first draw; built without them (by hand), a
+        # bottle joins at its first draw. An untracked one is never on the
+        # file.
+        self._dispatched = {key: 0.0 for key in (*bottles, *self._defs)}
         self._used_run = {}          # routed port -> uL drawn since the run started
         self._path = Path(path) if path is not None else None
         self._lock = threading.Lock()
@@ -217,9 +221,9 @@ class VolumeTracker:
 
     def balances(self):
         """(key, reagent, accumulated_ul, current_ul or None, loaded_ul or
-        None, undeclared) for every tracked reservoir and every untracked
-        bottle drawn from since launch or its last reset: the Reservoirs
-        window's one read. Accumulated is what the reservoir has given
+        None, undeclared) for every tracked reservoir and every bottle the
+        rig can draw from, drawn from yet or not: the Reservoirs window's
+        one read. Accumulated is what the reservoir has given
         since its last reset; current is what is left of it and loaded its
         declared volume, both None for an untracked bottle, which declares
         none; undeclared is whether its volume is yet to be declared (a run
@@ -229,8 +233,7 @@ class VolumeTracker:
         port; a well's is the config's label for it, else the sipper port's
         name -- read fresh, as used_rows reads them."""
         with self._lock:
-            keys = sorted((key for key, ul in self._dispatched.items() if key in self._defs or ul),
-                          key=_order)
+            keys = sorted(self._dispatched, key=_order)
             rows = [(key, self._dispatched[key],
                      *((self._remaining(key), self._defs[key]["loaded_ul"]) if key in self._defs
                        else (None, None)),
@@ -300,9 +303,9 @@ class VolumeTracker:
         declared, full again and declared, once the file says so. All of
         them in one write, or none: a reset the file cannot hold changes
         nothing (ReservoirWriteError), and one key that names nothing
-        refuses them all before anything changes. An untracked bottle (one
-        drawn from since launch) has nothing to fill or declare: its figure
-        is zeroed in memory, with no write."""
+        refuses them all before anything changes. An untracked bottle has
+        nothing to fill or declare: its figure is zeroed in memory, with no
+        write."""
         if not keys:
             raise ValueError("nothing to refill: name a reservoir, a plate, or all")
         with self._lock:
@@ -315,9 +318,8 @@ class VolumeTracker:
                 matched = [k for k in self._dispatched
                            if key == "all" or k == key or plate_of(k) == key]
                 if not matched:
-                    if key == "all" and not self._defs:
-                        raise ValueError("this rig tracks no reservoir volumes, and no bottle "
-                                         "has been drawn from since launch: nothing to reset")
+                    if key == "all":
+                        raise ValueError("this rig has no bottle or well to reset")
                     raise ValueError(f"nothing to refill named {key!r}")
                 resetting.extend(k for k in matched if k not in resetting)
             what = ", ".join(repr(key) for key in keys)
@@ -360,14 +362,14 @@ class VolumeTracker:
         _sync_directory(self._path.parent)
 
     @classmethod
-    def load(cls, path, definitions):
+    def load(cls, path, definitions, bottles=()):
         """A volume tracker over `definitions`, holding the lock on
         `path`: entries whose definition matches the file are restored,
         every other entry is undeclared (a missing, unreadable or corrupt
         file, one of the wrong shape included: all of them). Anything else
         that goes wrong releases the lock before it is raised."""
         path = Path(path)
-        tracker = cls(definitions, path=path, declared=False)
+        tracker = cls(definitions, path=path, declared=False, bottles=bottles)
         tracker._lockfile = _acquire_lock(path)
         try:
             tracker._reconcile(path)
@@ -540,6 +542,15 @@ def default_volume_tracking_path(config_path):
     volume tracking file."""
     digest = hashlib.sha1(os.path.abspath(config_path).encode()).hexdigest()[:12]
     return get_default_log_directory() / "reservoirs" / f"{digest}.json"
+
+
+def bottle_keys(config):
+    """The bottles the valves can draw from, by port key: every port the
+    rig offers (available_ports, the only ports the valves will open) but
+    the sipper's, whose draws are its wells'."""
+    g = gantry(config)
+    sipper = None if g is None else g.selector_valve_port
+    return [port_key(port) for port in available_ports(config) if port != sipper]
 
 
 def reservoir_definitions(config):

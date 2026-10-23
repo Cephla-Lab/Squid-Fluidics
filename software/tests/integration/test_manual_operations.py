@@ -169,6 +169,18 @@ def test_a_manual_extract_through_the_sipper_needs_a_well(sipper):
     manual.extract(1, 100, 1000)            # another syringe port never reaches the sipper
 
 
+def test_a_sipper_draw_with_do_not_lower_tip_on_names_the_switch(sipper):
+    """With the switch on, Go to well stops above the well: the refusal
+    names the switch, not the move the operator just made."""
+    _, manual = sipper
+    manual.set_lower_tip(False)
+    manual.go_to_well("ssct/A1")
+    manual.open_port(1)
+    with pytest.raises(RuntimeError, match="Do not lower tip is on"):
+        manual.extract(2, 100, 1000)
+    manual.set_lower_tip(True)
+
+
 def test_robot_verbs_refuse_on_a_rig_without_a_robot(flow_cell):
     _, manual = flow_cell
     with pytest.raises(RuntimeError, match="no robot"):
