@@ -21,7 +21,7 @@ def rig(directory):
     warnings = Subscribers("test warnings")
     reservoirs = SimpleNamespace(
         used_rows=lambda: [(2, "wash buffer", 300.0), (5, None, 40.0)],
-        rows=lambda: [("port_25", 340.0, 4460.0), ("ssct/A1", 200.0, 1550.0)])
+        rows=lambda: [("port_25", 340.0, 4660.0), ("ssct/A1", 200.0, 1600.0)])
     reports = RunReports(events, reservoirs, warnings, directory=directory)
     return SimpleNamespace(events=events, warnings=warnings, reservoirs=reservoirs,
                            reports=reports)
@@ -56,8 +56,8 @@ class TestTheRecord:
             {"port": 2, "reagent": "wash buffer", "volume_ul": 300.0},
             {"port": 5, "reagent": None, "volume_ul": 40.0}]
         assert report["reservoirs"] == [
-            {"key": "port_25", "dispatched_ul": 340.0, "remaining_ul": 4460.0},
-            {"key": "ssct/A1", "dispatched_ul": 200.0, "remaining_ul": 1550.0}]
+            {"key": "port_25", "dispatched_ul": 340.0, "remaining_ul": 4660.0},
+            {"key": "ssct/A1", "dispatched_ul": 200.0, "remaining_ul": 1600.0}]
         assert [w["message"] for w in report["warnings"]] == \
             ["flow low on syringe_draw"]
         assert report["started"] and report["ended"], "wall times belong in a record"

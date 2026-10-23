@@ -35,6 +35,6 @@ def test_placements_follow_the_config_including_the_plate_axes(plate_sipper_conf
 def test_reservoir_definitions_cover_wells_and_tracked_bottles(plate_sipper_config):
     from fluidics.reservoirs import reservoir_definitions
     defs = reservoir_definitions(plate_sipper_config)
-    assert defs["port_25"] == {"loaded_ul": 500000, "residual_ul": 20000}
-    assert defs["ssct/H12"] == {"loaded_ul": 1800, "residual_ul": 50}
+    assert defs["port_25"] == {"loaded_ul": 500000}
+    assert defs["ssct/H12"] == {"loaded_ul": 1800}
     assert "port_26" not in defs and len(defs) == 1 + 2 * 96

@@ -211,9 +211,9 @@ class ManualOperations:
         key = well_key(ref)
         # Priming and clean-up each draw the sipper's line full from it.
         need = self.sv.get_tubing_fluid_amount_to_port(self._sipper_port)
-        usable = self.reservoirs.usable(key)     # every well of every plate is tracked
-        if usable < need:
-            raise ValueError(f"{key} gives {usable} uL when full, less than the {need} uL the "
+        loaded = self.reservoirs.loaded(key)     # every well of every plate is tracked
+        if loaded < need:
+            raise ValueError(f"{key} holds {loaded} uL when loaded, less than the {need} uL the "
                              f"sipper's line takes to prime: pick a fuller well")
         setattr(self._gantry, DEDICATED_WELLS[role], key)
         _logger.info("Taught: %s well %s.", role, key)

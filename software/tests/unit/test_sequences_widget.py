@@ -690,7 +690,7 @@ class TestARefusedStartIsADialog:
                             lambda parent, title, text: said.append(text))
         widget.setSequences([FLOW])
         widget.system.plan = lambda seqs: plan_for([{"type": "flow_reagent"}] * len(seqs))
-        refusal = ReservoirShortfall("ssct/A1", 1000, 750, 1750, "Sequence 1 (Flow Reagent)")
+        refusal = ReservoirShortfall("ssct/A1", 1000, 800, 1800, "Sequence 1 (Flow Reagent)")
 
         def run(seqs, plan=None):
             raise refusal

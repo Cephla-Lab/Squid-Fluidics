@@ -101,8 +101,9 @@ class RobotSipper:
 
     def agitate(self, cycles):
         """Up by the amplitude and back, `cycles` times, ending at dip
-        depth. The witness is down for the duration: an interrupted cycle
-        leaves the tip above dip depth, where the residual is wrong."""
+        depth. The witness is down for the duration: it says the tip is at
+        dip depth, the only height a draw is made from, and an interrupted
+        cycle leaves the tip above it."""
         if self.current_well is None:
             raise StageError("agitate refused: the sipper is not in a well")
         ref = self.current_well

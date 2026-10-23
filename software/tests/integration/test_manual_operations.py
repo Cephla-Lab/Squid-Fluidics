@@ -262,7 +262,7 @@ def test_a_reload_of_the_plate_the_tip_is_in_is_refused_until_retract(plate_sipp
     assert "probes/A1" not in devices.reservoirs.undeclared
     manual.retract()
     manual.refill("ssct")
-    assert devices.reservoirs.remaining("ssct/A2") == 1750
+    assert devices.reservoirs.remaining("ssct/A2") == 1800
 
 
 def test_without_the_witness_a_plate_reload_waits_for_a_retracted_tip(plate_sipper_config, built, tmp_path):

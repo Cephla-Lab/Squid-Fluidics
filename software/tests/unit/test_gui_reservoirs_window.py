@@ -114,13 +114,13 @@ def test_every_tracked_reservoir_has_a_row_and_a_bottle_drawn_from_joins_them(
     assert window.isVisible() and window.windowTitle() == "Reservoirs"
     rows = _rows(window)
     assert len(rows) == 1 + 2 * 96
-    assert rows["port_25"] == ("4x SSC", "0", "480000", "500000")
-    assert rows["probes/A1"] == ("hyb R01", "0", "105", "110")
-    assert rows["ssct/B3"] == ("sipper", "0", "1750", "1800")
+    assert rows["port_25"] == ("4x SSC", "0", "500000", "500000")
+    assert rows["probes/A1"] == ("hyb R01", "0", "110", "110")
+    assert rows["ssct/B3"] == ("sipper", "0", "1800", "1800")
     _draws(system, (1, "probes/A1", 50), (26, None, 100))
     rows = _rows(window)
     assert rows["port_26"] == ("DAPI", "100", "", "")
-    assert rows["probes/A1"] == ("hyb R01", "50", "55", "110")
+    assert rows["probes/A1"] == ("hyb R01", "50", "60", "110")
     assert _keys(window)[:5] == ["port_25", "port_26", "probes/A1", "probes/B1", "probes/C1"], \
         "the bottles by port, then each plate's wells column-major"
 
@@ -146,14 +146,14 @@ def test_an_undeclared_reservoir_reads_undeclared_and_the_line_names_it(reservoi
     window.refresh()
     rows = _rows(window)
     assert rows["port_25"] == ("4x SSC", "0", "undeclared", "500000")
-    assert rows["probes/H12"][2] == "undeclared" and rows["ssct/A1"][2] == "1750"
+    assert rows["probes/H12"][2] == "undeclared" and rows["ssct/A1"][2] == "1800"
     assert not window.undeclaredLabel.isHidden()
     assert window.undeclaredLabel.text() == \
         "Undeclared: port_25, every well of probes. A run is refused until they are reset."
     tracker.refill("all")
     window.refresh()
     assert window.undeclaredLabel.isHidden() and window.undeclaredLabel.text() == ""
-    assert _rows(window)["port_25"][2] == "480000"
+    assert _rows(window)["port_25"][2] == "500000"
 
 
 def test_reset_selected_resets_the_highlighted_reservoirs_as_a_run_tab_job(
@@ -175,8 +175,8 @@ def test_reset_selected_resets_the_highlighted_reservoirs_as_a_run_tab_job(
     settle(system)
     assert asked == [f"Reset port_25, probes/A1? {QUESTION}"]
     assert heard == [("port_25", RUN_TAB_JOB_SOURCE), ("probes/A1", RUN_TAB_JOB_SOURCE)]
-    assert tracker.remaining("port_25") == 480000 and tracker.remaining("probes/A1") == 105
-    assert tracker.remaining("ssct/A2") == 1650, "a row not highlighted is not reset"
+    assert tracker.remaining("port_25") == 500000 and tracker.remaining("probes/A1") == 110
+    assert tracker.remaining("ssct/A2") == 1700, "a row not highlighted is not reset"
     rows = _rows(window)
     assert rows["port_25"][1] == "0" and rows["probes/A1"][1] == "0" and rows["ssct/A2"][1] == "100"
 
@@ -192,9 +192,9 @@ def test_reset_plate_resets_every_well_of_it_and_nothing_else(reservoirs, plate_
     window.resetPlateButtons["ssct"].click()
     settle(system)
     assert asked == [f"Reset every well of ssct? {QUESTION}"] and heard == [("ssct", RUN_TAB_JOB_SOURCE)]
-    assert tracker.remaining("ssct/A1") == 1750 and tracker.remaining("ssct/B3") == 1750
-    assert tracker.remaining("probes/A1") == 55
-    assert _rows(window)["ssct/A1"] == ("sipper", "0", "1750", "1800")
+    assert tracker.remaining("ssct/A1") == 1800 and tracker.remaining("ssct/B3") == 1800
+    assert tracker.remaining("probes/A1") == 60
+    assert _rows(window)["ssct/A1"] == ("sipper", "0", "1800", "1800")
 
 
 def test_reset_all_resets_everything_the_untracked_bottles_included(
@@ -209,7 +209,7 @@ def test_reset_all_resets_everything_the_untracked_bottles_included(
     assert asked == [f"Reset every reservoir? {QUESTION}"]
     rows = _rows(window)
     assert "port_26" not in rows, "an untracked bottle reset has given nothing since"
-    assert rows["probes/A1"] == ("hyb R01", "0", "105", "110")
+    assert rows["probes/A1"] == ("hyb R01", "0", "110", "110")
 
 
 def test_a_declined_reset_resets_nothing(reservoirs, plate_sipper_config, monkeypatch):
@@ -222,7 +222,7 @@ def test_a_declined_reset_resets_nothing(reservoirs, plate_sipper_config, monkey
     QApplication.processEvents()
     assert asked == [f"Reset every well of probes? {QUESTION}"]
     assert not system.busy
-    assert system.devices.reservoirs.remaining("probes/A1") == 55, "declined: nothing reset"
+    assert system.devices.reservoirs.remaining("probes/A1") == 60, "declined: nothing reset"
 
 
 def test_a_reset_is_refused_before_the_question_while_the_tip_is_in_that_plate(
@@ -241,7 +241,7 @@ def test_a_reset_is_refused_before_the_question_while_the_tip_is_in_that_plate(
         QApplication.processEvents()
     assert asked == [] and len(warned) == 3
     assert all("ssct/A2" in text and "Retract" in text for text in warned)
-    assert not system.busy and system.devices.reservoirs.remaining("ssct/A1") == 1650
+    assert not system.busy and system.devices.reservoirs.remaining("ssct/A1") == 1700
     window.resetPlateButtons["probes"].click()
     settle(system)
     assert asked == [f"Reset every well of probes? {QUESTION}"]

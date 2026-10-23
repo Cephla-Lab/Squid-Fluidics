@@ -174,11 +174,12 @@ def check_reservoirs(entries, config, snapshot):
     whose volume tracker starts from `snapshot`; the per-reservoir report
     when every draw fits. Otherwise it raises, naming the step:
     ReservoirShortfall for a draw a refill would make fit; the reservoir's
-    own error, its type and remedy kept, for any other refusal (a draw no
-    full well can give, no well under the tip); OperationError for a step
-    the twin cannot replay; ReservoirUndeclared, before any replay, when
-    anything tracked is undeclared. Separate from plan_run, which prices
-    with every reservoir full and never raises (spec §7)."""
+    own error, its type and remedy kept, for any other refusal (a draw
+    larger than the reservoir holds when loaded, no well under the tip);
+    OperationError for a step the twin cannot replay; ReservoirUndeclared,
+    before any replay, when anything tracked is undeclared. Separate from
+    plan_run, which prices with every reservoir full and never raises
+    (spec §7)."""
     if snapshot.get("undeclared"):
         raise ReservoirUndeclared(undeclared_message(snapshot["undeclared"],
                                                      snapshot.get("definitions", {})))
@@ -190,7 +191,7 @@ def check_reservoirs(entries, config, snapshot):
             try:
                 ops.process_sequence(entry.sequence)
             except ReservoirOverdraw as e:
-                raise ReservoirShortfall(e.key, e.needed_ul, e.remaining_ul, e.usable_ul,
+                raise ReservoirShortfall(e.key, e.needed_ul, e.remaining_ul, e.loaded_ul,
                                          entry.label) from e
             except ReservoirError as e:
                 # A refill would not help: its own words and remedy, and

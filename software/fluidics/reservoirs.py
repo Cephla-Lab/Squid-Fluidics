@@ -69,8 +69,7 @@ def _no_name(key):
 
 class VolumeTracker:
     def __init__(self, definitions, path=None, declared=True):
-        self._defs = {key: {"loaded_ul": int(d["loaded_ul"]), "residual_ul": int(d["residual_ul"])}
-                      for key, d in definitions.items()}
+        self._defs = {key: {"loaded_ul": int(d["loaded_ul"])} for key, d in definitions.items()}
         # reservoir key -> uL given since its last reset: every tracked key,
         # and an untracked bottle from its first draw (never on the file).
         self._dispatched = {key: 0.0 for key in self._defs}
@@ -160,19 +159,17 @@ class VolumeTracker:
             return sorted(self._undeclared)
 
     def _remaining(self, key):
-        d = self._defs[key]
-        return d["loaded_ul"] - self._dispatched[key] - d["residual_ul"]
+        return self._defs[key]["loaded_ul"] - self._dispatched[key]
 
     def remaining(self, key):
         with self._lock:
             return self._remaining(key)
 
-    def usable(self, key):
-        """What tracked `key` gives when full: its loaded volume less what
-        its tube end cannot reach. The definitions are fixed at
-        construction, so no lock."""
-        d = self._defs[key]
-        return d["loaded_ul"] - d["residual_ul"]
+    def loaded(self, key):
+        """What tracked `key` holds when loaded: the most any one draw
+        from it can take. The definitions are fixed at construction, so no
+        lock."""
+        return self._defs[key]["loaded_ul"]
 
     def check(self, key, volume_ul):
         """Refuse before a draw that would not fit, or that no loading
@@ -194,11 +191,11 @@ class VolumeTracker:
             return      # not a draw: no liquid moves, so there is nothing to refuse
         if self._undeclared:
             raise ReservoirUndeclared(undeclared_message(self._undeclared, self._defs))
-        usable = self.usable(key)
-        if volume_ul > usable:
-            raise ReservoirDrawTooLarge(key, volume_ul, usable)
+        loaded = self.loaded(key)
+        if volume_ul > loaded:
+            raise ReservoirDrawTooLarge(key, volume_ul, loaded)
         if volume_ul > self._remaining(key):
-            raise ReservoirOverdraw(key, volume_ul, self._remaining(key), usable)
+            raise ReservoirOverdraw(key, volume_ul, self._remaining(key), loaded)
 
     def rows(self):
         """(key, dispatched_ul, remaining_ul) for every tracked reservoir
@@ -551,13 +548,12 @@ def reservoir_definitions(config):
     sv = config.reagent_selection.selector_valves
     defs = {}
     for key, loaded in (sv.loaded_volume_ul or {}).items():
-        defs[key] = {"loaded_ul": loaded,
-                     "residual_ul": (sv.residual_volume_ul or {}).get(key, 0)}
+        defs[key] = {"loaded_ul": loaded}
     g = gantry(config)
     if g is not None:
         for r in g.reservoirs.values():
             overrides = r.loaded_ul_by_well or {}
             for well in r.geometry.wells():
                 defs[well_key(WellRef(r.name, well))] = {
-                    "loaded_ul": overrides.get(well, r.loaded_ul), "residual_ul": r.residual_ul}
+                    "loaded_ul": overrides.get(well, r.loaded_ul)}
     return defs

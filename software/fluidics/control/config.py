@@ -62,11 +62,10 @@ class SelectorValvesConfig(_StrictModel):
     tubing_fluid_amount_to_valve_ul: Dict[int, int]
     name_mapping: Optional[Dict[str, str]] = None
     tubing_fluid_amount_ul: Dict[str, int]
-    # Optional per port: a bulk bottle the volume tracker tracks (spec D6)
-    # and what its tube end cannot reach. A port without an entry is not
-    # tracked, which is how every rig behaved before.
+    # Optional per port: a bulk bottle the volume tracker tracks (spec D6),
+    # by what it holds when loaded. A port without an entry is not tracked,
+    # which is how every rig behaved before.
     loaded_volume_ul: Optional[Dict[str, int]] = None
-    residual_volume_ul: Optional[Dict[str, int]] = None
 
     @model_validator(mode='after')
     def _check_valve_id_consistency(self):
@@ -100,8 +99,7 @@ class SelectorValvesConfig(_StrictModel):
         """
         reach = sum(self.number_of_ports[v] - 1 for v in self.valve_ids) + 1
         allowed = {f"port_{port}" for port in range(1, reach + 1)}
-        for field_name in ('tubing_fluid_amount_ul', 'name_mapping',
-                           'loaded_volume_ul', 'residual_volume_ul'):
+        for field_name in ('tubing_fluid_amount_ul', 'name_mapping', 'loaded_volume_ul'):
             keys = getattr(self, field_name) or {}
             unknown = sorted(set(keys) - allowed)
             if unknown:
@@ -114,25 +112,17 @@ class SelectorValvesConfig(_StrictModel):
 
     @model_validator(mode='after')
     def _check_tracked_bottles(self):
-        """A tracked bottle hangs on a plumbed port, holds more than its
-        tube end cannot reach, and a residual names a tracked bottle.
+        """A tracked bottle hangs on a plumbed port and is loaded with
+        something: a volume of 0 or less would refuse every draw from it.
 
         Defined after _check_port_keys so pydantic runs it second: a key
         beyond the cascade's reach is reported as such, not as unplumbed."""
-        loaded = self.loaded_volume_ul or {}
-        residual = self.residual_volume_ul or {}
-        for key in residual:
-            if key not in loaded:
-                raise ValueError(f"residual_volume_ul.{key}: no loaded_volume_ul for it")
-        for key, volume in loaded.items():
+        for key, volume in (self.loaded_volume_ul or {}).items():
             if not self.tubing_fluid_amount_ul.get(key):
                 raise ValueError(f"loaded_volume_ul.{key}: not a plumbed port "
                                  "(no tubing_fluid_amount_ul entry)")
-            left = residual.get(key, 0)
-            if left < 0:
-                raise ValueError(f"residual_volume_ul.{key} must not be negative")
-            if volume <= left:
-                raise ValueError(f"loaded_volume_ul.{key} ({volume}) must exceed its residual ({left})")
+            if volume <= 0:
+                raise ValueError(f"loaded_volume_ul.{key} ({volume}) must be positive")
         return self
 
 
@@ -155,7 +145,6 @@ class ReservoirConfig(_StrictModel):
     column_axis: PlateAxis      # columns 1..12 run along this
     row_axis: PlateAxis         # rows A..H run along this
     loaded_ul: int = Field(gt=0)
-    residual_ul: int = Field(ge=0)
     well_names: Optional[Dict[str, str]] = None
     loaded_ul_by_well: Optional[Dict[str, int]] = None
 
@@ -177,11 +166,9 @@ class ReservoirConfig(_StrictModel):
             for well in (getattr(self, field_name) or {}):
                 if not geometry.is_well(well):
                     raise ValueError(f"{self.name}.{field_name}: {well} is not a well on this plate")
-        if self.loaded_ul <= self.residual_ul:
-            raise ValueError(f"{self.name}: loaded_ul must exceed residual_ul")
         for well, loaded in (self.loaded_ul_by_well or {}).items():
-            if loaded <= self.residual_ul:
-                raise ValueError(f"{self.name}.loaded_ul_by_well.{well} must exceed residual_ul")
+            if loaded <= 0:
+                raise ValueError(f"{self.name}.loaded_ul_by_well.{well} ({loaded}) must be positive")
         return self
 
 

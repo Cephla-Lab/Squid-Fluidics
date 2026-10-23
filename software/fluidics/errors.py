@@ -64,20 +64,23 @@ class ReservoirError(FluidicsError):
 
 
 class ReservoirOverdraw(ReservoirError):
-    """A draw the reservoir cannot supply now; usable_ul is what a full one
-    gives, carried for the gate's verdict (ReservoirShortfall)."""
+    """A draw the reservoir cannot supply now; loaded_ul is what it holds
+    when loaded, carried for the gate's verdict (ReservoirShortfall)."""
 
-    def __init__(self, key, needed_ul, remaining_ul, usable_ul):
+    def __init__(self, key, needed_ul, remaining_ul, loaded_ul):
         super().__init__(f"{key}: {needed_ul:.0f} uL needed, {remaining_ul:.0f} uL left")
         self.key, self.needed_ul, self.remaining_ul = key, needed_ul, remaining_ul
-        self.usable_ul = usable_ul
+        self.loaded_ul = loaded_ul
 
 
 class ReservoirDrawTooLarge(ReservoirError):
-    def __init__(self, key, volume_ul, usable_ul):
-        super().__init__(f"{key}: a draw of {volume_ul:.0f} uL exceeds a full well's "
-                         f"{usable_ul:.0f} uL; split the step")
-        self.key, self.volume_ul, self.usable_ul = key, volume_ul, usable_ul
+    """A draw larger than the reservoir holds when loaded, a well's or a
+    bottle's: no refill makes it fit, so the step must be split."""
+
+    def __init__(self, key, volume_ul, loaded_ul):
+        super().__init__(f"{key}: a draw of {volume_ul:.0f} uL exceeds the "
+                         f"{loaded_ul:.0f} uL it holds when loaded; split the step")
+        self.key, self.volume_ul, self.loaded_ul = key, volume_ul, loaded_ul
 
 
 class ReservoirUndeclared(ReservoirError):
@@ -88,14 +91,14 @@ class ReservoirUndeclared(ReservoirError):
 class ReservoirShortfall(ReservoirError):
     """The reservoir gate's verdict: which step, which reservoir, how much.
     remaining_ul is the projection -- what the reservoir would hold when the
-    step comes round -- and usable_ul what a full one gives."""
+    step comes round -- and loaded_ul what it holds when loaded."""
 
-    def __init__(self, key, needed_ul, remaining_ul, usable_ul, step_label):
+    def __init__(self, key, needed_ul, remaining_ul, loaded_ul, step_label):
         super().__init__(f"{step_label}: {key} cannot supply {needed_ul:.0f} uL "
-                         f"(it would have {remaining_ul:.0f} uL left of {usable_ul:.0f} usable "
+                         f"(it would have {remaining_ul:.0f} uL left of {loaded_ul:.0f} loaded "
                          "at this step); refill or reload before starting")
         self.key, self.needed_ul = key, needed_ul
-        self.remaining_ul, self.usable_ul, self.step_label = remaining_ul, usable_ul, step_label
+        self.remaining_ul, self.loaded_ul, self.step_label = remaining_ul, loaded_ul, step_label
 
 
 class ReservoirNoWell(ReservoirError):

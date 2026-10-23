@@ -58,8 +58,8 @@ def test_agitate_goes_up_by_the_amplitude_and_back_and_keeps_the_witness(sipper)
 
 
 def test_an_interrupted_agitation_leaves_no_witness():
-    """Stopped above dip depth, the residual below the tip is not the one
-    the volume tracker counted on: the well is no longer current."""
+    """Stopped above dip depth, the tip is higher than a draw is made
+    from: the well is no longer current."""
     robot, service, control = build(instant=False)
     robot.go_to_well(WellRef("ssct", "A1"))
 

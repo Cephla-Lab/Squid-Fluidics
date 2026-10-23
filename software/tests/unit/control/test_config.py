@@ -515,7 +515,7 @@ from tests.conftest import SAMPLE_CONFIG_DIR
 _SIPPER_SAMPLE = SAMPLE_CONFIG_DIR / "plate_sipper_config.yaml"
 
 # Parsed once: the rule table edits a fresh deep copy per case, which is all
-# its in-place edits need, instead of re-parsing the sample 23 times.
+# its in-place edits need, instead of re-parsing the sample 25 times.
 _SIPPER_YAML = _yaml.safe_load(_SIPPER_SAMPLE.read_text())
 
 
@@ -550,7 +550,12 @@ class TestGantryConfig:
         (lambda d: _gantry_block(d)["reservoirs"][2].__setitem__("name", "port_25"), "reserved"),
         (lambda d: _gantry_block(d)["reservoirs"][2].__setitem__("row_axis", "-y"), "perpendicular"),
         (lambda d: _gantry_block(d).__setitem__("priming_well", "water/A1"), "water"),
-        (lambda d: _gantry_block(d)["reservoirs"][1].__setitem__("residual_ul", 110), "residual"),
+        (lambda d: _gantry_block(d)["reservoirs"][1].__setitem__("loaded_ul", 0),
+         r"reservoirs\.1\.loaded_ul\n\s+Input should be greater than 0"),
+        (lambda d: _gantry_block(d)["reservoirs"][1].__setitem__("loaded_ul_by_well", {"B2": 0}),
+         r"probes\.loaded_ul_by_well\.B2 \(0\) must be positive"),
+        (lambda d: _gantry_block(d)["reservoirs"][1].__setitem__("loaded_ul_by_well", {"B2": -5}),
+         r"probes\.loaded_ul_by_well\.B2 \(-5\) must be positive"),
         (lambda d: _gantry_block(d).__setitem__("agitate_amplitude_mm", 70.0), "stroke|well"),
         (lambda d: _gantry_block(d)["reservoirs"][1]["well_names"].__setitem__("Z9", "x"), "Z9"),
         (lambda d: _gantry_block(d).__setitem__("port", "COM5"), "exactly one"),
@@ -563,8 +568,10 @@ class TestGantryConfig:
          "loaded_volume_ul has keys that name no port on this cascade: port_99"),
         (lambda d: _valves_block(d)["loaded_volume_ul"].__setitem__("port_2", 1000), "plumbed"),
         (lambda d: _valves_block(d)["loaded_volume_ul"].__setitem__("port_1", 1000), "sipper"),
-        (lambda d: _valves_block(d)["residual_volume_ul"].__setitem__("port_25", 600000), "exceed"),
-        (lambda d: _valves_block(d)["residual_volume_ul"].__setitem__("port_24", 1), "no loaded_volume_ul"),
+        (lambda d: _valves_block(d)["loaded_volume_ul"].__setitem__("port_25", 0),
+         r"loaded_volume_ul\.port_25 \(0\) must be positive"),
+        (lambda d: _valves_block(d)["loaded_volume_ul"].__setitem__("port_25", -500),
+         r"loaded_volume_ul\.port_25 \(-500\) must be positive"),
         # The plate axes have no default (B1 review ruling): the only deck is
         # columns +y / rows +x, so a block that leaves them out is refused
         # rather than placed on the opposite guess.
@@ -580,6 +587,22 @@ class TestGantryConfig:
         edit(data)
         with pytest.raises(ValueError, match=message):
             FluidicsConfig(**data)
+
+    @pytest.mark.parametrize("plant, key", [
+        (lambda d: _gantry_block(d)["reservoirs"][1].__setitem__("residual_ul", 5),
+         "reagent_selection.nimotion_gantry_system.reservoirs.1.residual_ul"),
+        (lambda d: _valves_block(d).__setitem__("residual_volume_ul", {"port_25": 20000}),
+         "reagent_selection.selector_valves.residual_volume_ul"),
+    ], ids=["plate", "bottle"])
+    def test_a_config_still_carrying_a_removed_key_is_refused_naming_it(self, tmp_path, plant, key):
+        """A file written before these keys went fails to load, and the
+        message names the key to delete."""
+        data = _sipper_dict()
+        plant(data)
+        path = tmp_path / "config.yaml"
+        path.write_text(_yaml.safe_dump(data), encoding="utf-8")
+        with pytest.raises(ValueError, match=re.escape(key) + r"\n\s+Extra inputs are not permitted"):
+            load_config(str(path))
 
     def test_the_block_is_optional_and_existing_configs_are_untouched(self, flow_cell_config):
         assert _gantry(flow_cell_config) is None

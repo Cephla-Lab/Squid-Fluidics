@@ -16,16 +16,16 @@ WASH = {"type": "flow_reagent", "fluidic_port": 1, "well": "ssct/A1", "flow_rate
 def test_a_round_that_fits_runs_and_the_report_lists_its_wells(plate_sipper_system, real_clock):
     plan = plate_sipper_system.plan([HYB, PUSH, WASH])
     report = plate_sipper_system.check_reservoirs(plan)
-    assert ("ssct/A1", 1490, 1750 - 1490) in report
+    assert ("ssct/A1", 1490, 1800 - 1490) in report
     plate_sipper_system.run([HYB, PUSH, WASH], plan=plan)
     assert plate_sipper_system.wait(5)
-    assert plate_sipper_system.devices.reservoirs.remaining("ssct/A1") == 1750 - 1490
+    assert plate_sipper_system.devices.reservoirs.remaining("ssct/A1") == 1800 - 1490
 
 
 def test_a_short_well_refuses_at_time_zero_naming_the_step(plate_sipper_system):
     with pytest.raises(ReservoirShortfall, match=r"wash2.*ssct/A1"):
         plate_sipper_system.run([HYB, PUSH, WASH, dict(WASH, name="wash2")])
-    assert plate_sipper_system.devices.reservoirs.remaining("ssct/A1") == 1750, "nothing was charged"
+    assert plate_sipper_system.devices.reservoirs.remaining("ssct/A1") == 1800, "nothing was charged"
 
 
 def test_a_short_bottle_refuses_at_time_zero_too(plate_sipper_system):
@@ -48,7 +48,7 @@ def test_a_resumed_tail_is_refused_when_the_well_is_short(plate_sipper_system, r
 def test_undeclared_volume_tracking_refuses_the_run(plate_sipper_config, make_system, tmp_path, real_clock):
     """Review focus 3, end to end: a mismatched file at bring-up."""
     (tmp_path / "volumes.json").write_text(
-        '{"format": 2, "definitions": {"port_25": {"loaded_ul": 1, "residual_ul": 0}}, "reservoirs": {}}')
+        '{"format": 2, "definitions": {"port_25": {"loaded_ul": 1}}, "reservoirs": {}}')
     system = make_system(plate_sipper_config, volume_tracking_path=tmp_path / "volumes.json")
     # every entry undeclared: the plates named once each, not 192 wells
     with pytest.raises(ReservoirUndeclared,
@@ -87,7 +87,7 @@ def test_a_run_start_logs_the_projected_balances(plate_sipper_system, caplog):
     assert [record.getMessage() for record in caplog.records
             if record.name == "fluidics.system"
             and record.getMessage().startswith("Reservoirs after this run")] == \
-        ["Reservoirs after this run: probes/A1 5 uL left; ssct/A1 260 uL left."]
+        ["Reservoirs after this run: probes/A1 10 uL left; ssct/A1 310 uL left."]
 
 
 def test_the_plan_prices_the_robots_travel(plate_sipper_config):
@@ -100,27 +100,27 @@ def test_the_plan_prices_the_robots_travel(plate_sipper_config):
     assert far.duration_seconds - near.duration_seconds == pytest.approx(2.01 - 0.24, abs=0.01)
 
 
-def test_a_short_well_is_told_what_it_would_hold_at_that_step_of_a_full_wells_usable(plate_sipper_system):
+def test_a_short_well_is_told_what_it_would_have_left_at_that_step(plate_sipper_system):
     """The figures are the step's: the well's projected remainder when the
-    step comes round, against what a full well gives -- not one twice."""
+    step comes round, against what it holds when loaded -- not one twice."""
     with pytest.raises(ReservoirShortfall) as refused:
         plate_sipper_system.check_reservoirs(
             plate_sipper_system.plan([HYB, PUSH, WASH, dict(WASH, name="wash2")]))
     e = refused.value
-    assert (e.step_label, e.key, e.needed_ul, e.remaining_ul, e.usable_ul) == (
-        "wash2", "ssct/A1", 1000, 260, 1750)
-    assert str(e) == ("wash2: ssct/A1 cannot supply 1000 uL (it would have 260 uL left of "
-                      "1750 usable at this step); refill or reload before starting")
+    assert (e.step_label, e.key, e.needed_ul, e.remaining_ul, e.loaded_ul) == (
+        "wash2", "ssct/A1", 1000, 310, 1800)
+    assert str(e) == ("wash2: ssct/A1 cannot supply 1000 uL (it would have 310 uL left of "
+                      "1800 loaded at this step); refill or reload before starting")
 
 
-def test_a_short_bottle_is_told_its_own_usable_volume(plate_sipper_system):
+def test_a_short_bottle_is_told_its_own_loaded_volume(plate_sipper_system):
     bulk = {"type": "flow_reagent", "fluidic_port": 25, "flow_rate": 5000, "volume": 4000,
             "name": "bulk"}
     with pytest.raises(ReservoirShortfall) as refused:
         plate_sipper_system.check_reservoirs(plate_sipper_system.plan([dict(bulk, repeat=200)]))
     e = refused.value
-    assert (e.key, e.needed_ul, e.remaining_ul, e.usable_ul) == ("port_25", 4000, 0, 480000)
-    assert "it would have 0 uL left of 480000 usable at this step" in str(e)
+    assert (e.key, e.needed_ul, e.remaining_ul, e.loaded_ul) == ("port_25", 4000, 0, 500000)
+    assert "it would have 0 uL left of 500000 loaded at this step" in str(e)
 
 
 def test_a_draw_no_full_well_can_give_keeps_its_own_remedy(plate_sipper_system):
@@ -128,12 +128,12 @@ def test_a_draw_no_full_well_can_give_keeps_its_own_remedy(plate_sipper_system):
     be split, and the refusal says so, with the step named."""
     with pytest.raises(ReservoirDrawTooLarge) as refused:
         plate_sipper_system.run([dict(HYB, volume=200, name="big")])
-    assert str(refused.value) == ("big: probes/A1: a draw of 200 uL exceeds a full well's "
-                                  "105 uL; split the step")
+    assert str(refused.value) == ("big: probes/A1: a draw of 200 uL exceeds the 110 uL it "
+                                  "holds when loaded; split the step")
     assert refused.value.step_label == "big"
-    assert (refused.value.volume_ul, refused.value.usable_ul) == (200, 105)
+    assert (refused.value.volume_ul, refused.value.loaded_ul) == (200, 110)
     assert not plate_sipper_system.busy
-    assert plate_sipper_system.devices.reservoirs.remaining("probes/A1") == 105, "nothing was charged"
+    assert plate_sipper_system.devices.reservoirs.remaining("probes/A1") == 110, "nothing was charged"
 
 
 def _twin_whose_step_raises(monkeypatch, make_error):

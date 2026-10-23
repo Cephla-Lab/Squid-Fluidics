@@ -15,7 +15,7 @@ def test_a_gantry_rig_builds_a_homed_retracted_sipper_and_declared_volume_tracki
     assert devices.reservoirs.undeclared == list(devices.reservoirs.tracked), \
         "no file yet: undeclared until declared"
     devices.reservoirs.refill("all")
-    assert devices.reservoirs.remaining("ssct/A1") == 1750
+    assert devices.reservoirs.remaining("ssct/A1") == 1800
 
 
 def test_a_simulated_rig_without_a_path_starts_declared(plate_sipper_config, built):

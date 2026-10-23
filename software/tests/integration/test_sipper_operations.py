@@ -43,7 +43,7 @@ def test_a_well_row_moves_the_sipper_then_opens_its_port_then_draws(rig):
     assert port_at > last_move, "the port opens only after the selection's last move"
     assert order[port_at - 1] == ("move", (12.0, 1.5, 50.0)), "that move ends at dip depth in A1"
     assert devices.robot.current_well == WellRef("probes", "A1")
-    assert devices.reservoirs.remaining("probes/A1") == 110 - 5 - 100
+    assert devices.reservoirs.remaining("probes/A1") == 110 - 100
 
 
 def test_a_bulk_row_after_a_well_row_charges_the_bottle_not_the_well(rig):
@@ -52,8 +52,8 @@ def test_a_bulk_row_after_a_well_row_charges_the_bottle_not_the_well(rig):
     ops.process_sequence(dict(HYB, well="ssct/A1"))
     ops.process_sequence({"type": "flow_reagent", "fluidic_port": 25,
                           "flow_rate": 2000, "volume": 300})
-    assert devices.reservoirs.remaining("ssct/A1") == 1650
-    assert devices.reservoirs.remaining("port_25") == 480000 - 300
+    assert devices.reservoirs.remaining("ssct/A1") == 1700
+    assert devices.reservoirs.remaining("port_25") == 500000 - 300
 
 
 def test_dips_run_before_the_draw_while_the_well_is_full(rig):
@@ -65,7 +65,7 @@ def test_dips_run_before_the_draw_while_the_well_is_full(rig):
 
 def test_an_overdraw_is_refused_before_the_tip_moves(rig):
     devices, ops = rig
-    ops.process_sequence(HYB)                      # 5 uL usable left in A1
+    ops.process_sequence(HYB)                      # 10 uL left in A1
     moved = []
     devices.robot.moves.subscribe(moved.append)
     with pytest.raises(ReservoirOverdraw, match="probes/A1"):
@@ -81,7 +81,7 @@ def test_a_bottle_overdraw_is_refused_at_the_pump_before_it_moves(rig):
     devices, ops = rig
     with pytest.raises(ReservoirError, match="port_25"):
         ops.process_sequence({"type": "flow_reagent", "fluidic_port": 25,
-                              "flow_rate": 5000, "volume": 480001})
+                              "flow_rate": 5000, "volume": 500001})
     drawn = [op for op in devices.syringe_pump.executed_ops if op[0] == "extract"]
     assert drawn == [], "the syringe may have emptied to waste first; it drew nothing"
 
@@ -93,8 +93,8 @@ def test_priming_parks_the_sipper_in_the_priming_well_for_its_port(rig):
         lambda port, ul: seen.append(devices.robot.current_well))
     ops.process_sequence(PRIME)
     assert WellRef("ssct", "H11") in seen
-    assert devices.reservoirs.remaining("ssct/H11") == 1750 - 250   # the sipper port's tip-to-valve volume
-    assert devices.reservoirs.remaining("port_25") == 480000 - 700 - 800
+    assert devices.reservoirs.remaining("ssct/H11") == 1800 - 250   # the sipper port's tip-to-valve volume
+    assert devices.reservoirs.remaining("port_25") == 500000 - 700 - 800
 
 
 def test_clean_up_parks_the_sipper_in_the_clean_up_well_for_its_port(rig):
@@ -106,8 +106,8 @@ def test_clean_up_parks_the_sipper_in_the_clean_up_well_for_its_port(rig):
         lambda port, ul: seen.append(devices.robot.current_well))
     ops.process_sequence({"type": "clean_up", "fluidic_port": 25, "flow_rate": 5000, "volume": 800})
     assert WellRef("ssct", "H12") in seen and WellRef("ssct", "H11") not in seen
-    assert devices.reservoirs.remaining("ssct/H12") == 1750 - 250   # the sipper port's tip-to-valve volume
-    assert devices.reservoirs.remaining("ssct/H11") == 1750
+    assert devices.reservoirs.remaining("ssct/H12") == 1800 - 250   # the sipper port's tip-to-valve volume
+    assert devices.reservoirs.remaining("ssct/H11") == 1800
 
 
 def test_the_pump_refuses_the_sipper_port_with_the_tip_in_no_well(rig):
@@ -197,8 +197,8 @@ def test_selective_priming_that_lists_the_sipper_primes_it_from_the_priming_well
     devices.selector_valves.open_port = lambda port: opened.append(port) or open_port(port)
     ops.process_sequence(dict(PRIME, use_ports=[1, 25]))
     assert opened == [1, 25, 25], "the sipper's port, port 25, then the final draw: no other bottle"
-    assert devices.reservoirs.remaining("ssct/H11") == 1750 - 250   # the sipper port's tip-to-valve volume
-    assert devices.reservoirs.remaining("port_25") == 480000 - 700 - 800
+    assert devices.reservoirs.remaining("ssct/H11") == 1800 - 250   # the sipper port's tip-to-valve volume
+    assert devices.reservoirs.remaining("port_25") == 500000 - 700 - 800
 
 
 def test_a_push_draws_the_configs_volume_from_its_well_through_the_sipper(rig):
@@ -208,7 +208,7 @@ def test_a_push_draws_the_configs_volume_from_its_well_through_the_sipper(rig):
     devices, ops = rig
     _dips_twice_then_draws(devices, ops, dict(PUSH, dip_cycles=2), 490)
     assert devices.robot.current_well == WellRef("ssct", "A1")
-    assert devices.reservoirs.remaining("ssct/A1") == 1750 - 490
+    assert devices.reservoirs.remaining("ssct/A1") == 1800 - 490
     assert devices.reservoirs.used_rows() == [(1, "sipper", 490)]
 
 
@@ -227,6 +227,6 @@ def test_a_push_without_dips_makes_no_stroke_and_a_bare_well_is_on_the_default_p
     devices.robot.moves.subscribe(lambda pos: zs.append(pos[2]))
     ops.process_sequence(PUSH)
     assert 47.0 not in zs and zs[-1] == 52.0, "dip depth, no agitation stroke"
-    assert devices.reservoirs.remaining("ssct/A1") == 1750 - 490
-    with pytest.raises(ReservoirError, match="probes/A2"):      # 490 uL from a 105 uL well
+    assert devices.reservoirs.remaining("ssct/A1") == 1800 - 490
+    with pytest.raises(ReservoirError, match="probes/A2"):      # 490 uL from a 110 uL well
         ops.process_sequence({"type": "push", "well": "A2", "flow_rate": 2000})

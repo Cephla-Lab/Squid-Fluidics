@@ -94,6 +94,6 @@ def test_refilled_declares_volume_tracking_before_the_run(cli, tmp_path):
     assert cli("--path", str(tmp_path / "s.yaml"), "--config", config, "--simulation",
                "--volume-tracking-file", str(tmp_path / "volumes.json"), "--refilled", "all") == 0
     # Declared now and restored from the file: the well the second run drew
-    # from has 5 uL left, so the same run is refused at time zero.
+    # from has 10 uL left, so the same run is refused at time zero.
     assert cli("--path", str(tmp_path / "s.yaml"), "--config", config, "--simulation",
                "--volume-tracking-file", str(tmp_path / "volumes.json")) == 1

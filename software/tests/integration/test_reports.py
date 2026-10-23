@@ -32,4 +32,4 @@ def test_the_report_carries_the_reservoirs(plate_sipper_system, real_clock, tmp_
     assert plate_sipper_system.wait(5) and plate_sipper_system.reports.wait(5)
     [path] = list(tmp_path.glob("run-*.json"))
     report = json.loads(path.read_text())
-    assert {"key": "probes/A1", "dispatched_ul": 100, "remaining_ul": 5} in report["reservoirs"]
+    assert {"key": "probes/A1", "dispatched_ul": 100, "remaining_ul": 10} in report["reservoirs"]

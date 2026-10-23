@@ -294,8 +294,8 @@ def test_set_names_a_dedicated_well_in_the_config_and_the_map_marks_it(widget, c
 @pytest.mark.parametrize("reservoir, typed, refusal", [
     ("ssct", "Z9", "not a well"),
     ("ssct", "nope/A1", "no reservoir named 'nope'"),
-    # 110 uL loaded less 5 residual, against the sipper's 250 uL line.
-    ("probes", "C3", "probes/C3 gives 105 uL when full, less than the 250 uL"),
+    # 110 uL loaded, against the sipper's 250 uL line.
+    ("probes", "C3", "probes/C3 holds 110 uL when loaded, less than the 250 uL"),
 ])
 def test_a_refused_dedicated_well_is_a_dialog_and_changes_nothing(widget, monkeypatch, reservoir, typed, refusal):
     w, system = widget
@@ -316,8 +316,8 @@ def test_the_next_priming_row_primes_the_sipper_from_the_well_set(widget):
     system.run([PRIME])
     settle(system)
     tracker = system.devices.reservoirs
-    assert tracker.remaining("ssct/H10") < 1750, "the sipper's port primed from the well set"
-    assert tracker.remaining("ssct/H11") == 1750
+    assert tracker.remaining("ssct/H10") < 1800, "the sipper's port primed from the well set"
+    assert tracker.remaining("ssct/H11") == 1800
 
 
 def test_save_writes_the_dedicated_wells_to_the_config_file(qapp, simulated_system, tmp_path):

@@ -45,8 +45,6 @@ reagent_selection:
     # Reservoirs… on the Run Experiments tab.
     loaded_volume_ul:
       port_25: 500000
-    residual_volume_ul:
-      port_25: 20000
   common_tubing_fluid_amount_ul: 240   # valve to flow cell; tip to flow cell = 490 = push_volume_ul
   # The XYZ robot that carries the sipper (spec section 3). Two Corning 3960
   # plates sit side by side along X with their long sides along Y, so each
@@ -76,8 +74,7 @@ reagent_selection:
         column_axis: "+y"
         row_axis: "+x"
         loaded_ul: 110
-        residual_ul: 5
-        well_names: {A1: hyb R01}
+        well_names: {A1: hyb R01, A2: hyb R02}
       2:
         name: ssct
         type: plate
@@ -88,7 +85,6 @@ reagent_selection:
         column_axis: "+y"
         row_axis: "+x"
         loaded_ul: 1800
-        residual_ul: 50
     # Dedicated wells: the sipper primes from priming_well and is cleaned from
     # clean_up_well. Keep them out of sequences and keep them full. Between
     # steps and sessions the tip rests wet in the last step's well; there is

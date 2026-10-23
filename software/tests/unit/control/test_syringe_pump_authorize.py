@@ -78,9 +78,9 @@ def test_a_draw_cancelled_mid_move_was_asked_for_in_full_once(pump, during_move)
 
 def test_an_attached_volume_tracker_refuses_an_overdraw_before_the_pump_moves(pump, tmp_path):
     path = tmp_path / "volumes.json"
-    defs = {"port_25": {"loaded_ul": 5000, "residual_ul": 200}}
+    defs = {"port_25": {"loaded_ul": 5000}}
     path.write_text(json.dumps({"definitions": defs,
-                                "reservoirs": {"port_25": {"dispatched_ul": 4500}},
+                                "reservoirs": {"port_25": {"dispatched_ul": 4700}},
                                 "undeclared": []}))
     with closing(VolumeTracker.load(path, defs)) as tracker:
         tracker.attach(pump, sipper_port=1, extract_port=2, current_port=lambda: 25,
@@ -89,4 +89,4 @@ def test_an_attached_volume_tracker_refuses_an_overdraw_before_the_pump_moves(pu
         with pytest.raises(ReservoirOverdraw, match="port_25.*500.*300"):
             pump.execute()
         assert pump.executed_ops == []
-        assert json.loads(path.read_text())["reservoirs"]["port_25"]["dispatched_ul"] == 4500
+        assert json.loads(path.read_text())["reservoirs"]["port_25"]["dispatched_ul"] == 4700
