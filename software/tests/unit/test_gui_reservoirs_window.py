@@ -13,12 +13,12 @@ import pytest
 from qtpy.QtCore import QEvent, QItemSelectionModel
 from qtpy.QtWidgets import QApplication, QHeaderView
 
-from fluidics.control.config import gantry, load_config
+from fluidics.control.config import load_config
 from fluidics.qt.reservoirs_window import LOADED_COLUMN
 from fluidics.qt.sequence_editor import RUN_TAB_JOB_SOURCE, SequencesWidget
 from fluidics.robot.labware import ref_of
 
-from ..conftest import FIXTURES_DIR, settle
+from ..conftest import FIXTURES_DIR, plate_block, settle
 
 QUESTION = "Accumulated goes to 0, and a declared volume reads full again."
 
@@ -108,11 +108,6 @@ def _resets(monkeypatch, system):
     return heard
 
 
-def _plate(config, name):
-    """The config's block for the plate `name`."""
-    return next(r for r in gantry(config).reservoirs.values() if r.name == name)
-
-
 def _loaded(config, key):
     """What the config says `key` holds when loaded: a bottle's
     loaded_volume_ul, a well its plate's loaded_ul. Read rather than pinned:
@@ -120,7 +115,7 @@ def _loaded(config, key):
     ref = ref_of(key)
     if ref is None:
         return config.reagent_selection.selector_valves.loaded_volume_ul[key]
-    return _plate(config, ref.reservoir).loaded_ul
+    return plate_block(config, ref.reservoir).loaded_ul
 
 
 def _draws(system, *draws):
@@ -147,7 +142,7 @@ def test_every_bottle_and_every_well_has_a_row_before_any_draw(reservoirs, plate
     figures, repainted by the job's end. The sample names no well, so
     probes/A1 is named here."""
     config = plate_sipper_config
-    _plate(config, "probes").well_names = {"A1": "hyb R01"}
+    plate_block(config, "probes").well_names = {"A1": "hyb R01"}
     bottle, probes, ssct = (_loaded(config, key) for key in ("port_5", "probes/A1", "ssct/B3"))
     window, _, system = reservoirs(config)
     assert window.isVisible() and window.windowTitle() == "Reservoirs"
@@ -492,7 +487,7 @@ def test_set_plate_sets_every_well_of_it_and_nothing_else(
     assert rows["probes/A1"] == ("sipper", "50", "450", "500")
     assert rows["probes/H12"] == ("sipper", "0", "500", "500")
     assert rows["ssct/A1"] == ("sipper", "0", f"{ssct}", f"{ssct}")
-    assert _plate(load_config(config.source_path), "probes").loaded_ul == 500
+    assert plate_block(load_config(config.source_path), "probes").loaded_ul == 500
 
 
 def test_a_double_click_on_a_loaded_cell_sets_that_row(

@@ -18,7 +18,7 @@ from fluidics.qt.deck_map import ROLE_COLORS
 from fluidics.qt.robot_control import RobotControlWidget
 from fluidics.robot.labware import WellRef, well_key
 
-from ..conftest import HYB, PRIME, settle
+from ..conftest import HYB, PRIME, plate_block, settle
 from .test_gui_deck_map import _at
 
 
@@ -34,17 +34,12 @@ def widget(qapp, plate_sipper_config, simulated_system):
     QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 
 
-def _plate(config, name):
-    """The config's block for the plate `name`."""
-    return next(r for r in gantry(config).reservoirs.values() if r.name == name)
-
-
 @pytest.fixture
 def named_a1(plate_sipper_config):
     """probes/A1 labelled "hyb R01", as a plate's well_names labels a well:
     the sample rig names none. Asked for before `widget`, so the widget is
     built with the label."""
-    _plate(plate_sipper_config, "probes").well_names = {"A1": "hyb R01"}
+    plate_block(plate_sipper_config, "probes").well_names = {"A1": "hyb R01"}
 
 
 @pytest.fixture
@@ -81,7 +76,7 @@ def _ssct_a2(w):
     from the config: A2 is one 9 mm pitch along ssct's column axis (+y)
     from its A1. Read, never pinned, since ssct's A1 and dip depth are
     placeholders still to be taught."""
-    ssct = _plate(w.config, "ssct")
+    ssct = plate_block(w.config, "ssct")
     x, y = ssct.a1_xy_mm
     return x, y + 9.0, ssct.dip_z_mm, gantry(w.config).travel_z_mm
 
@@ -325,7 +320,7 @@ def test_set_names_a_dedicated_well_in_the_config_and_the_map_marks_it(widget, c
 def test_a_refused_dedicated_well_is_a_dialog_and_changes_nothing(widget, monkeypatch, reservoir, typed, refusal):
     w, system = widget
     refusal = refusal.format(
-        loaded=_plate(w.config, "probes").loaded_ul,
+        loaded=plate_block(w.config, "probes").loaded_ul,
         line=w.config.reagent_selection.selector_valves.tubing_fluid_amount_ul["port_1"])
     said = []
     monkeypatch.setattr("fluidics.qt.robot_control.QMessageBox.critical",
@@ -344,7 +339,7 @@ def test_the_next_priming_row_primes_the_sipper_from_the_well_set(widget):
     system.run([PRIME])
     settle(system)
     tracker = system.devices.reservoirs
-    loaded = _plate(w.config, "ssct").loaded_ul
+    loaded = plate_block(w.config, "ssct").loaded_ul
     assert tracker.remaining("ssct/H10") < loaded, "the sipper's port primed from the well set"
     assert tracker.remaining("ssct/H11") == loaded
 

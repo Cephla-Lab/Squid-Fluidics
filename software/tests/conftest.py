@@ -43,6 +43,14 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 SIPPER_CONFIG = Path(__file__).parents[1] / "sample_config" / "plate_sipper_config.yaml"
 
 
+def plate_block(config, name):
+    """The config's block for plate `name` (the config's own object, so a
+    test's change to it reaches the rig): where it sits, how deep the tip
+    dips, what a well holds when loaded."""
+    from fluidics.vocabulary import sipper_vocabulary
+    return sipper_vocabulary(config).reservoirs[name]
+
+
 # The two sequences the editor suites are built from: one fluidic row with
 # every port field, one that has none.
 FLOW = {"type": "flow_reagent", "fluidic_port": 1, "flow_rate": 500,

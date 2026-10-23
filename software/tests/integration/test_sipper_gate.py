@@ -205,14 +205,13 @@ def test_a_step_the_check_cannot_replay_refuses_the_run_naming_the_step(plate_si
     assert not plate_sipper_system.busy
 
 
-def test_a_priming_that_leaves_out_the_sipper_passes_the_gate_and_runs(plate_sipper_system, plate_sipper_config,
-                                                                       real_clock):
+def test_a_priming_that_leaves_out_the_sipper_passes_the_gate_and_runs(plate_sipper_system, plate_sipper_config):
     """The gate takes a priming row whose use_ports skips the sipper's
     port, and the run leaves the priming well as it was."""
     reservoirs = plate_sipper_system.devices.reservoirs
     before = reservoirs.remaining("ssct/H11")
     plate_sipper_system.run([dict(PRIME, use_ports=[3]), HYB])
-    assert plate_sipper_system.wait(10)
+    assert plate_sipper_system.wait()
     assert reservoirs.remaining("ssct/H11") == before
     loaded = sipper_vocabulary(plate_sipper_config).reservoirs["probes"].loaded_ul
     assert reservoirs.remaining("probes/A1") == loaded - HYB["volume"], "the run went on to its well draw"

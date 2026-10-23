@@ -654,7 +654,7 @@ class TestGantryConfig:
         and written as UTF-8, every save double-encoded a character such as
         the button's ellipsis in a comment."""
         path = tmp_path / "config.yaml"
-        text = SIPPER_CONFIG.read_bytes().decode("utf-8").replace("\r\n", "\n")
+        text = _SIPPER_TEXT
         assert text.count(_CORNER) == 1, "probes' corner line is not unique; re-plant the comment"
         text = text.replace(_CORNER, _corner_line(_PROBES_A1, "# taught… 4 µL"))
         path.write_bytes(text.encode("utf-8"))

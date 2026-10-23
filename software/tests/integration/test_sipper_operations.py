@@ -7,7 +7,7 @@ from fluidics.errors import OperationError, ReservoirError, ReservoirNoWell, Res
 from fluidics.robot.labware import WellRef
 from fluidics.vocabulary import sipper_vocabulary
 
-from ..conftest import HYB, PRIME, PUSH
+from ..conftest import HYB, PRIME, PUSH, plate_block
 
 
 @pytest.fixture
@@ -17,12 +17,6 @@ def rig(plate_sipper_config, instant_devices):
     tracker, every well full."""
     devices = instant_devices(plate_sipper_config)
     return devices, build_operations(plate_sipper_config, devices)
-
-
-def _plate(config, name):
-    """The config's block for plate `name`: where it sits, how deep the
-    tip dips, what a well holds when loaded."""
-    return sipper_vocabulary(config).reservoirs[name]
 
 
 def _tubing(config, port):
@@ -48,7 +42,7 @@ def _dips_twice_then_draws(devices, ops, step, drawn_ul):
     depth, up the agitation amplitude, back, twice -- and the pump is asked
     for `drawn_ul` only after the last dip ends."""
     plate = sipper_vocabulary(devices.config).resolve(step["well"]).reservoir
-    dip = _plate(devices.config, plate).dip_z_mm
+    dip = plate_block(devices.config, plate).dip_z_mm
     up = dip - gantry(devices.config).agitate_amplitude_mm
     events = []
     devices.robot.moves.subscribe(lambda pos: events.append(("z", pos[2])))
@@ -62,7 +56,7 @@ def _dips_twice_then_draws(devices, ops, step, drawn_ul):
 
 def test_a_well_row_moves_the_sipper_then_opens_its_port_then_draws(rig):
     devices, ops = rig
-    probes = _plate(devices.config, "probes")
+    probes = plate_block(devices.config, "probes")
     order = []
     devices.robot.moves.subscribe(lambda pos: order.append(("move", pos)))
     open_port = devices.selector_valves.open_port
@@ -84,7 +78,7 @@ def test_a_bulk_row_after_a_well_row_charges_the_bottle_not_the_well(rig):
     ops.process_sequence(dict(HYB, well="ssct/A1"))
     ops.process_sequence({"type": "flow_reagent", "fluidic_port": 4,
                           "flow_rate": 2000, "volume": 300})
-    assert devices.reservoirs.remaining("ssct/A1") == _plate(devices.config, "ssct").loaded_ul - 100
+    assert devices.reservoirs.remaining("ssct/A1") == plate_block(devices.config, "ssct").loaded_ul - 100
     assert devices.reservoirs.remaining("port_4") == _bottle_loaded(devices.config, 4) - 300
 
 
@@ -97,7 +91,7 @@ def test_dips_run_before_the_draw_while_the_well_is_full(rig):
 
 def test_an_overdraw_is_refused_before_the_tip_moves(rig):
     devices, ops = rig
-    loaded = _plate(devices.config, "probes").loaded_ul
+    loaded = plate_block(devices.config, "probes").loaded_ul
     ops.process_sequence(dict(HYB, volume=loaded - 10))   # 10 uL left in A1
     moved = []
     devices.robot.moves.subscribe(moved.append)
@@ -128,7 +122,7 @@ def test_priming_parks_the_sipper_in_the_priming_well_for_its_port(rig):
     ops.process_sequence(PRIME)
     assert WellRef("ssct", "H11") in seen
     assert devices.reservoirs.remaining("ssct/H11") == (
-        _plate(devices.config, "ssct").loaded_ul - _tubing(devices.config, 1))
+        plate_block(devices.config, "ssct").loaded_ul - _tubing(devices.config, 1))
     # Port 3's bottle is untracked, so it is counted, not charged: its line, then the row's volume.
     assert _given(devices, "port_3") == _tubing(devices.config, 3) + PRIME["volume"]
 
@@ -142,7 +136,7 @@ def test_clean_up_parks_the_sipper_in_the_clean_up_well_for_its_port(rig):
         lambda port, ul: seen.append(devices.robot.current_well))
     ops.process_sequence({"type": "clean_up", "fluidic_port": 3, "flow_rate": 5000, "volume": 800})
     assert WellRef("ssct", "H12") in seen and WellRef("ssct", "H11") not in seen
-    loaded = _plate(devices.config, "ssct").loaded_ul
+    loaded = plate_block(devices.config, "ssct").loaded_ul
     assert devices.reservoirs.remaining("ssct/H12") == loaded - _tubing(devices.config, 1)
     assert devices.reservoirs.remaining("ssct/H11") == loaded
 
@@ -227,7 +221,7 @@ def test_selective_priming_that_lists_the_sipper_primes_it_from_the_priming_well
     ops.process_sequence(dict(PRIME, use_ports=[1, 3]))
     assert opened == [1, 3, 3], "the sipper's port, port 3, then the final draw: no other bottle"
     assert devices.reservoirs.remaining("ssct/H11") == (
-        _plate(devices.config, "ssct").loaded_ul - _tubing(devices.config, 1))
+        plate_block(devices.config, "ssct").loaded_ul - _tubing(devices.config, 1))
     assert _given(devices, "port_3") == _tubing(devices.config, 3) + PRIME["volume"]
 
 
@@ -239,7 +233,7 @@ def test_a_push_draws_the_configs_volume_from_its_well_through_the_sipper(rig):
     push = gantry(devices.config).push_volume_ul
     _dips_twice_then_draws(devices, ops, dict(PUSH, dip_cycles=2), push)
     assert devices.robot.current_well == WellRef("ssct", "A1")
-    assert devices.reservoirs.remaining("ssct/A1") == _plate(devices.config, "ssct").loaded_ul - push
+    assert devices.reservoirs.remaining("ssct/A1") == plate_block(devices.config, "ssct").loaded_ul - push
     assert devices.reservoirs.used_rows() == [(1, "sipper", push)]
 
 
@@ -255,7 +249,7 @@ def test_a_push_on_a_rig_without_a_sipper_refuses_by_name(flow_cell_rig):
 def test_a_push_without_dips_makes_no_stroke_and_a_bare_well_is_on_the_default_plate(rig):
     devices, ops = rig
     g = gantry(devices.config)
-    ssct = _plate(devices.config, "ssct")
+    ssct = plate_block(devices.config, "ssct")
     zs = []
     devices.robot.moves.subscribe(lambda pos: zs.append(pos[2]))
     ops.process_sequence(PUSH)
