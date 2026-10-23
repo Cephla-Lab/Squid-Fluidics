@@ -19,22 +19,28 @@ simulator agrees with get_axis_status read for read
 (tests/unit/robot/test_driver.py), but
 this read path wants a bench check on the real drives (the X1/Y2/Z3 stage)
 before it is trusted on a rig.
+
+At connect the adapter also sets each drive's position window (6067h) to the
+stage's TOLERANCE_MM (DriverService._set_position_window), and the homing
+speeds a config gives replace the driver's own (DriverService.__init__).
 """
 
+import dataclasses
+
 from ..errors import DeviceError
-from .stage import AxisReading, HomingReading, _label
+from .stage import TOLERANCE_MM, AxisReading, HomingReading, _label
 
 try:
     from ..control.nimotion import simulation      # the driver's own sim:// drives, for tests
     from ..control.nimotion.high_level_api import AxisName, ServoService
     from ..control.nimotion.high_level_api.axis_config import DEFAULT_AXIS_CONFIGS
-    from ..control.nimotion.motor_control import (DriveState, decode_status_word, is_fault,
-                                                  is_target_reached)
+    from ..control.nimotion.motor_control import (DriveState, Registers, decode_status_word,
+                                                  is_fault, is_target_reached)
     DRIVER_AVAILABLE = True
     _IMPORT_ERROR = None
 except ImportError as e:
     AxisName = ServoService = DEFAULT_AXIS_CONFIGS = simulation = None
-    DriveState = decode_status_word = is_fault = is_target_reached = None
+    DriveState = Registers = decode_status_word = is_fault = is_target_reached = None
     DRIVER_AVAILABLE = False
     _IMPORT_ERROR = e                               # kept for the bring-up error to name
 
@@ -65,9 +71,21 @@ class DriverService:
     target reads reached, strokes from the axis table, every failure a
     DeviceError naming the axis."""
 
-    def __init__(self, port, baudrate, names):
+    def __init__(self, port, baudrate, names, homing_velocity_mm_s=None,
+                 homing_acceleration_mm_s2=None):
         self._names = names                       # "x"/"y"/"z" -> AxisName
-        self._configs = {name: DEFAULT_AXIS_CONFIGS[name] for name in names.values()}
+        # This service's own copies of the axis table, with the homing speeds
+        # given (None keeps the driver's own) replaced in them. Copies, never
+        # DEFAULT_AXIS_CONFIGS' objects changed in place: that table is
+        # module-level, shared by every service in the process (the driver's
+        # simulated buses and the tests among them), so a change there would
+        # reach them all. The final approach speed (homing_velocity_low) stays
+        # the driver's: it decides where homing ends.
+        given = (("homing_velocity_high", homing_velocity_mm_s),
+                 ("homing_acceleration", homing_acceleration_mm_s2))
+        speeds = {field: value for field, value in given if value is not None}
+        self._configs = {name: dataclasses.replace(DEFAULT_AXIS_CONFIGS[name], **speeds)
+                         for name in names.values()}
         self._service = ServoService(port=port, baudrate=baudrate, axis_configs=self._configs)
 
     def _call(self, axis, what, fn):
@@ -86,6 +104,25 @@ class DriverService:
         for axis in self._configs:
             self._call(axis, "parameter initialization",
                        lambda axis=axis: self._service.initialize_motor_parameters(axis, verbose=False))
+            self._call(axis, "position window", lambda axis=axis: self._set_position_window(axis))
+
+    def _set_position_window(self, axis):
+        """6067h, the window a drive reports target reached inside, set to
+        the stage's TOLERANCE_MM, so drive and stage mean one thing by
+        arrived. The encoder setting (608Fh = 131072, saved 2026-10-12)
+        left the drives' window at 10 units, 1.5 um on X1 and 0.8 um on Y2
+        and Z3: on the bench (2026-10-22) X1 crept back from a 62 um
+        overshoot and had not reported the target reached when the leg's
+        time ran out. The window decides only when the drive says so; the
+        servo holds the exact target whatever it is. One count under
+        TOLERANCE_MM: a target goes to the drive truncated to whole counts
+        (mm_to_pulses), up to a count short of the mm the stage compares
+        with, so the full figure could report reached a fraction of a count
+        outside the stage's tolerance. Written and read back (the driver's
+        write_checked) at every connect, never saved to the drive's flash,
+        so a drive replaced or reset to factory gets it too."""
+        window = self._configs[axis].mm_to_pulses(TOLERANCE_MM) - 1
+        self._service.get_motor(axis).write_checked(Registers.POSITION_WINDOW, window)
 
     def disconnect(self):
         self._call(None, "disconnect", self._service.disconnect)
@@ -155,12 +192,14 @@ class DriverService:
         self._call(axis, "fault reset", lambda: self._service.fault_reset(axis))
 
 
-def open_service(port, baudrate, axis_names):
+def open_service(port, baudrate, axis_names, homing_velocity_mm_s=None,
+                 homing_acceleration_mm_s2=None):
     """A DriverService for the three axes `axis_names` maps ("x"/"y"/"z" ->
     driver axis names such as "X1") and the mapping as the driver's own
-    names, which the stage must be built with. DeviceError with the
-    install line when no driver is present, or naming an axis the driver
-    does not know."""
+    names, which the stage must be built with. The homing speeds, where
+    given, replace the driver's switch search speed and homing
+    acceleration on every axis. DeviceError with the install line when no
+    driver is present, or naming an axis the driver does not know."""
     if not DRIVER_AVAILABLE:
         raise DeviceError(_install_line()) from _IMPORT_ERROR
     names = {}
@@ -170,4 +209,5 @@ def open_service(port, baudrate, axis_names):
         except ValueError:
             raise DeviceError(f"the robot driver has no axis named {value!r} for {key}; "
                               f"it knows {[axis.value for axis in AxisName]}") from None
-    return DriverService(port, baudrate, names), names
+    return DriverService(port, baudrate, names, homing_velocity_mm_s,
+                         homing_acceleration_mm_s2), names

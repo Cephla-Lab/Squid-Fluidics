@@ -19,7 +19,7 @@ from fluidics.qt.deck_map import ROLE_COLORS
 from fluidics.qt.robot_control import RobotControlWidget
 from fluidics.robot.labware import WellRef, well_key
 
-from ..conftest import HYB, PRIME, SAMPLE_CONFIG_DIR, settle
+from ..conftest import FIXTURES_DIR, HYB, PRIME, settle
 from .test_gui_deck_map import _at
 
 
@@ -324,7 +324,7 @@ def test_save_writes_the_dedicated_wells_to_the_config_file(qapp, simulated_syst
     """Save, the teach window's one write, carries the dedicated wells
     with the rest of the teaching: read back from the file."""
     path = tmp_path / "plate_sipper_config.yaml"
-    shutil.copy(SAMPLE_CONFIG_DIR / "plate_sipper_config.yaml", path)
+    shutil.copy(FIXTURES_DIR / "plate_sipper_config.yaml", path)
     config = load_config(str(path))
     system = simulated_system(config)
     w = RobotControlWidget(config, system)

@@ -125,11 +125,11 @@ def test_the_plate_sipper_samples_load_validate_and_run(tmp_path, instant_device
         assert len(completed) == len(sequences)
         tracker = system.devices.reservoirs
         # Each round draws from its own pair of wells: A1 and ssct/A1, then
-        # A2 and ssct/A2.
+        # A2 and ssct/A2; a push is the config's 710 uL.
         for probes, ssct in (("probes/A1", "ssct/A1"), ("probes/A2", "ssct/A2")):
-            assert tracker.remaining(ssct) == 1800 - 490 - 1000
-            assert tracker.remaining(probes) == 110 - 100
-        # Port 25's draws: its own priming (700) and the priming volume
-        # (800), then in each of the two rounds the 4x SSC and rinse rows
-        # (1000 each) and the six bottle rows' tubing fills (240 + 340 each).
-        assert tracker.remaining("port_25") == 500000 - (700 + 800 + 2 * (1000 + 1000 + 6 * 580))
+            assert tracker.remaining(ssct) == 1800 - 710 - 1000
+            assert tracker.remaining(probes) == 350 - 100
+        # The tracked bottles: DAPI (port 4) gives its priming (240) and two
+        # rounds' 300 uL, anti-bleach (port 5) its priming (240) and two 1000s.
+        assert tracker.remaining("port_4") == 2000 - (240 + 2 * 300)
+        assert tracker.remaining("port_5") == 5000 - (240 + 2 * 1000)

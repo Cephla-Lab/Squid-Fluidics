@@ -4,13 +4,17 @@ the valves can draw from (the sipper's port left out), at 0 until drawn
 from and again after a reset, blank where no volume is declared and
 `undeclared` where a volume is yet to be declared; Reset selected, Reset
 <plate> and Reset all as manual jobs the Run tab owns, the verb's refusal
-said before the question; and the repaints that keep it current."""
+said before the question; Set selected…, Set <plate>… and a double click
+on a Loaded cell setting loaded volumes the same way; and the repaints
+that keep it current."""
 import threading
 
 import pytest
 from qtpy.QtCore import QEvent, QItemSelectionModel
 from qtpy.QtWidgets import QApplication, QHeaderView
 
+from fluidics.control.config import gantry, load_config
+from fluidics.qt.reservoirs_window import LOADED_COLUMN
 from fluidics.qt.sequence_editor import RUN_TAB_JOB_SOURCE, SequencesWidget
 
 from ..conftest import settle
@@ -76,6 +80,20 @@ def _warnings(monkeypatch):
     monkeypatch.setattr("fluidics.qt.reservoirs_window.QMessageBox.warning",
                         lambda parent, title, text: warned.append(text))
     return warned
+
+
+def _enters(monkeypatch, value, ok=True):
+    """The loaded volume dialog answers `value` (or is cancelled, ok
+    False); returns the list that will record (prompt, prefill, minimum)
+    for each time it is asked."""
+    asked = []
+
+    def get_int(parent, title, label, prefill, minimum, maximum, *rest):
+        asked.append((label, prefill, minimum))
+        return value, ok
+
+    monkeypatch.setattr("fluidics.qt.reservoirs_window.QInputDialog.getInt", get_int)
+    return asked
 
 
 def _resets(monkeypatch, system):
@@ -290,19 +308,26 @@ def test_a_reset_that_fails_is_a_dialog(reservoirs, plate_sipper_config, monkeyp
     assert said == ["The reset was not recorded: the volume tracking file could not be written"]
 
 
-def test_the_resets_wait_for_an_idle_rig(reservoirs, plate_sipper_config, real_clock):
-    """A reset is a manual job: every reset is dead while any job runs and
-    live again after, from its own repaint on the session's state. On the
-    real clock: the fake one's Event.wait(5) returns at once."""
+def test_the_resets_and_the_settings_wait_for_an_idle_rig(
+        reservoirs, plate_sipper_config, real_clock, monkeypatch):
+    """A reset or a setting is a manual job: every one of their buttons is
+    dead while any job runs and live again after, from its own repaint on
+    the session's state, and a double click on a Loaded cell asks nothing.
+    On the real clock: the fake one's Event.wait(5) returns at once."""
     window, tab, system = reservoirs(plate_sipper_config)
+    asked = _enters(monkeypatch, 1000, ok=False)
     _select(window, "port_25")
-    buttons = (window.resetSelectedButton, window.resetAllButton, *window.resetPlateButtons.values())
+    buttons = (window.resetSelectedButton, window.resetAllButton, *window.resetPlateButtons.values(),
+               window.setSelectedButton, *window.setPlateButtons.values())
+    assert sorted(window.setPlateButtons) == ["probes", "ssct"]
     assert all(button.isEnabled() for button in buttons)
     gate = threading.Event()
     system.run_manual(lambda: gate.wait(5))
     try:
         QApplication.processEvents()
         assert not any(button.isEnabled() for button in buttons)
+        window.table.cellDoubleClicked.emit(_keys(window).index("port_25"), LOADED_COLUMN)
+        assert asked == [], "a double click under a job asked for a volume"
         assert tab.reservoirsButton.isEnabled(), "opening the window is not a job"
     finally:
         gate.set()
@@ -383,3 +408,153 @@ def test_a_tracked_bottle_on_a_rig_without_a_robot_resets_from_its_row(
     settle(system)
     assert system.devices.reservoirs.remaining("port_2") == 10000
     assert _rows(window)["port_2"] == ("y", "0", "10000", "10000")
+
+
+# --- the loaded volumes ---
+
+def _sets(monkeypatch, system):
+    """Record each (keys, uL) the verb sets and the session's label for the
+    job it runs in, then set it."""
+    heard = []
+    set_loaded_volume = system.manual.set_loaded_volume
+    monkeypatch.setattr(system.manual, "set_loaded_volume",
+                        lambda keys, ul: heard.append((list(keys), ul, system.session.source))
+                        or set_loaded_volume(keys, ul))
+    return heard
+
+
+def test_set_selected_sets_the_highlighted_rows_as_a_run_tab_job(
+        reservoirs, plate_sipper_config_on_file, monkeypatch):
+    """The dialog names the rows and starts from the first one's loaded
+    volume; accumulated stands and current follows, an untracked bottle
+    tracked from then on; the config file carries both."""
+    config = plate_sipper_config_on_file
+    window, _, system = reservoirs(config)
+    system.devices.reservoirs.restore({"reservoirs": {"port_25": {"dispatched_ul": 2500}}})
+    window.refresh()
+    asked, heard = _enters(monkeypatch, 600000), _sets(monkeypatch, system)
+    assert not window.setSelectedButton.isEnabled(), "nothing highlighted"
+    _select(window, "port_25", "port_26")
+    window.setSelectedButton.click()
+    settle(system)
+    assert asked == [("Loaded volume of port_25, port_26 (µL):", 500000, 1)]
+    assert heard == [(["port_25", "port_26"], 600000, RUN_TAB_JOB_SOURCE)]
+    rows = _rows(window)
+    assert rows["port_25"] == ("4x SSC", "2500", "597500", "600000")
+    assert rows["port_26"] == ("DAPI", "0", "undeclared", "600000"), "newly tracked: a reset declares it"
+    assert "port_26" in window.undeclaredLabel.text()
+    assert load_config(config.source_path).reagent_selection.selector_valves.loaded_volume_ul == {
+        "port_25": 600000, "port_26": 600000}
+
+
+def test_set_plate_sets_every_well_of_it_and_nothing_else(
+        reservoirs, plate_sipper_config_on_file, monkeypatch):
+    config = plate_sipper_config_on_file
+    window, _, system = reservoirs(config)
+    system.devices.reservoirs.restore({"reservoirs": {"probes/A1": {"dispatched_ul": 50}}})
+    asked = _enters(monkeypatch, 350)
+    window.setPlateButtons["probes"].click()
+    settle(system)
+    assert asked == [("Loaded volume of every well of probes (µL):", 110, 1)]
+    rows = _rows(window)
+    assert rows["probes/A1"] == ("hyb R01", "50", "300", "350")
+    assert rows["probes/H12"] == ("sipper", "0", "350", "350")
+    assert rows["ssct/A1"] == ("sipper", "0", "1800", "1800")
+    assert gantry(load_config(config.source_path)).reservoirs[1].loaded_ul == 350
+
+
+def test_a_double_click_on_a_loaded_cell_sets_that_row(
+        reservoirs, plate_sipper_config_on_file, monkeypatch):
+    """The row is selected first, alone, so the dialog names what it sets;
+    a double click on any other column is not a setting."""
+    window, _, system = reservoirs(plate_sipper_config_on_file)
+    asked = _enters(monkeypatch, 1000)
+    _select(window, "probes/A1")
+    row = _keys(window).index("ssct/B1")
+    window.table.cellDoubleClicked.emit(row, LOADED_COLUMN - 1)
+    assert asked == [] and window.selectedKeys() == ["probes/A1"]
+    window.table.cellDoubleClicked.emit(row, LOADED_COLUMN)
+    settle(system)
+    assert asked == [("Loaded volume of ssct/B1 (µL):", 1800, 1)]
+    assert window.selectedKeys() == ["ssct/B1"]
+    assert _rows(window)["ssct/B1"] == ("sipper", "0", "1000", "1000")
+    assert _rows(window)["probes/A1"][3] == "110"
+
+
+def test_a_refusal_the_keys_decide_is_said_before_the_dialog(
+        reservoirs, plate_sipper_config_on_file, monkeypatch):
+    """The verb is asked first with the keys alone: a refusal there is a
+    warning, the dialog never opens and no job starts."""
+    window, _, system = reservoirs(plate_sipper_config_on_file)
+    asked, warned = _enters(monkeypatch, 1000), _warnings(monkeypatch)
+    refuse = system.manual.loaded_volume_refusal
+    monkeypatch.setattr(system.manual, "loaded_volume_refusal",
+                        lambda keys, ul=None: "port_25 is not set here" if ul is None else refuse(keys, ul))
+    _select(window, "port_25")
+    window.setSelectedButton.click()
+    QApplication.processEvents()
+    assert warned == ["port_25 is not set here"] and asked == []
+    assert not system.busy and system.devices.reservoirs.loaded("port_25") == 500000
+
+
+def test_a_refused_volume_is_said_before_the_job_and_sets_nothing(
+        reservoirs, plate_sipper_config_on_file, monkeypatch):
+    """The priming well below the sipper's line: refused once the value is
+    in, before any job, so nothing is written anywhere."""
+    config = plate_sipper_config_on_file
+    window, _, system = reservoirs(config)
+    before = open(config.source_path, encoding="utf-8").read()
+    asked, warned = _enters(monkeypatch, 100), _warnings(monkeypatch)
+    window.setPlateButtons["ssct"].click()
+    QApplication.processEvents()
+    assert len(asked) == 1
+    assert warned == ["ssct/H11 is the priming well: it must hold at least the 250 uL the "
+                      "sipper's line takes to prime"]
+    assert not system.busy and system.devices.reservoirs.loaded("ssct/H11") == 1800
+    assert open(config.source_path, encoding="utf-8").read() == before
+
+
+def test_a_cancelled_dialog_sets_nothing(reservoirs, plate_sipper_config_on_file, monkeypatch):
+    window, _, system = reservoirs(plate_sipper_config_on_file)
+    asked = _enters(monkeypatch, 5000, ok=False)
+    window.setPlateButtons["probes"].click()
+    QApplication.processEvents()
+    assert len(asked) == 1 and not system.busy
+    assert system.devices.reservoirs.loaded("probes/A1") == 110
+
+
+def test_a_setting_that_fails_is_a_dialog(reservoirs, plate_sipper_config_on_file, monkeypatch):
+    """The verb runs on the job's thread; what it raises comes back as the
+    window's dialog."""
+    window, _, system = reservoirs(plate_sipper_config_on_file)
+    said = []
+    monkeypatch.setattr("fluidics.qt.reservoirs_window.QMessageBox.critical",
+                        lambda parent, title, text: said.append(text))
+    _enters(monkeypatch, 350)
+
+    def fail(keys, ul):
+        raise RuntimeError("the volume tracking file could not be written")
+
+    monkeypatch.setattr(system.manual, "set_loaded_volume", fail)
+    window.setPlateButtons["probes"].click()
+    settle(system)
+    assert said == ["The loaded volume was not set: the volume tracking file could not be written"]
+
+
+def test_a_rig_without_a_robot_sets_a_bottle_from_its_row(
+        reservoirs, flow_cell_config, monkeypatch, tmp_path):
+    """No plates, so no plate buttons; an untracked bottle given a volume
+    is tracked from then on, in the file the config came from."""
+    import shutil
+    path = tmp_path / "flow_cell_config.yaml"
+    shutil.copy(flow_cell_config.source_path, path)
+    config = load_config(str(path))
+    window, _, system = reservoirs(config)
+    assert window.setPlateButtons == {}
+    _enters(monkeypatch, 10000)
+    _select(window, "port_3")
+    window.setSelectedButton.click()
+    settle(system)
+    assert system.devices.reservoirs.tracked == ("port_3",)
+    assert _rows(window)["port_3"] == ("z", "0", "undeclared", "10000"), "newly tracked: a reset declares it"
+    assert load_config(str(path)).reagent_selection.selector_valves.loaded_volume_ul == {"port_3": 10000}

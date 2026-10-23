@@ -630,6 +630,147 @@ class TestBalances:
         assert named.tracker.balances()[0] == ("port_25", "SSC", 500.0, 4500.0, 5000, False)
 
 
+class TestSetLoaded:
+    """set_loaded(): what a reservoir holds when loaded, set while the rig
+    runs. It changes a number, not what is in the reservoir: accumulated
+    stands, current follows, and only a reset declares."""
+
+    def _on_disk(self, tmp_path):
+        return json.loads((tmp_path / "volumes.json").read_text())
+
+    def test_accumulated_stands_and_current_follows_the_new_volume(self, rig, tmp_path):
+        tracker, pump, state = rig
+        state["port"], state["well"] = SIPPER_PORT, "ssct/A1"
+        pump.extract(EXTRACT_PORT, 1490)
+        tracker.set_loaded({"ssct/A1": 2500})
+        assert tracker.loaded("ssct/A1") == 2500 and tracker.remaining("ssct/A1") == 1010
+        assert ("ssct/A1", None, 1490.0, 1010.0, 2500, False) in tracker.balances()
+        on_disk = self._on_disk(tmp_path)
+        assert on_disk["definitions"]["ssct/A1"] == {"loaded_ul": 2500}
+        assert on_disk["reservoirs"]["ssct/A1"] == {"dispatched_ul": 1490.0}
+        pump.extract(EXTRACT_PORT, 1000)              # 1000 more fits the new volume
+        assert tracker.remaining("ssct/A1") == 10
+
+    def test_an_undeclared_reservoir_stays_undeclared_until_its_reset(self, rig):
+        tracker, _, _ = rig
+        tracker.restore({"undeclared": ["port_25"]})
+        tracker.set_loaded({"port_25": 6000})
+        assert tracker.undeclared == ["port_25"]
+        tracker.refill("port_25")
+        assert tracker.declared and tracker.remaining("port_25") == 6000
+
+    def test_a_volume_below_what_the_reservoir_has_given_is_refused(self, rig):
+        """The balance a file restore would refuse as no draw could leave
+        it; exactly what it has given is the floor, leaving it empty."""
+        tracker, pump, state = rig
+        state["port"], state["well"] = SIPPER_PORT, "ssct/A1"
+        pump.extract(EXTRACT_PORT, 1490)
+        with pytest.raises(ValueError, match=re.escape(
+                "ssct/A1 has given 1490 uL since its last reset: its loaded volume cannot be less")):
+            tracker.set_loaded({"ssct/A1": 1489})
+        assert tracker.loaded("ssct/A1") == 1800
+        tracker.set_loaded({"ssct/A1": 1490})
+        assert tracker.remaining("ssct/A1") == 0
+
+    @pytest.mark.parametrize("volume", [0, -5, 1.5, True, "350"],
+                             ids=["zero", "negative", "fraction", "bool", "text"])
+    def test_a_volume_that_is_not_a_whole_number_above_0_is_refused(self, rig, volume):
+        tracker, _, _ = rig
+        with pytest.raises(ValueError, match=re.escape(f"port_25: {volume!r} uL is not a loaded volume")):
+            tracker.set_loaded({"port_25": volume})
+        assert tracker.loaded("port_25") == 5000
+
+    @pytest.mark.parametrize("key", ["water", "ssct/Z9", "probes/A1", "port_26"])
+    def test_a_key_that_names_no_tracked_reservoir_or_bottle_is_refused(self, rig, key):
+        """A well the tracker does not define is no well of this rig; a
+        bottle it does not list (built without its bottles, never drawn
+        from) is no bottle it knows."""
+        tracker, _, _ = rig
+        with pytest.raises(ValueError, match=re.escape(f"{key} names no tracked reservoir or bottle")):
+            tracker.set_loaded({key: 1000})
+        assert key not in tracker.tracked
+
+    def test_several_keys_are_set_in_one_write_or_not_at_all(self, rig, tmp_path):
+        tracker, _, _ = rig
+        writes = []
+        write = tracker._write
+        tracker._write = lambda: writes.append(1) or write()
+        with pytest.raises(ValueError, match="ssct/A2: 0 uL"):
+            tracker.set_loaded({"port_25": 6000, "ssct/A2": 0})
+        assert writes == [] and tracker.loaded("port_25") == 5000
+        assert not (tmp_path / "volumes.json").exists()
+        tracker.set_loaded({"port_25": 6000, "ssct/A2": 2000})
+        assert writes == [1]
+        assert tracker.loaded("port_25") == 6000 and tracker.loaded("ssct/A2") == 2000
+
+    def test_an_untracked_bottle_given_a_volume_is_tracked_from_then_on(self, tmp_path):
+        """Undeclared until its reset -- what it gave before it was tracked
+        is not known -- its accumulated figure kept and now on the file; once
+        reset, declared full and its draws limited."""
+        pump = FakePump()
+        tracker = VolumeTracker(DEFS, path=tmp_path / "volumes.json", bottles=["port_26"])
+        tracker.attach(pump, SIPPER_PORT, EXTRACT_PORT, lambda: 26, lambda: None)
+        pump.extract(EXTRACT_PORT, 300)               # untracked: counted in memory alone
+        tracker.set_loaded({"port_26": 1000})
+        assert tracker.tracked == ("port_25", "port_26", "ssct/A1", "ssct/A2")
+        assert tracker.undeclared == ["port_26"]
+        assert ("port_26", None, 300.0, 700.0, 1000, True) in tracker.balances()
+        assert ("port_26", 300.0, 700.0) in tracker.rows()
+        on_disk = self._on_disk(tmp_path)
+        assert on_disk["definitions"]["port_26"] == {"loaded_ul": 1000}
+        assert on_disk["reservoirs"]["port_26"] == {"dispatched_ul": 300.0}
+        assert on_disk["undeclared"] == ["port_26"]
+        with pytest.raises(ReservoirUndeclared, match="port_26"):
+            pump.extract(EXTRACT_PORT, 1)
+        tracker.refill("port_26")
+        assert tracker.declared and tracker.remaining("port_26") == 1000
+        pump.extract(EXTRACT_PORT, 600)
+        with pytest.raises(ReservoirOverdraw, match="port_26"):
+            pump.extract(EXTRACT_PORT, 401)
+
+    def test_a_new_bottle_never_drawn_from_is_in_rows_once_drawn(self, tmp_path):
+        pump = FakePump()
+        tracker = VolumeTracker(DEFS, path=tmp_path / "volumes.json", bottles=["port_26"])
+        tracker.attach(pump, SIPPER_PORT, EXTRACT_PORT, lambda: 26, lambda: None)
+        tracker.set_loaded({"port_26": 1000})
+        assert "port_26" in tracker.tracked and tracker.rows() == []
+        tracker.refill("port_26")                     # newly tracked: declared by its reset
+        pump.extract(EXTRACT_PORT, 100)
+        assert tracker.rows() == [("port_26", 100.0, 900.0)]
+        assert self._on_disk(tmp_path)["reservoirs"]["port_26"] == {"dispatched_ul": 100.0}
+
+    def test_a_setting_the_file_cannot_hold_changes_nothing(self, tmp_path):
+        """Like a refill: memory must not read the new volume over a file
+        that does not, and a bottle that would have become tracked is not."""
+        path = tmp_path / "volumes.json"
+        path.mkdir()                               # a directory where the file should be
+        tracker = VolumeTracker(DEFS, path=path, bottles=["port_26"])
+        tracker.restore({"reservoirs": {"ssct/A1": {"dispatched_ul": 700}}})
+        with pytest.raises(ReservoirWriteError,
+                           match="the loaded volume of port_26, ssct/A1 was not recorded"):
+            tracker.set_loaded({"ssct/A1": 2500, "port_26": 1000})
+        assert tracker.loaded("ssct/A1") == 1800 and tracker.remaining("ssct/A1") == 1100
+        assert "port_26" not in tracker.tracked
+        assert ("port_26", None, 0.0, None, None, False) in tracker.balances()
+
+    def test_the_next_launch_restores_it_where_the_config_carries_it(self, rig, tmp_path):
+        """The config file carries the new volume to the next launch: with
+        it the file's entry matches and its balance stands; a launch with
+        the old figure finds them differ and leaves it undeclared."""
+        tracker, pump, _ = rig
+        pump.extract(EXTRACT_PORT, 500)
+        tracker.set_loaded({"port_25": 6000})
+        with closing(VolumeTracker.load(tmp_path / "volumes.json", tracker.snapshot()["definitions"])) as again:
+            assert again.declared and again.remaining("port_25") == 5500
+        with closing(VolumeTracker.load(tmp_path / "volumes.json", DEFS)) as stale:
+            assert stale.undeclared == ["port_25"]
+
+    def test_a_volume_tracker_with_no_file_keeps_it_in_memory(self):
+        tracker = VolumeTracker({}, bottles=["port_26"])
+        tracker.set_loaded({"port_26": 1000})
+        assert tracker.tracked == ("port_26",) and tracker.remaining("port_26") == 1000
+
+
 def test_rows_are_the_tracked_part_of_balances_in_its_order():
     """The report's and the gate's rows are the window's, filtered: the
     tracked reservoirs with something given, bottles by port number (port_3

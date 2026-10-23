@@ -53,7 +53,8 @@ def driver():
 def fake_service(driver, monkeypatch):
     """A DriverService opened on the three axes over a recording fake of
     the driver's ServoService, whose one motor records the registers read
-    (`reads`): (service, names, calls)."""
+    (`reads`) and, in `calls`, each checked write with the axis it was got
+    for: (service, names, calls)."""
     calls = []
 
     class FakeMotor:
@@ -63,6 +64,7 @@ def fake_service(driver, monkeypatch):
             self.position = 0                    # 6064h, pulses
             self.error_code = 0                  # 603Fh
             self.reads = []
+            self.axis = None                     # the axis get_motor was last asked for
 
         def _read(self, register, value):
             self.reads.append(register)
@@ -83,6 +85,9 @@ def fake_service(driver, monkeypatch):
         def read_position(self):
             return self._read("position", self.position)
 
+        def write_checked(self, register, value):
+            calls.append(("write_checked", self.axis.value, register.address, value))
+
     class FakeServo:
         def __init__(self, port, baudrate, axis_configs):
             self.axis_configs = axis_configs
@@ -97,6 +102,7 @@ def fake_service(driver, monkeypatch):
             calls.append(("init_axis", axis.value))
 
         def get_motor(self, axis):
+            self.motor.axis = axis
             return self.motor
 
         def stop(self, axis, wait=True):
@@ -126,6 +132,99 @@ def test_connect_selects_a_configured_axis_and_initializes_all_three(fake_servic
     assert calls[0] == ("init", ["X1", "Y2", "Z3"])
     assert calls[1] == ("connect", "Z3")
     assert sorted(c[1] for c in calls if c[0] == "init_axis") == ["X1", "Y2", "Z3"]
+
+
+def test_connect_sets_each_drives_position_window_to_the_stage_tolerance(fake_service):
+    """6067h (Modbus 0x03CD) on every axis, each after its parameter
+    initialization: TOLERANCE_MM in the axis's own units, a count under
+    it, since a target goes to the drive truncated to whole counts. X1 is
+    6553.6 units/mm (20 mm lead), Y2 and Z3 13107.2 (10 mm)."""
+    service, names, calls = fake_service
+    service.connect()
+    windows = {axis: counts for verb, axis, address, counts in
+               (c for c in calls if c[0] == "write_checked") if address == 0x03CD}
+    assert windows == {"X1": 326, "Y2": 654, "Z3": 654}
+    for label, counts in windows.items():
+        config = service._configs[names[label[0].lower()]]
+        assert config.pulses_to_mm(counts + 1) <= TOLERANCE_MM < config.pulses_to_mm(counts + 2)
+        assert calls.index(("init_axis", label)) < calls.index(("write_checked", label, 0x03CD, counts))
+
+
+def test_a_position_window_the_drive_does_not_keep_fails_the_connect_naming_the_axis(driver, real_clock):
+    """On the driver's own simulator, which keeps 6067h as a plain register
+    (it stores and reads back what is written, but its moves report the
+    target reached at the target itself, whatever the window): every drive
+    holds the window after connect, and a drive that reads back another
+    value fails the connect, named, as the driver's write_checked finds."""
+    bus = driver.simulation.install_bus("sim://window", driver.simulation.SimulatedBus(
+        list(driver.DEFAULT_AXIS_CONFIGS.values()), time_scale=20.0))
+    address = driver.Registers.POSITION_WINDOW.address
+
+    def window(axis):
+        high, low = bus.drive(driver.DEFAULT_AXIS_CONFIGS[axis].slave_id).read(address, 2)
+        return high << 16 | low
+
+    service, names = driver.open_service("sim://window", 115200, AXES)
+    try:
+        service.connect()
+        assert {axis.value: window(axis) for axis in names.values()} == {"X1": 326, "Y2": 654, "Z3": 654}
+    finally:
+        service.disconnect()
+    y2 = bus.drive(driver.DEFAULT_AXIS_CONFIGS[names["y"]].slave_id)
+    y2.read_overrides.update({address: 0, address + 1: 10})      # the factory window, whatever is written
+    service, names = driver.open_service("sim://window", 115200, AXES)
+    try:
+        with pytest.raises(DeviceError, match=r"axis Y2: position window failed: .*6067h.* = 10 after 654"):
+            service.connect()
+    finally:
+        service.disconnect()
+
+
+def test_the_homing_speeds_given_replace_the_drivers_in_the_services_own_axis_table(fake_service, driver):
+    """The switch search speed and the homing acceleration on every axis,
+    the final approach speed the driver's own; DEFAULT_AXIS_CONFIGS, which
+    every service in the process shares, is left as it was, by value. A
+    service opened without them (the fixture's) has the driver's values."""
+    before = {axis: dataclasses.replace(config) for axis, config in driver.DEFAULT_AXIS_CONFIGS.items()}
+    service, names = driver.open_service("COM5", 115200, AXES, homing_velocity_mm_s=20.0,
+                                         homing_acceleration_mm_s2=200.0)
+    for axis in names.values():
+        config = service._service.axis_configs[axis]
+        assert (config.homing_velocity_high, config.homing_acceleration) == (20.0, 200.0)
+        assert config.homing_velocity_low == before[axis].homing_velocity_low
+        assert config is not driver.DEFAULT_AXIS_CONFIGS[axis]
+        assert dataclasses.replace(config, homing_velocity_high=before[axis].homing_velocity_high,
+                                   homing_acceleration=before[axis].homing_acceleration) == before[axis]
+    assert driver.DEFAULT_AXIS_CONFIGS == before
+    unchanged, _, _ = fake_service
+    assert all(unchanged._service.axis_configs[axis] == before[axis] for axis in names.values())
+
+
+def test_the_homing_speeds_reach_the_drive_on_the_driver_simulator(driver, real_clock):
+    """ServoService.home writes them to each drive (6099h, 609Ah) from the
+    service's own axis table, in the axis's units: 20 mm/s and 200 mm/s^2
+    here, the final approach the driver's 5 mm/s."""
+    bus = driver.simulation.install_bus("sim://homing", driver.simulation.SimulatedBus(
+        list(driver.DEFAULT_AXIS_CONFIGS.values()), time_scale=20.0))
+    service, names = driver.open_service("sim://homing", 115200, AXES, homing_velocity_mm_s=20.0,
+                                         homing_acceleration_mm_s2=200.0)
+    x = names["x"]
+    config = service._configs[x]
+    drive = bus.drive(config.slave_id)
+
+    def read32(register):
+        high, low = drive.read(register.address, 2)
+        return high << 16 | low
+    try:
+        service.connect()
+        service.home(x)
+        registers = driver.Registers
+        assert read32(registers.HOMING_SPEED_HIGH) == config.velocity_mm_to_pulses(20.0)
+        assert read32(registers.HOMING_ACCELERATION) == config.velocity_mm_to_pulses(200.0)
+        assert read32(registers.HOMING_SPEED_LOW) == config.velocity_mm_to_pulses(5.0)
+    finally:
+        service.stop(x)
+        service.disconnect()
 
 
 def test_homing_state_reads_the_bits_and_the_mode(fake_service):
@@ -318,7 +417,7 @@ def test_a_move_after_a_halt_goes_to_the_new_target_not_the_old_one(driver, real
     resumes the halted move (Halt released re-arms the old set-point).
     The stage's halt contract needs the driver to have PR #1: pinned here
     on the driver's own simulator, which models the drive's handshake. Its
-    bus runs 3 times real time: homing the three axes is 20 s of the test
+    bus runs 3 times real time: homing the three axes is 15 s of the test
     at real time, and at 3x the cancel still lands well before X would
     reach 195, the far end of its stroke (at the
     siblings' 20x it does not land in time). The cancel waits for a reading (X past 30 mm),
@@ -391,7 +490,7 @@ def test_a_limit_stop_on_the_driver_simulator_ends_the_leg_at_once(driver, real_
         start = time.monotonic()
         with pytest.raises(DeviceError, match=r"Y2.*move to 58\.00 mm stopped by a limit switch at"):
             stage.move_xy(5.0, 58.0)                  # 58 mm is inside the configured 102 mm stroke
-        assert time.monotonic() - start < 2.0, "not the leg's timeout (2.2 s)"
+        assert time.monotonic() - start < 2.0, "not the leg's timeout (6.2 s)"
         # the drive decelerates past the switch at its quick-stop rate: v^2 / 2a =
         # 100^2 / (2 * 1000) = 5 mm, plus a poll's worth of travel (the stage polls
         # the drive's simulated clock 20 times slower than its own)

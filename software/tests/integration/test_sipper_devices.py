@@ -303,6 +303,27 @@ def test_a_ctrl_c_while_z_homes_closes_the_launch_without_moves(plate_sipper_con
     VolumeTracker.load(path, reservoir_definitions(plate_sipper_config)).close()
 
 
+def test_a_real_rig_opens_the_driver_with_the_configs_homing_speeds(plate_sipper_config, monkeypatch):
+    """_build_robot hands the gantry's homing speeds to the adapter. No
+    port is opened: the port lookup answers a simulator URL, and the
+    adapter's opener records its arguments and stops the bring-up there."""
+    import fluidics.devices as devices_module
+    from fluidics.control import discovery
+    from fluidics.errors import RunControl
+    from fluidics.robot import _driver
+    opened = []
+
+    def recording(port, baudrate, axis_names, **speeds):
+        opened.append((port, speeds))
+        raise DeviceError("recorded")
+    monkeypatch.setattr(discovery, "find_serial_port", lambda *args: "sim://not-opened")
+    monkeypatch.setattr(_driver, "open_service", recording)
+    with pytest.raises(DeviceError, match="recorded"):
+        devices_module._build_robot(plate_sipper_config, False, RunControl(), instant=False)
+    assert opened == [("sim://not-opened",
+                       {"homing_velocity_mm_s": 20.0, "homing_acceleration_mm_s2": 200.0})]
+
+
 def test_close_runs_the_robot_after_the_reset_and_before_the_syringe(plate_sipper_config, built):
     devices = built(plate_sipper_config, simulation=True, instant=True)
     calls = []

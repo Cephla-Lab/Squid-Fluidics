@@ -306,6 +306,7 @@ class SequencesWidget(PostsToQtThread, QWidget):
                                    available_ports(config),
                                    sipper=self._sipper)
         self._plan = ()          # the running run's plan, rows = model rows
+        self._rowsLocked = False # fields, names and checkboxes read-only: a job rides the list
         # Which sequences the operator has open, by identity: a move swaps
         # the dicts themselves, so an open row follows its sequence rather
         # than staying behind at the index it was rendered at.
@@ -475,6 +476,8 @@ class SequencesWidget(PostsToQtThread, QWidget):
 
     def _onItemDoubleClicked(self, item, column):
         """Allow editing: name (col 0) for top-level items, value (col 1) for children."""
+        if self._rowsLocked:
+            return
         is_top_level = item.parent() is None
         if is_top_level and column == 0:
             self.tree.editItem(item, 0)
@@ -548,8 +551,31 @@ class SequencesWidget(PostsToQtThread, QWidget):
             child.setFlags(child.flags() | Qt.ItemIsEditable)
             item.addChild(child)
 
+        self._setRowFlags(item)
         self.tree.addTopLevelItem(item)
         item.setExpanded(id(seq) in self._opened)
+
+    def _setRowFlags(self, item):
+        """A row's name and checkbox, and its fields' values, editable
+        unless the rows are locked (_lockRows)."""
+        def flags(it, extra):
+            return (it.flags() & ~extra) if self._rowsLocked else (it.flags() | extra)
+        item.setFlags(flags(item, Qt.ItemIsEditable | Qt.ItemIsUserCheckable))
+        for j in range(item.childCount()):
+            child = item.child(j)
+            child.setFlags(flags(child, Qt.ItemIsEditable))
+
+    def _lockRows(self, locked):
+        """Read-only while a job rides the list: a run executes the rows as
+        they were when Run was pressed (its plan holds copies), so an edit
+        made under it would show in the table and never run. Everything
+        comes back when the rig is idle."""
+        if locked == self._rowsLocked:
+            return
+        self._rowsLocked = locked
+        with QSignalBlocker(self.tree):
+            for i in range(self.tree.topLevelItemCount()):
+                self._setRowFlags(self.tree.topLevelItem(i))
 
     def _handle_log_line(self, line):
         """On the Qt thread: the pane keeps the last LOG_LINES lines, and
@@ -600,6 +626,17 @@ class SequencesWidget(PostsToQtThread, QWidget):
         top = parent if parent is not None else item
         row = self.tree.indexOfTopLevelItem(top)
         if not 0 <= row < len(self._model):
+            return
+        if self._rowsLocked:
+            # An editor that was open when the job started commits here: the
+            # rows are read-only now, so the cell goes back to the model's.
+            with QSignalBlocker(self.tree):
+                if parent is None:
+                    item.setText(0, self._model.title(row))
+                    item.setCheckState(0, Qt.Checked if is_included(self._model[row]) else Qt.Unchecked)
+                else:
+                    value = self._model[row].get(item.data(0, Qt.UserRole))
+                    item.setText(1, '' if value is None else str(value))
             return
         if parent is None:
             self._model.set_included(row, item.checkState(0) == Qt.Checked)
@@ -778,8 +815,8 @@ class SequencesWidget(PostsToQtThread, QWidget):
         # unchecked ones. Relabel once, so highlight and resume land on
         # tree rows without a translation table riding alongside. The
         # labels stay true because the verbs that reorder rows are the
-        # ones greyed out during a run -- field edits and checkboxes stay
-        # live, and neither moves a row. A holder without those buttons
+        # ones greyed out during a run, and the rows themselves are
+        # read-only then (_lockRows). A holder without those buttons
         # (a script, an API) would need the plan to carry identity, the
         # way the open-state set does.
         plan = tuple(entry._replace(row=rows[entry.row]) for entry in plan)
@@ -890,6 +927,8 @@ class SequencesWidget(PostsToQtThread, QWidget):
                        self.duplicateButton, self.moveUpButton,
                        self.moveDownButton):
             button.setEnabled(idle)
+        # And the rows themselves: an edit under a run would never reach it.
+        self._lockRows(not idle)
 
     def pauseSequences(self):
         """Hold the run after the move in flight, or let it go on."""
@@ -965,9 +1004,8 @@ class SequencesWidget(PostsToQtThread, QWidget):
         """
         tail = self._plan[position:]
         entry = tail[0]
-        # The plan's own captured label: field edits stay live during a
-        # run, and the offer must name what will actually execute, not
-        # what the tree says by now.
+        # The plan's own captured label: the offer names what will
+        # actually execute, the rows as they were when the run started.
         label = entry.label
         which = repeat_suffix(entry)
         if not _ask_yes_no(

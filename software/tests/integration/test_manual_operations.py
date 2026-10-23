@@ -7,11 +7,14 @@ around it -- what a script or the manual tab asks for is what moves.
 
 import pytest
 
-from fluidics.control.config import gantry
-from fluidics.errors import AbortRequested, StageError
+from fluidics.control.config import gantry, load_config
+from fluidics.errors import AbortRequested, ReservoirShortfall, ReservoirWriteError, StageError
 from fluidics.manual_operations import ManualOperations
+from fluidics.reservoirs import reservoir_definitions
 from fluidics.robot.stage import MIN_TRAVEL_Z_MM
 from fluidics.vocabulary import sipper_vocabulary
+
+from ..conftest import HYB, PUSH
 
 
 @pytest.fixture
@@ -187,6 +190,18 @@ def test_robot_verbs_refuse_on_a_rig_without_a_robot(flow_cell):
         manual.retract()
 
 
+def test_a_taught_position_is_kept_to_the_hundredth_of_a_millimetre(plate_sipper_config, sipper):
+    """Jogs of 0.1 mm add up with float error: the config, and so the file,
+    reads 8.8 and 7.2, not 8.799999999999999 and 7.200000000000003."""
+    devices, manual = sipper
+    manual.teach_a1("probes", (8.799999999999999, 1.2999999999999998))
+    manual.teach_dip("probes", 49.00000000000001)
+    manual.teach_travel(7.200000000000003)
+    probes = gantry(plate_sipper_config).reservoirs[1]
+    assert tuple(probes.a1_xy_mm) == (8.8, 1.3) and probes.dip_z_mm == 49.0
+    assert gantry(plate_sipper_config).travel_z_mm == 7.2
+
+
 def test_teaching_changes_the_live_placement_and_the_config_together(plate_sipper_config, sipper):
     """Codex finding 11: a taught A1 is where the next go-to-well goes,
     and what save_config will write."""
@@ -300,3 +315,180 @@ def test_without_the_witness_a_plate_reload_waits_for_a_retracted_tip(plate_sipp
     manual.retract()
     manual.refill("all")
     assert not devices.reservoirs.undeclared
+
+
+# --- loaded volumes: the config file and the volume tracker together ---
+
+@pytest.fixture
+def sipper_on_file(plate_sipper_config_on_file, instant_devices):
+    """(config, devices, manual) over a copy of the sipper sample, so the
+    verb's save lands in the test's tmp_path."""
+    devices = instant_devices(plate_sipper_config_on_file)
+    return plate_sipper_config_on_file, devices, ManualOperations(devices)
+
+
+def _agree(config, devices):
+    """The time-zero gate's twin is built from the config and restored from
+    the live volume tracker, so the two must define the same volumes."""
+    return reservoir_definitions(config) == devices.reservoirs.snapshot()["definitions"]
+
+
+def test_a_plate_name_sets_every_well_of_it_in_the_file_and_the_tracker(sipper_on_file):
+    config, devices, manual = sipper_on_file
+    manual.set_loaded_volume(["probes"], 350)
+    tracker = devices.reservoirs
+    assert {tracker.loaded(key) for key in tracker.tracked if key.startswith("probes/")} == {350}
+    assert len([key for key in tracker.tracked if key.startswith("probes/")]) == 96
+    assert tracker.loaded("ssct/A1") == 1800, "the other plate is not touched"
+    assert gantry(load_config(config.source_path)).reservoirs[1].loaded_ul == 350
+    assert _agree(config, devices)
+    assert reservoir_definitions(load_config(config.source_path)) == reservoir_definitions(config)
+
+
+def test_a_selection_of_a_whole_plate_is_the_plate_and_a_few_wells_are_overrides(sipper_on_file):
+    """The file says a whole plate once; the bottle in the same selection is
+    tracked from then on."""
+    config, devices, manual = sipper_on_file
+    every = [f"probes/{well}" for well in gantry(config).reservoirs[1].geometry.wells()]
+    manual.set_loaded_volume(every, 200)
+    probes = gantry(load_config(config.source_path)).reservoirs[1]
+    assert (probes.loaded_ul, probes.loaded_ul_by_well) == (200, None)
+    manual.set_loaded_volume(["ssct/A1", "ssct/B1", "port_26"], 1000)
+    reloaded = load_config(config.source_path)
+    assert gantry(reloaded).reservoirs[2].loaded_ul_by_well == {"A1": 1000, "B1": 1000}
+    assert reloaded.reagent_selection.selector_valves.loaded_volume_ul == {
+        "port_25": 500000, "port_26": 1000}
+    assert devices.reservoirs.loaded("port_26") == 1000
+    assert devices.reservoirs.undeclared == ["port_26"], "newly tracked: a reset declares it"
+    assert _agree(config, devices)
+
+
+def test_the_dedicated_wells_must_hold_the_sippers_line(sipper_on_file):
+    """Priming and clean-up each draw the sipper's line full from their
+    well: set_dedicated_well's rule holds as the volume moves, for the well
+    and for its plate, before anything changes."""
+    config, devices, manual = sipper_on_file
+    before = open(config.source_path, encoding="utf-8").read()
+    for keys, ul, said in ((["ssct/H11"], 249, "ssct/H11 is the priming well"),
+                           (["ssct/H12"], 100, "ssct/H12 is the clean-up well"),
+                           (["ssct"], 100, "ssct/H11 is the priming well")):
+        with pytest.raises(ValueError, match=f"{said}: it must hold at least the 250 uL the "
+                                             "sipper's line takes to prime"):
+            manual.set_loaded_volume(keys, ul)
+        assert manual.loaded_volume_refusal(keys, ul).startswith(said)
+        assert manual.loaded_volume_refusal(keys) is None, "the keys alone are fine"
+    assert open(config.source_path, encoding="utf-8").read() == before
+    assert devices.reservoirs.loaded("ssct/H11") == 1800 and _agree(config, devices)
+    manual.set_loaded_volume(["ssct/H11"], 250)           # the line itself is enough
+    assert devices.reservoirs.loaded("ssct/H11") == 250
+
+
+@pytest.mark.parametrize("key, said", [
+    ("port_1", "port_1 is the sipper's port, not a bottle"),
+    ("water", "water names no tracked reservoir or plumbed bottle on this rig"),
+    ("probes/Z9", "probes/Z9 names no tracked reservoir or plumbed bottle on this rig"),
+    ("port_2", "port_2 names no tracked reservoir or plumbed bottle on this rig"),
+])
+def test_a_key_that_names_no_reservoir_is_refused_before_any_value(sipper_on_file, key, said):
+    config, devices, manual = sipper_on_file
+    assert manual.loaded_volume_refusal([key]).startswith(said)
+    with pytest.raises(ValueError, match=said):
+        manual.set_loaded_volume(["probes/A1", key], 500)
+    assert devices.reservoirs.loaded("probes/A1") == 110
+    assert gantry(load_config(config.source_path)).reservoirs[1].loaded_ul_by_well is None
+
+
+def test_a_failed_config_save_changes_nothing(sipper_on_file, monkeypatch):
+    """The config file is written before the volume tracker: a save that
+    fails leaves the tracker and the live config as they were."""
+    import fluidics.control.config as config_module
+    config, devices, manual = sipper_on_file
+
+    def refuse(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(config_module, "save_config", refuse)
+    with pytest.raises(OSError, match="disk full"):
+        manual.set_loaded_volume(["probes"], 350)
+    assert devices.reservoirs.loaded("probes/A1") == 110
+    assert gantry(config).reservoirs[1].loaded_ul == 110
+    assert _agree(config, devices)
+
+
+def test_a_failed_volume_tracking_write_keeps_the_session_on_the_old_volume(sipper_on_file, monkeypatch):
+    """The file has the new volume, but this session's config and volume
+    tracker both keep the old one, so the gate and the pump read one figure,
+    and the message says what the next launch does."""
+    config, devices, manual = sipper_on_file
+    tracker = devices.reservoirs
+
+    def refuse():
+        raise OSError("disk full")
+
+    monkeypatch.setattr(tracker, "_write", refuse)
+    with pytest.raises(ReservoirWriteError, match="next launch brings it up undeclared"):
+        manual.set_loaded_volume(["probes"], 350)
+    assert tracker.loaded("probes/A1") == 110
+    assert gantry(config).reservoirs[1].loaded_ul == 110
+    assert _agree(config, devices)
+    assert gantry(load_config(config.source_path)).reservoirs[1].loaded_ul == 350
+
+
+@pytest.mark.parametrize("volume", [0, -5, 1.5, True, "350"],
+                         ids=["zero", "negative", "fraction", "bool", "text"])
+def test_a_volume_that_is_not_a_whole_number_above_0_is_refused(sipper_on_file, volume):
+    """Refused by the verb itself, naming the reservoirs, before the file or
+    the tracker changes: without it 1.5 would be set as 1."""
+    config, devices, manual = sipper_on_file
+    with open(config.source_path, "rb") as f:
+        before = f.read()
+    said = manual.loaded_volume_refusal(["probes"], volume)
+    assert said.startswith(f"every well of probes: {volume!r} uL is not a loaded volume"), said
+    with pytest.raises(ValueError, match="is not a loaded volume"):
+        manual.set_loaded_volume(["probes"], volume)
+    with open(config.source_path, "rb") as f:
+        assert f.read() == before
+    assert devices.reservoirs.loaded("probes/A1") == 110
+
+
+def test_an_empty_selection_is_refused(sipper_on_file):
+    _, _, manual = sipper_on_file
+    with pytest.raises(ValueError, match="no reservoir named"):
+        manual.set_loaded_volume([], 100)
+
+
+def test_a_bottle_that_becomes_tracked_is_undeclared_until_its_reset(sipper_on_file):
+    """What a bottle gave before it was tracked is not known: a reset
+    declares it, as for a volume added to the config file."""
+    config, devices, manual = sipper_on_file
+    manual.set_loaded_volume(["port_26"], 50000)
+    tracker = devices.reservoirs
+    assert "port_26" in tracker.tracked and tracker.undeclared == ["port_26"]
+    manual.refill("port_26")
+    assert tracker.undeclared == [] and tracker.remaining("port_26") == 50000
+    assert _agree(config, devices)
+
+
+def test_a_volume_below_what_a_well_has_given_is_refused(sipper_on_file):
+    config, devices, manual = sipper_on_file
+    manual.go_to_well("probes/A1")
+    manual.open_port(1)
+    manual.extract(2, 100, 1000)
+    with pytest.raises(ValueError, match="probes/A1 has given 100 uL since its last reset"):
+        manual.set_loaded_volume(["probes"], 50)
+    assert gantry(load_config(config.source_path)).reservoirs[1].loaded_ul == 110
+    manual.set_loaded_volume(["probes"], 150)
+    assert devices.reservoirs.remaining("probes/A1") == 50, "accumulated stands"
+
+
+def test_the_time_zero_gate_reads_the_new_volume(plate_sipper_config_on_file, make_system):
+    """A run that overdraws ssct/A1 at 1800 fits at 2500: the gate's twin,
+    built from the config, reads what the live volume tracker does."""
+    system = make_system(plate_sipper_config_on_file)
+    wash = {"type": "flow_reagent", "fluidic_port": 1, "well": "ssct/A1", "flow_rate": 5000,
+            "volume": 1000, "dip_cycles": 3}
+    plan = system.plan([HYB, PUSH, wash, dict(wash, name="wash2")])
+    with pytest.raises(ReservoirShortfall, match="ssct/A1"):
+        system.check_reservoirs(plan)
+    system.manual.set_loaded_volume(["ssct/A1"], 2500)
+    assert ("ssct/A1", 2490, 10) in system.check_reservoirs(plan)

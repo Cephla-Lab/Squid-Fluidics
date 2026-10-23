@@ -30,24 +30,29 @@ from fluidics.control.controller import FluidControllerSimulation
 from fluidics.control.syringe_pump import SyringePumpSimulation
 from fluidics.errors import DeviceError
 from fluidics.robot.labware import well_key
-from fluidics.robot.stage import LIMIT_SWITCH_ALARM, TOLERANCE_MM, _label
+from fluidics.robot.stage import LIMIT_SWITCH_ALARM, SETTLE_BUDGET_S, TOLERANCE_MM, _label
 from fluidics.run_log import configure_console
 from fluidics.system import FluidicsSystem
 from fluidics.vocabulary import sipper_vocabulary
 
-DRIVE_TOLERANCE_MM = 0.076     # the driver's own end-of-move check: 1000 counts at 13107.2 counts/mm
+# The driver's own end-of-move check, 20 x the position window (6067h): about 1 mm
+# with the window at TOLERANCE_MM, as the adapter sets it at connect.
+DRIVE_TOLERANCE_MM = 1.0
 
 CHECKLIST = f"""\
 Checklist -- watch for these as the script runs:
- 1. Homing: Z goes UP first, then X and Y. Each axis then reads 0.5 mm: the
+ 1. Homing: Z goes UP first, then X and Y together. Each axis then reads 0.5 mm: the
     drives park 0.1 to 0.5 mm past the switch and the stage moves each axis to
     its stroke's start, which is why the travel height is 1 mm or more.
  2. Settle: after each move, every axis's settle error (drive reading less
-    target). The stage fails a move that ends more than {TOLERANCE_MM} mm off;
-    the driver's own wait (unused here) allows {DRIVE_TOLERANCE_MM} mm. A move that fails with
+    target). The stage fails a move that ends more than {TOLERANCE_MM} mm off, and
+    each drive reports target reached only inside that too (its position window,
+    6067h, is set to it at connect). A short move can take seconds to settle:
+    the stage allows {SETTLE_BUDGET_S:g} s past the travel. Note the axis and the
+    figures of any move that fails with
+      "axis <axis>: move to <T> mm did not complete in time"
+    or
       "axis <axis>: move to <T> mm ended at <P> mm (a limit switch?)"
-    with P within {DRIVE_TOLERANCE_MM} mm of T is that gap, not a switch: note the axis
-    and both figures.
  3. A limit stop is never provoked here. If one happens, the drive raises
     alarm 0x{LIMIT_SWITCH_ALARM:04X} and the move fails with
       "axis <axis>: move to <T> mm stopped by a limit switch at <P> mm"

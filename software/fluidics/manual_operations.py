@@ -14,9 +14,12 @@ way it stops a run.
 """
 
 import logging
+import numbers
 
-from .control.config import gantry
-from .robot.labware import agitation_problem, plate_of, unknown_reservoir, well_key
+from .control.config import assign_loaded_volumes, gantry, port_key, save_loaded_volumes
+from .errors import ReservoirWriteError
+from .reservoirs import bottle_keys, describe_keys
+from .robot.labware import WellRef, agitation_problem, plate_of, ref_of, unknown_reservoir, well_key
 from .robot.stage import MIN_TRAVEL_Z_MM
 from .vocabulary import sipper_vocabulary
 
@@ -27,6 +30,13 @@ _logger = logging.getLogger(__name__)
 DEDICATED_WELLS = {"priming": "priming_well", "clean-up": "clean_up_well"}
 
 
+def _taught(mm):
+    """A taught position, to 0.01 mm: what a position is taught to (the stage
+    accepts 0.05 mm), and what the config file then reads -- 7.2, not the
+    7.200000000000003 that 0.1 mm jogs add up to."""
+    return round(float(mm), 2)
+
+
 class ManualOperations:
     def __init__(self, devices):
         self.sp = devices.syringe_pump
@@ -34,6 +44,7 @@ class ManualOperations:
         self.dp = devices.disc_pump
         self.robot = devices.robot
         self.reservoirs = devices.reservoirs
+        self._config = devices.config
         g = gantry(devices.config)
         self._gantry = g
         self._sipper_port = g.selector_valve_port if devices.robot is not None else None
@@ -168,7 +179,7 @@ class ManualOperations:
         writes. The current well is forgotten: the wells moved."""
         self._need_robot()
         r = self._reservoir_config(name)
-        xy = (float(xy_mm[0]), float(xy_mm[1]))
+        xy = (_taught(xy_mm[0]), _taught(xy_mm[1]))
         placement = self._vocabulary.placement(name)
         placement.a1_xy_mm = xy
         self.robot.set_placement(name, placement)
@@ -178,7 +189,7 @@ class ManualOperations:
     def teach_dip(self, name, z_mm):
         self._need_robot()
         r = self._reservoir_config(name)
-        z = float(z_mm)
+        z = _taught(z_mm)
         problem = agitation_problem(name, z, self._gantry.agitate_amplitude_mm, self._gantry.travel_z_mm)
         if problem is not None:
             raise ValueError(problem)
@@ -190,7 +201,7 @@ class ManualOperations:
 
     def teach_travel(self, z_mm):
         self._need_robot()
-        z = float(z_mm)
+        z = _taught(z_mm)
         if z < MIN_TRAVEL_Z_MM:
             # Home, then "Set travel height here", would teach where homing
             # parked Z; the next homing that parks Z lower refuses it.
@@ -259,6 +270,105 @@ class ManualOperations:
             return ("the sipper's tip is not known to be retracted: "
                     f"Retract before reloading {key}")
         return None
+
+    def set_loaded_volume(self, keys, ul):
+        """Every reservoir `keys` names -- bottles (`port_N`), wells
+        (`plate/well`), or a plate's name for every well of it -- holds `ul`
+        when loaded from now on: written to the config file's volume fields
+        and nothing else of the config, then to the volume tracker, whose
+        figures the next draw and the time-zero gate read. What each has
+        given since its last reset stands and whether it is declared does
+        not change (a bottle that becomes tracked comes in undeclared), so
+        reloading with a new volume is this, then a reset.
+        Refused before anything changes for what loaded_volume_refusal
+        names. No tip rule: a number changes, no plate moves."""
+        changes, volumes = self._loaded_volume_change(keys, ul)
+        # The config file first, the live config last. If the volume
+        # tracking write fails between them, the file has the new volume
+        # while this session's config and volume tracker both keep the old
+        # one, so the time-zero gate (whose twin is built from the config)
+        # and the pump still read one figure; the next launch finds the
+        # config's definition differing from the volume tracking file's and
+        # brings that reservoir up undeclared until it is reset.
+        save_loaded_volumes(self._config, changes)
+        try:
+            self.reservoirs.set_loaded(volumes)
+        except ReservoirWriteError as e:
+            raise ReservoirWriteError(
+                f"{e}. The config file has the new volume already: this session keeps the "
+                "old one, and the next launch brings it up undeclared until it is reset") from e
+        assign_loaded_volumes(self._config, changes)
+
+    def loaded_volume_refusal(self, keys, ul=None):
+        """Why set_loaded_volume(keys, ul) would be refused, or None: the
+        one statement of its rules, which the Reservoirs window asks before
+        its dialog, with ul None for what the keys alone decide (a key that
+        names no tracked reservoir or plumbed bottle), and again with the
+        value before it starts the job: a volume that is not a whole number
+        of uL above 0, the priming or the clean-up well set below what the
+        sipper's line takes to prime, a volume below what a reservoir has
+        given since its last reset."""
+        try:
+            self._loaded_volume_change(keys, ul)
+        except ValueError as e:
+            return str(e)
+        return None
+
+    def _loaded_volume_change(self, keys, ul):
+        """(changes, volumes) for set_loaded_volume: the config's {plate,
+        well or bottle: uL}, a plate every one of whose wells is among
+        `keys` given as the plate, so the file says it once; and the volume
+        tracker's {key: uL}, every well by its own key. ValueError naming
+        the refusal; with ul None, the keys are checked and (None, None)
+        returned."""
+        if not keys:
+            raise ValueError("no reservoir named: pick a bottle, a well or a plate")
+        plates = self._vocabulary.reservoirs if self._vocabulary is not None else {}
+        plumbed = set(bottle_keys(self._config))
+        chosen, bottles = {}, []         # plate -> its wells named; bottle keys
+        for key in keys:
+            ref = ref_of(key) if isinstance(key, str) else None
+            if isinstance(key, str) and key in plates:
+                chosen.setdefault(key, set()).update(plates[key].geometry.wells())
+            elif ref is not None and ref.reservoir in plates and plates[ref.reservoir].geometry.is_well(ref.well):
+                chosen.setdefault(ref.reservoir, set()).add(ref.well)
+            elif key in plumbed:
+                bottles.append(key)
+            elif self._gantry is not None and key == port_key(self._gantry.selector_valve_port):
+                raise ValueError(f"{key} is the sipper's port, not a bottle: its wells are set "
+                                 "by well or by plate")
+            else:
+                raise ValueError(f"{key} names no tracked reservoir or plumbed bottle on this rig")
+        if ul is None:
+            return None, None
+        by_plate = {name: [well for well in plates[name].geometry.wells() if well in wells]
+                    for name, wells in chosen.items()}
+        named = [well_key(WellRef(name, well)) for name, wells in by_plate.items()
+                 for well in wells] + bottles
+        if isinstance(ul, bool) or not isinstance(ul, numbers.Integral) or ul <= 0:
+            raise ValueError(f"{describe_keys(named, self.reservoirs.tracked)}: {ul!r} uL is not "
+                             "a loaded volume (a whole number of uL above 0)")
+        ul = int(ul)
+        volumes = dict.fromkeys(named, ul)
+        changes = dict.fromkeys(bottles, ul)
+        for name, wells in by_plate.items():
+            if len(wells) == len(plates[name].geometry.wells()):
+                changes[name] = ul
+            else:
+                changes.update((well_key(WellRef(name, well)), ul) for well in wells)
+        if self._gantry is not None:
+            # Priming and clean-up each draw the sipper's line full from
+            # their well: set_dedicated_well's rule, kept as the volume moves.
+            need = self.sv.get_tubing_fluid_amount_to_port(self._gantry.selector_valve_port)
+            for role, field in DEDICATED_WELLS.items():
+                well = well_key(self._vocabulary.resolve(getattr(self._gantry, field)))
+                if well in volumes and ul < need:
+                    raise ValueError(f"{well} is the {role} well: it must hold at least the "
+                                     f"{need} uL the sipper's line takes to prime")
+        refusal = self.reservoirs.loaded_refusal(volumes)
+        if refusal:
+            raise ValueError(refusal)
+        return changes, volumes
 
     def _move(self, op, args, flow_rate_ul_min, on_started):
         """One syringe move: a fresh queue, the op, then the wait.

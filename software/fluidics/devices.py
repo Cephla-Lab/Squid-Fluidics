@@ -198,6 +198,8 @@ def _build_robot(config, simulation, run_control, instant):
     vocabulary = sipper_vocabulary(config)
     names = dict(g.axes)
     if simulation:
+        # No homing speeds: the simulated service homes in a set number of
+        # polls, and homing time is part of no estimate.
         from .robot.simulation import XYG321A_STROKES_MM, SimulatedService
         strokes = {name: XYG321A_STROKES_MM.get(name, (0.0, 300.0)) for name in names.values()}
         service = SimulatedService(names.values(), strokes, instant=instant)
@@ -205,7 +207,9 @@ def _build_robot(config, simulation, run_control, instant):
         from .robot._driver import open_service          # the one import site
         from .control.discovery import find_serial_port
         port = g.port or find_serial_port(g.serial_number, "RS-485 adapter")
-        service, names = open_service(port, g.baudrate, names)
+        service, names = open_service(port, g.baudrate, names,
+                                      homing_velocity_mm_s=g.homing_velocity_mm_s,
+                                      homing_acceleration_mm_s2=g.homing_acceleration_mm_s2)
     stage = XYZStage(service, names, g.travel_z_mm, g.xy_velocity_mm_s,
                      g.z_velocity_mm_s, run_control,
                      poll_seconds=0.0 if instant else POLL_SECONDS)

@@ -39,7 +39,6 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 # The shipped sample configs. The plate sipper's config is read from here,
 # not from a fixture copy: one rig definition, so the suite cannot pass on
 # numbers the documented sample no longer has.
-SAMPLE_CONFIG_DIR = Path(__file__).parent.parent / "sample_config"
 
 
 # The two sequences the editor suites are built from: one fluidic row with
@@ -398,7 +397,19 @@ def driver_or_skip(require_axes=("X1", "Y2", "Z3")):
 @pytest.fixture
 def plate_sipper_config():
     from fluidics.control.config import load_config
-    return load_config(str(SAMPLE_CONFIG_DIR / "plate_sipper_config.yaml"))
+    return load_config(str(FIXTURES_DIR / "plate_sipper_config.yaml"))
+
+
+@pytest.fixture
+def plate_sipper_config_on_file(tmp_path):
+    """The sipper sample loaded from a byte-for-byte copy in the test's
+    tmp_path: for a test whose verb saves the config (a loaded volume
+    set), so the save lands in the copy, never in the shipped sample."""
+    import shutil
+    from fluidics.control.config import load_config
+    path = tmp_path / "plate_sipper_config.yaml"
+    shutil.copy(FIXTURES_DIR / "plate_sipper_config.yaml", path)
+    return load_config(str(path))
 
 
 @pytest.fixture

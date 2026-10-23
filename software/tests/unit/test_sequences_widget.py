@@ -361,6 +361,40 @@ class TestLiveValidation:
         widget._renderRunControls()
         assert widget.moveUpButton.isEnabled()
 
+    def test_the_rows_are_read_only_while_a_job_runs_and_come_back(self, widget):
+        """A run executes the rows as they were when Run was pressed, so an
+        edit under it would show and never run: names, checkboxes and field
+        values are read-only while a job rides the list, an editor left open
+        commits nothing, and all of it comes back when the rig is idle."""
+        from qtpy.QtWidgets import QAbstractItemView
+        widget.setSequences([FLOW, TEMP])
+        top, volume = widget.tree.topLevelItem(0), field_item(widget, 0, "volume")
+        before = widget._model[0]["volume"]
+        widget.session.kind = "run"
+        widget._renderRunControls()
+        assert not top.flags() & (Qt.ItemIsUserCheckable | Qt.ItemIsEditable)
+        assert not volume.flags() & Qt.ItemIsEditable
+        widget._onItemDoubleClicked(volume, 1)
+        assert widget.tree.state() != QAbstractItemView.EditingState
+        volume.setText(1, "999")                     # what an editor left open commits
+        assert widget._model[0]["volume"] == before and volume.text(1) == str(before)
+        top.setCheckState(0, Qt.Unchecked)
+        assert widget._model[0].get("include", True) and top.checkState(0) == Qt.Checked
+        widget.session.kind = None
+        widget._renderRunControls()
+        assert top.flags() & Qt.ItemIsUserCheckable and volume.flags() & Qt.ItemIsEditable
+        volume.setText(1, "750")
+        assert widget.getSequences()[0]["volume"] == 750
+
+    def test_a_list_loaded_while_locked_renders_locked(self, widget):
+        """The lock is a property of the rows, not of the items present when
+        it was set: a render under it (a resume's list, a structural refresh)
+        comes out read-only too."""
+        widget.session.kind = "run"
+        widget._renderRunControls()
+        widget.setSequences([FLOW])
+        assert not field_item(widget, 0, "volume").flags() & Qt.ItemIsEditable
+
     def test_an_unchecked_invalid_row_blocks_nothing(self, widget):
         """A run takes only the checked rows; a broken row left unchecked
         must not hold the valid ones hostage."""

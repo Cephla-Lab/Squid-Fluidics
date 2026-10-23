@@ -183,6 +183,12 @@ class GantryConfig(_StrictModel):
     travel_z_mm: float = Field(ge=MIN_TRAVEL_Z_MM)      # homing parks Z up to 0.5 mm past 0
     xy_velocity_mm_s: float = Field(gt=0)
     z_velocity_mm_s: float = Field(gt=0)
+    # The switch search speed and the homing acceleration on every axis (the
+    # driver's homing_velocity_high and homing_acceleration); None keeps the
+    # driver's own per-axis values. The final approach speed stays the
+    # driver's: it decides where homing ends.
+    homing_velocity_mm_s: Optional[float] = Field(default=None, gt=0)
+    homing_acceleration_mm_s2: Optional[float] = Field(default=None, gt=0)
     default_reservoir: str
     reservoirs: Dict[int, ReservoirConfig]
     priming_well: str
@@ -455,6 +461,86 @@ def save_config(config: FluidicsConfig, config_path: str = None) -> str:
     return config_path
 
 
+def save_loaded_volumes(config: FluidicsConfig, changes) -> None:
+    """Write what reservoirs hold when loaded to `config`'s file, and
+    nothing else: `changes` is {key: uL}, a key a plate's name (every well
+    of it), a well (`plate/well`) or a bottle (`port_N`, a plumbed port, not
+    the sipper's). The file is read fresh, changed and saved, rather than
+    `config` saved, because every assignment made to `config` since load
+    rides along with save_config -- teaching the Teach window has not saved
+    yet among them, and a volume set must not save that. `config` itself is
+    not changed: assign_loaded_volumes does that, once the volume tracker
+    has taken the change, so the two never disagree. A config built in
+    memory has no file, and nothing is written. ValueError, before the file
+    is touched, for a key the config cannot place or a volume that is not a
+    whole number of uL above 0."""
+    _place_loaded_volumes(config, changes)     # refused before the file is touched
+    if config.source_path is not None:
+        fresh = load_config(config.source_path)
+        assign_loaded_volumes(fresh, changes)
+        save_config(fresh)
+
+
+def _place_loaded_volumes(config, changes):
+    """(plates, bottles, whole, wells) for save_loaded_volumes' `changes`
+    in `config`: its plates by name, then {bottle key: uL}, {plate name:
+    uL} and {plate name: {well: uL}}; ValueError for a key it cannot place
+    or a volume that is not one."""
+    g = gantry(config)
+    plates = {} if g is None else {r.name: r for r in g.reservoirs.values()}
+    sipper = None if g is None else g.selector_valve_port
+    bottle_keys = {port_key(port) for port in available_ports(config) if port != sipper}
+    bottles, whole, wells = {}, {}, {}
+    for key, ul in changes.items():
+        if isinstance(ul, bool) or not isinstance(ul, int) or ul <= 0:
+            raise ValueError(f"{key}: {ul!r} uL is not a loaded volume (a whole number of uL above 0)")
+        plate, slash, well = key.partition("/")
+        if not slash and plate in plates:
+            whole[plate] = ul
+        elif slash and plate in plates and plates[plate].geometry.is_well(well):
+            wells.setdefault(plate, {})[well] = ul
+        elif key in bottle_keys:
+            bottles[key] = ul
+        else:
+            raise ValueError(f"{key} names no plate, well or plumbed bottle in this config")
+    return plates, bottles, whole, wells
+
+
+def assign_loaded_volumes(config, changes):
+    """Assign `changes` (save_loaded_volumes' shape) to `config`'s volume
+    fields, every key placed before anything is assigned. A plate's volume is its loaded_ul, its
+    overrides dropped; a well's is an override, dropped where it equals
+    the plate's loaded_ul; a bottle's is its loaded_volume_ul entry. Each
+    field is assigned a new value, never changed in place: save_config
+    writes only what was assigned."""
+    plates, bottles, whole, wells = _place_loaded_volumes(config, changes)
+    sv = config.reagent_selection.selector_valves
+    if bottles:
+        sv.loaded_volume_ul = {**(sv.loaded_volume_ul or {}), **bottles}
+    for name, ul in whole.items():
+        plates[name].loaded_ul = ul
+        _set_overrides(plates[name], {})
+    for name, by_well in wells.items():
+        r = plates[name]
+        overrides = dict(r.loaded_ul_by_well or {})
+        for well, ul in by_well.items():
+            if ul == r.loaded_ul:
+                overrides.pop(well, None)       # the plate's own volume: no override
+            else:
+                overrides[well] = ul
+        _set_overrides(r, overrides)
+
+
+def _set_overrides(reservoir, overrides):
+    if overrides:
+        reservoir.loaded_ul_by_well = overrides
+    else:
+        # None and unset again, so the dump leaves it out and the save
+        # takes the key out of the file, rather than a `null` left behind.
+        reservoir.loaded_ul_by_well = None
+        reservoir.model_fields_set.discard("loaded_ul_by_well")
+
+
 def _update_yaml_node(node, values):
     """Overwrite `node` (a ruamel mapping) with `values`, key by key,
     recursing into mappings so keys keep the comments attached to them.
@@ -462,8 +548,9 @@ def _update_yaml_node(node, values):
     text (quoting included) is authoritative for what was not edited, so a
     quoted `monitor: "off"` cannot come back as a bare YAML boolean."""
     # A key gone from a dict-valued field leaves the file: this is how a
-    # cleared port name leaves name_mapping. (Model fields themselves cannot
-    # disappear -- extra="forbid" means an unknown file key never loads.)
+    # cleared port name leaves name_mapping. A model field leaves it the
+    # same way only once it is unset again (an emptied loaded_ul_by_well):
+    # extra="forbid" means an unknown file key never loads.
     for key in [k for k in node if k not in values]:
         del node[key]
     for key, value in values.items():

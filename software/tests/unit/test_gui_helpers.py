@@ -492,6 +492,9 @@ def run_widget(paused=False, at_rest=False, total_time=100, elapsed=0):
     # A static method needs no stub of its own; a valid list blocks nothing.
     stub.__dict__["_pauseSuffix"] = gui.SequencesWidget._pauseSuffix
     stub.__dict__["_blockingError"] = lambda: None
+    # The rows' lock acts on the tree, which the stub has none of: tested
+    # on the real widget (test_sequences_widget).
+    stub.__dict__["_lockRows"] = lambda locked: None
     return stub
 
 

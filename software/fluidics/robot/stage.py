@@ -48,7 +48,8 @@ LIMIT_SWITCH_ALARM = 0x8614   # 603Fh while a limit switch holds the axis (NiMot
 # After homing attained the axis is still creeping (nm-servo #14 measured 50-90 um over up
 # to 4 s on X1). The driver's blocking home() waits until the position stays within the
 # drive's target window of a reference for 0.3 s, giving up after 5 s; the stage's polled
-# homing does the same with its own tolerance as the window.
+# homing does the same with its own tolerance as the window. A leg allows the same 5 s
+# past its travel for the settling at the end of a move.
 SETTLE_WINDOW_MM = TOLERANCE_MM
 SETTLE_HOLD_S = 0.3
 SETTLE_BUDGET_S = 5.0
@@ -85,11 +86,12 @@ class XYZStage:
             self._service.enable(axis)
 
     def home(self):
-        """Z first, to the retracted end; X and Y only once Z is up. Ends
-        with every axis read, so the position is known from here on."""
+        """Z first, to the retracted end; then X and Y together, only once
+        Z is up. Ends with every axis read, so the position is known from
+        here on."""
         self._homed = False
         self._position = None
-        self._home_axis(self._z)
+        self._home_axes([self._z])
         z = self._service.read(self._z).position_mm
         if z > self.travel_z_mm + TOLERANCE_MM:
             raise DeviceError(f"axis {_label(self._z)} homed to {z:.2f} mm, below travel height "
@@ -97,8 +99,7 @@ class XYZStage:
                               "(check the homing method) or the travel height is above where "
                               "homing parks (the drives park 0.1 to 0.5 mm past 0: set "
                               f"travel_z_mm to {MIN_TRAVEL_Z_MM:g} mm or more)")
-        for axis in (self._x, self._y):
-            self._home_axis(axis)
+        self._home_axes([self._x, self._y])
         self._refresh_position()
         self._homed = True
         self._clear_switches()
@@ -119,35 +120,56 @@ class XYZStage:
         if x < low[self._x] or y < low[self._y]:
             self.move_xy(max(x, low[self._x]), max(y, low[self._y]))
 
-    def _home_axis(self, axis):
-        """The drive's homing protocol, polled: the attained bit may read
-        stale from the last homing, so it must clear (the axis has started)
-        before it counts, and it counts only in homing mode; a fault ends
-        it; the error bit is read only once the homing has started (before
-        that it is the previous mode's following-error bit)."""
+    def _home_axes(self, axes):
+        """Home `axes` together: each dispatched, then all polled until
+        every one has attained, each under the drive's homing protocol. The
+        attained bit may read stale from the last homing, so it must clear
+        (the axis has started) before it counts, and it counts only in
+        homing mode; a fault ends it; the error bit is read only once the
+        homing has started (before that it is the previous mode's
+        following-error bit); each axis has its own deadline. An axis that
+        has attained is still read for a fault until the others have, as a
+        leg watches an axis that arrived first. Any early end halts every
+        axis that may have started, re-reads the position, and goes on
+        raising."""
         self._control.checkpoint()
-        started = False
+        dispatched = []
         try:
-            self._service.home(axis)
-            deadline = time.monotonic() + self._service.homing_timeout_s(axis)
-            while True:
+            deadlines = {}
+            for axis in axes:
+                dispatched.append(axis)   # before the call: a dispatch that raises may have started the drive
+                self._service.home(axis)
+                deadlines[axis] = time.monotonic() + self._service.homing_timeout_s(axis)
+            started, attained = set(), set()
+            while len(attained) < len(axes):
                 self._control.sleep(self._poll)
-                reading = self._service.homing_state(axis)
-                if reading.fault:
-                    raise DeviceError(f"axis {_label(axis)}: drive fault during homing")
-                if not started:
-                    if not reading.attained:
-                        started = True
-                elif reading.error:
-                    raise DeviceError(f"axis {_label(axis)}: homing error")
-                elif reading.attained and reading.homing_mode:
-                    self._settle_after_homing(axis)
-                    return
-                if time.monotonic() > deadline:
-                    raise DeviceError(f"axis {_label(axis)}: homing did not complete in "
-                                      f"{self._service.homing_timeout_s(axis):.0f} s")
+                for axis in axes:
+                    reading = self._service.homing_state(axis)
+                    if reading.fault:
+                        raise DeviceError(f"axis {_label(axis)}: drive fault during homing")
+                    if axis in attained:
+                        continue
+                    if axis not in started:
+                        if not reading.attained:
+                            started.add(axis)
+                    elif reading.error:
+                        raise DeviceError(f"axis {_label(axis)}: homing error")
+                    elif reading.attained and reading.homing_mode:
+                        attained.add(axis)
+                        continue
+                    if time.monotonic() > deadlines[axis]:
+                        raise DeviceError(f"axis {_label(axis)}: homing did not complete in "
+                                          f"{self._service.homing_timeout_s(axis):.0f} s")
+            # Settled once every axis has attained, not each as it attains: a
+            # settle reads only its own axis, for up to SETTLE_BUDGET_S, and
+            # run while another axis still homed it would leave that axis's
+            # fault, error and deadline unread. Waiting costs little: the axis
+            # that attains first comes to rest while the other still homes, so
+            # its settle then ends in one hold.
+            for axis in axes:
+                self._settle_after_homing(axis)
         except BaseException as cause:
-            self._end_early([axis], cause)
+            self._end_early(dispatched, cause)
             raise
 
     def _settle_after_homing(self, axis):
@@ -336,9 +358,14 @@ class XYZStage:
             for axis, (target, velocity) in targets.items():
                 started.append(axis)   # before the call: a dispatch that raises may have moved the drive
                 self._service.move_to(target, velocity, axis)
-            deadline = time.monotonic() + 2 * longest + 1.0
+            # Twice the travel time, then SETTLE_BUDGET_S: a short move's time
+            # is its settling (nm-servo #14 measured up to 4 s on X1; on the
+            # bench, 2026-10-22, X1 overshot a 0.5 mm move by 62 um and crept
+            # back at about 10 um/s).
+            deadline = time.monotonic() + 2 * longest + SETTLE_BUDGET_S
             pending = dict(targets)
             in_flight = set()          # axes seen with the bit clear: the move has started
+            off = {}                   # in-flight axes last read reached off target: where
             while pending:
                 self._control.sleep(self._poll)
                 for axis, (target, _) in targets.items():
@@ -350,6 +377,7 @@ class XYZStage:
                         continue       # arrived, and still watched until the leg ends
                     if not reading.target_reached:
                         in_flight.add(axis)
+                        off.pop(axis, None)
                     elif reading.on_limit:
                         # Reached with a limit input (60FDh) active: a switch's
                         # span, or a target on the switch. Not a completed move,
@@ -359,8 +387,18 @@ class XYZStage:
                     elif abs(reading.position_mm - target) <= TOLERANCE_MM:
                         del pending[axis]
                     elif axis in in_flight:
-                        raise DeviceError(f"axis {_label(axis)}: move to {target:.2f} mm ended at "
-                                          f"{reading.position_mm:.2f} mm (a limit switch?)")
+                        # Reached, off target. The drive's window is
+                        # TOLERANCE_MM wide, and the status word and the
+                        # position are separate requests: an overshoot can
+                        # read reached on its way through the window and the
+                        # position, a moment later, past it. Only a second
+                        # such reading, the axis at rest where the first left
+                        # it, is a move that ended off target.
+                        last = off.get(axis)
+                        if last is not None and abs(reading.position_mm - last) <= TOLERANCE_MM:
+                            raise DeviceError(f"axis {_label(axis)}: move to {target:.2f} mm ended at "
+                                              f"{reading.position_mm:.2f} mm (a limit switch?)")
+                        off[axis] = reading.position_mm
                 if pending and time.monotonic() > deadline:
                     axis = next(iter(pending))
                     raise DeviceError(f"axis {_label(axis)}: move to {pending[axis][0]:.2f} mm "

@@ -12,6 +12,8 @@ from fluidics.control.config import (
     SelectorValvesConfig,
     load_config,
     save_config,
+    assign_loaded_volumes,
+    save_loaded_volumes,
     convert_legacy_config,
 )
 
@@ -509,10 +511,10 @@ import copy
 import yaml as _yaml
 
 from fluidics.control.config import gantry as _gantry
-from tests.conftest import SAMPLE_CONFIG_DIR
+from tests.conftest import FIXTURES_DIR
 
 # The shipped sample is the suite's sipper config (tests/conftest.py).
-_SIPPER_SAMPLE = SAMPLE_CONFIG_DIR / "plate_sipper_config.yaml"
+_SIPPER_SAMPLE = FIXTURES_DIR / "plate_sipper_config.yaml"
 
 # Parsed once: the rule table edits a fresh deep copy per case, which is all
 # its in-place edits need, instead of re-parsing the sample 25 times.
@@ -557,6 +559,10 @@ class TestGantryConfig:
         (lambda d: _gantry_block(d)["reservoirs"][1].__setitem__("loaded_ul_by_well", {"B2": -5}),
          r"probes\.loaded_ul_by_well\.B2 \(-5\) must be positive"),
         (lambda d: _gantry_block(d).__setitem__("agitate_amplitude_mm", 70.0), "stroke|well"),
+        (lambda d: _gantry_block(d).__setitem__("homing_velocity_mm_s", 0),
+         r"homing_velocity_mm_s\n\s+Input should be greater than 0"),
+        (lambda d: _gantry_block(d).__setitem__("homing_acceleration_mm_s2", -200),
+         r"homing_acceleration_mm_s2\n\s+Input should be greater than 0"),
         (lambda d: _gantry_block(d)["reservoirs"][1]["well_names"].__setitem__("Z9", "x"), "Z9"),
         (lambda d: _gantry_block(d).__setitem__("port", "COM5"), "exactly one"),
         (lambda d: _gantry_block(d)["axes"].__setitem__("y", "X1"), "distinct"),
@@ -605,6 +611,16 @@ class TestGantryConfig:
         path.write_text(_yaml.safe_dump(data), encoding="utf-8")
         with pytest.raises(ValueError, match=re.escape(key) + r"\n\s+Extra inputs are not permitted"):
             load_config(str(path))
+
+    def test_the_homing_speeds_are_optional_and_the_sample_sets_both(self, plate_sipper_config):
+        """Left out, each is None: the driver's own per-axis value."""
+        g = _gantry(plate_sipper_config)
+        assert (g.homing_velocity_mm_s, g.homing_acceleration_mm_s2) == (20, 200)
+        data = _sipper_dict()
+        for key in ("homing_velocity_mm_s", "homing_acceleration_mm_s2"):
+            _gantry_block(data).pop(key)
+        g = _gantry(FluidicsConfig(**data))
+        assert (g.homing_velocity_mm_s, g.homing_acceleration_mm_s2) == (None, None)
 
     def test_the_block_is_optional_and_existing_configs_are_untouched(self, flow_cell_config):
         assert _gantry(flow_cell_config) is None
@@ -668,3 +684,120 @@ class TestGantryConfig:
         assert tuple(_gantry(again).reservoirs[1].a1_xy_mm) == (13.0, 2.0)
         assert _gantry(again).reservoirs[1].dip_z_mm == 51.0
         assert _gantry(again).travel_z_mm == 1.0
+
+
+class TestSaveLoadedVolumes:
+    """save_loaded_volumes writes the loaded volumes the Reservoirs window
+    sets to the config file, and nothing else in it; assign_loaded_volumes
+    puts them in the live config, which the verb does last."""
+
+    @pytest.fixture
+    def config(self, plate_sipper_config_on_file):
+        return plate_sipper_config_on_file
+
+    @staticmethod
+    def _reloaded(config):
+        return load_config(config.source_path)
+
+    @staticmethod
+    def _probes(config):
+        return _gantry(config).reservoirs[1]
+
+    @staticmethod
+    def _ssct(config):
+        return _gantry(config).reservoirs[2]
+
+    def test_a_plates_volume_is_its_loaded_ul_in_the_file_then_in_the_live_config(self, config):
+        save_loaded_volumes(config, {"probes": 350})
+        assert self._probes(self._reloaded(config)).loaded_ul == 350
+        assert self._probes(config).loaded_ul == 110, "the file alone: the live config waits"
+        assign_loaded_volumes(config, {"probes": 350})
+        assert self._probes(config).loaded_ul == 350
+        assert self._ssct(self._reloaded(config)).loaded_ul == 1800
+
+    def test_a_wells_volume_is_an_override_dropped_where_it_is_the_plates_own(self, config):
+        save_loaded_volumes(config, {"ssct/A1": 1000, "ssct/B1": 900})
+        assert self._ssct(self._reloaded(config)).loaded_ul_by_well == {"A1": 1000, "B1": 900}
+        save_loaded_volumes(config, {"ssct/A1": 1800})            # the plate's own volume
+        assert self._ssct(self._reloaded(config)).loaded_ul_by_well == {"B1": 900}
+        save_loaded_volumes(config, {"ssct/B1": 1800})
+        assert self._ssct(self._reloaded(config)).loaded_ul_by_well is None
+        assert self._ssct(config).loaded_ul_by_well is None
+        assert "loaded_ul_by_well" not in open(config.source_path, encoding="utf-8").read(), \
+            "an emptied override map left a null or an empty mapping behind"
+
+    def test_a_plates_volume_drops_its_overrides(self, config):
+        save_loaded_volumes(config, {"ssct/A1": 1000})
+        save_loaded_volumes(config, {"ssct": 1500})
+        reloaded = self._ssct(self._reloaded(config))
+        assert (reloaded.loaded_ul, reloaded.loaded_ul_by_well) == (1500, None)
+        assert "loaded_ul_by_well" not in open(config.source_path, encoding="utf-8").read()
+
+    def test_a_bottles_volume_is_its_loaded_volume_ul_entry(self, config):
+        save_loaded_volumes(config, {"port_26": 50000, "port_25": 400000})
+        expected = {"port_25": 400000, "port_26": 50000}
+        assert self._reloaded(config).reagent_selection.selector_valves.loaded_volume_ul == expected
+        assign_loaded_volumes(config, {"port_26": 50000, "port_25": 400000})
+        assert config.reagent_selection.selector_valves.loaded_volume_ul == expected
+
+    def test_a_first_bottle_volume_adds_the_mapping_where_none_existed(self, fixtures_dir, tmp_path):
+        import shutil
+        path = tmp_path / "config.yaml"
+        shutil.copy(fixtures_dir / "flow_cell_config.yaml", path)
+        config = load_config(str(path))
+        save_loaded_volumes(config, {"port_2": 10000})
+        assert load_config(str(path)).reagent_selection.selector_valves.loaded_volume_ul == \
+            {"port_2": 10000}
+
+    def test_the_comments_survive(self, config):
+        path = config.source_path
+        text = open(path, encoding="utf-8").read()
+        assert text.count(TestGantryConfig._CORNER) == 1, "sample changed; re-plant the comment"
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text.replace(TestGantryConfig._CORNER, TestGantryConfig._COMMENTED))
+        config = load_config(path)
+        save_loaded_volumes(config, {"probes": 350, "port_26": 50000})
+        saved = open(path, encoding="utf-8").read()
+        assert TestGantryConfig._COMMENTED in saved
+        assert "# Port 25's bottle is volume tracked, like every well:" in saved
+        assert "port_1: 250           # sipper tip to the valve" in saved
+
+    def test_pending_teaching_on_the_live_config_is_not_written(self, config):
+        """Teaching assigns to the live config and is written only by the
+        Teach window's Save: a volume set saves the volumes alone, and the
+        live config keeps both."""
+        self._probes(config).a1_xy_mm = (13.0, 2.0)
+        _gantry(config).travel_z_mm = 3.0
+        save_loaded_volumes(config, {"probes": 350})
+        assign_loaded_volumes(config, {"probes": 350})
+        reloaded = self._reloaded(config)
+        assert tuple(self._probes(reloaded).a1_xy_mm) == (12.0, 1.5)
+        assert _gantry(reloaded).travel_z_mm == 1.0
+        assert self._probes(reloaded).loaded_ul == 350
+        assert tuple(self._probes(config).a1_xy_mm) == (13.0, 2.0) and _gantry(config).travel_z_mm == 3.0
+        assert self._probes(config).loaded_ul == 350
+
+    def test_a_config_built_in_memory_has_no_file_to_write(self):
+        config = FluidicsConfig(**_sipper_dict())
+        assert config.source_path is None
+        save_loaded_volumes(config, {"probes/B2": 50})            # placed, and nothing written
+        assert _gantry(config).reservoirs[1].loaded_ul_by_well is None
+        assign_loaded_volumes(config, {"probes/B2": 50})
+        assert _gantry(config).reservoirs[1].loaded_ul_by_well == {"B2": 50}
+
+    @pytest.mark.parametrize("changes, message", [
+        ({"water": 5}, "water names no plate, well or plumbed bottle"),
+        ({"probes/Z9": 5}, "probes/Z9 names no plate, well or plumbed bottle"),
+        ({"port_1": 5000}, "port_1 names no plate, well or plumbed bottle"),      # the sipper's
+        ({"port_2": 5000}, "port_2 names no plate, well or plumbed bottle"),      # not plumbed
+        ({"probes": 0}, "probes: 0 uL is not a loaded volume"),
+        ({"probes": 1.5}, "probes: 1.5 uL is not a loaded volume"),
+        ({"probes": 350, "water": 5}, "water names no plate"),
+    ], ids=["no-such-name", "no-such-well", "sippers-port", "unplumbed", "zero", "fraction",
+            "one-bad-key-of-two"])
+    def test_a_change_it_cannot_place_changes_nothing(self, config, changes, message):
+        before = open(config.source_path, encoding="utf-8").read()
+        with pytest.raises(ValueError, match=re.escape(message)):
+            save_loaded_volumes(config, changes)
+        assert open(config.source_path, encoding="utf-8").read() == before
+        assert self._probes(config).loaded_ul == 110

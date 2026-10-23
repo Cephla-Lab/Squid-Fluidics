@@ -1,23 +1,28 @@
 """The Reservoirs window: every reservoir volume tracking knows, what each
 has given since its last reset and, where the config declares a volume,
-what is left of it and what was loaded -- with the resets. A tool window
-the Run Experiments tab opens from Reservoirs…, on every rig, declared
-volumes or not. It reads the volume tracker's balances() and nothing
-else; each reset is the manual refill verb, run as a job on the session under the
-opener's `job_source`, so a reset waits for an idle rig like any move, a
-run's gate reads the file it rewrote, and the main window keeps the
-opener's tab live under it."""
+what is left of it and what was loaded -- with the resets and the loaded
+volumes' settings. A tool window the Run Experiments tab opens from
+Reservoirs…, on every rig, declared volumes or not. It reads the volume
+tracker's balances() and nothing else; each reset is the manual refill
+verb and each setting the manual set_loaded_volume verb, which writes the
+config file's volume fields and nothing else of it, both run as a job on
+the session under the opener's `job_source`, so they wait for an idle rig
+like any move, a run's gate reads what they wrote, and the main window
+keeps the opener's tab live under them."""
 
 from qtpy.QtCore import QItemSelection, QItemSelectionModel, Qt, QTimer
-from qtpy.QtWidgets import (QAbstractItemView, QHBoxLayout, QHeaderView, QLabel, QMessageBox,
-                            QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
+from qtpy.QtWidgets import (QAbstractItemView, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
+                            QMessageBox, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
+                            QWidget)
 
 from fluidics.reservoirs import describe_keys
+from fluidics.robot.labware import plate_of
 from fluidics.vocabulary import sipper_vocabulary
 
 from .support import PostsToQtThread, _ask_yes_no, connect_click, subscribe_until_detached
 
 COLUMNS = ("Reservoir", "Reagent", "Accumulated (µL)", "Current (µL)", "Loaded (µL)")
+LOADED_COLUMN = COLUMNS.index("Loaded (µL)")
 
 
 def _volume(ul):
@@ -26,18 +31,21 @@ def _volume(ul):
 
 
 class ReservoirsWindow(PostsToQtThread, QWidget):
-    """One table, the volume tracker's balances, and the resets: Reset
-    selected (the highlighted rows), Reset <plate> per plate (a plate
-    reloads as a plate) and Reset all. Never modal, and owned by the tab that opens it,
-    so it goes with that tab.
+    """One table, the volume tracker's balances, and under it two rows of
+    buttons. The resets: Reset selected (the highlighted rows), Reset
+    <plate> per plate (a plate reloads as a plate) and Reset all. The
+    loaded volumes: Set selected… and Set <plate>…, each asking for the
+    volume in one dialog, and a double click on a row's Loaded cell, which
+    is Set selected… for that row. Never modal, and owned by the tab that
+    opens it, so it goes with that tab.
 
     While it is open it repaints itself each second -- a run's draws, a
     manual draw, a port renamed on the Manual tab all show within one --
     and on every session state change, which it hears itself, so a job's
-    start and end (its own resets' among them) show at once whoever
-    opened it; closed, it paints nothing, and opening it paints it. The
-    resets are live only while the rig is idle, read from the session at
-    each paint."""
+    start and end (its own among them) show at once whoever opened it;
+    closed, it paints nothing, and opening it paints it. The buttons are
+    live only while the rig is idle, read from the session at each
+    paint."""
 
     def __init__(self, config, system, job_source, parent=None):
         super().__init__(parent, Qt.Tool)
@@ -64,7 +72,8 @@ class ReservoirsWindow(PostsToQtThread, QWidget):
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.table.itemSelectionChanged.connect(self._paintResets)
+        self.table.itemSelectionChanged.connect(self._paintButtons)
+        self.table.cellDoubleClicked.connect(self._onCellDoubleClicked)
         layout.addWidget(self.table)
 
         self.undeclaredLabel = QLabel("")
@@ -80,7 +89,8 @@ class ReservoirsWindow(PostsToQtThread, QWidget):
         resets.addStretch()
         self.resetPlateButtons = {}
         sipper = sipper_vocabulary(config)
-        for name in sorted(sipper.reservoirs) if sipper is not None else ():
+        plates = sorted(sipper.reservoirs) if sipper is not None else ()
+        for name in plates:
             button = QPushButton(f"Reset {name}")
             connect_click(button, lambda name=name: self.resetPlate(name))
             resets.addWidget(button)
@@ -89,6 +99,20 @@ class ReservoirsWindow(PostsToQtThread, QWidget):
         connect_click(self.resetAllButton, self.resetAll)
         resets.addWidget(self.resetAllButton)
         layout.addLayout(resets)
+
+        loaded = QHBoxLayout()
+        loaded.addWidget(QLabel("Loaded:"))
+        self.setSelectedButton = QPushButton("Set selected…")
+        connect_click(self.setSelectedButton, self.setSelected)
+        loaded.addWidget(self.setSelectedButton)
+        loaded.addStretch()
+        self.setPlateButtons = {}
+        for name in plates:
+            button = QPushButton(f"Set {name}…")
+            connect_click(button, lambda name=name: self.setPlate(name))
+            loaded.addWidget(button)
+            self.setPlateButtons[name] = button
+        layout.addLayout(loaded)
         self.resize(640, 480)
 
         self._tick = QTimer(self)
@@ -141,7 +165,7 @@ class ReservoirsWindow(PostsToQtThread, QWidget):
             f"Undeclared: {describe_keys(undeclared, self.tracker.tracked)}. "
             "A run is refused until they are reset." if undeclared else "")
         self.undeclaredLabel.setVisible(bool(undeclared))
-        self._paintResets()
+        self._paintButtons()
 
     def _paintCell(self, row, column, text):
         item = self.table.item(row, column)
@@ -163,12 +187,14 @@ class ReservoirsWindow(PostsToQtThread, QWidget):
                 selection.select(model.index(row, 0), model.index(row, model.columnCount() - 1))
         self.table.selectionModel().select(selection, QItemSelectionModel.ClearAndSelect)
 
-    def _paintResets(self):
-        """A reset is a manual job: it waits for an idle rig like any
-        other."""
+    def _paintButtons(self):
+        """A reset or a setting is a manual job: it waits for an idle rig
+        like any other."""
         idle = not self.session.busy
-        self.resetSelectedButton.setEnabled(idle and bool(self.selectedKeys()))
-        for button in self.resetPlateButtons.values():
+        selected = bool(self.selectedKeys())
+        self.resetSelectedButton.setEnabled(idle and selected)
+        self.setSelectedButton.setEnabled(idle and selected)
+        for button in (*self.resetPlateButtons.values(), *self.setPlateButtons.values()):
             button.setEnabled(idle)
         self.resetAllButton.setEnabled(idle and bool(self._keys))
 
@@ -201,10 +227,70 @@ class ReservoirsWindow(PostsToQtThread, QWidget):
         if not _ask_yes_no(self, "Reset?", f"Reset {what}? Accumulated goes to 0, and a "
                                            "declared volume reads full again."):
             return
+        self._start(lambda: manual.refill(*keys), "_resetFailed")
 
+    def _resetFailed(self, message):
+        QMessageBox.critical(self, "Reset", f"The reset was not recorded: {message}")
+
+    # --- the loaded volumes ---
+
+    def setSelected(self):
+        keys = self.selectedKeys()
+        if keys:
+            self._setLoaded(keys, describe_keys(keys, self.tracker.tracked))
+
+    def setPlate(self, name):
+        self._setLoaded([name], f"every well of {name}")
+
+    def _onCellDoubleClicked(self, row, column):
+        """A Loaded cell is Set selected… for its row, selected first if
+        it was not, so the dialog names what it sets."""
+        if column != LOADED_COLUMN or row >= len(self._keys) or self.session.busy:
+            return
+        key = self._keys[row]
+        if key not in self.selectedKeys():
+            self._select({key})
+        self.setSelected()
+
+    def _setLoaded(self, keys, what):
+        """Ask for what `keys` hold when loaded and set it as one manual job
+        on the session. The verb's refusal is said before the dialog where
+        the keys alone decide it, and again, once the value is in, before
+        the job starts, so a refusal is never a failure after the fact."""
+        manual = self.system.manual
+        refusal = manual.loaded_volume_refusal(keys)
+        if refusal:
+            QMessageBox.warning(self, "Loaded volume", refusal)
+            return
+        ul, ok = QInputDialog.getInt(self, "Loaded volume", f"Loaded volume of {what} (µL):",
+                                     self._firstLoaded(keys) or 1, 1, 2 ** 31 - 1)
+        if not ok:
+            return
+        refusal = manual.loaded_volume_refusal(keys, ul)
+        if refusal:
+            QMessageBox.warning(self, "Loaded volume", refusal)
+            return
+        self._start(lambda: manual.set_loaded_volume(keys, ul), "_setFailed")
+
+    def _firstLoaded(self, keys):
+        """The loaded volume of the first reservoir `keys` names, in table
+        order (a plate's name names every well of it), or None where it
+        declares none."""
+        tracked = set(self.tracker.tracked)
+        for key in self._keys:
+            if key in keys or plate_of(key) in keys:
+                return self.tracker.loaded(key) if key in tracked else None
+        return None
+
+    def _setFailed(self, message):
+        QMessageBox.critical(self, "Loaded volume", f"The loaded volume was not set: {message}")
+
+    def _start(self, verb, failed):
+        """Run `verb` as one manual job under the opener's label; what it
+        raises comes back as the dialog the method named `failed` shows."""
         try:
-            self.system.run_manual(lambda: manual.refill(*keys), callbacks={
-                "on_error": lambda message: self._post_event("_resetFailed", message),
+            self.system.run_manual(verb, callbacks={
+                "on_error": lambda message: self._post_event(failed, message),
             }, source=self._jobSource)
         except RuntimeError as e:
             QMessageBox.warning(self, "Rig busy", str(e))
@@ -212,6 +298,3 @@ class ReservoirsWindow(PostsToQtThread, QWidget):
         # The session took the job before run_manual returned, and its
         # posted state change cannot land before this does: paint now.
         self.refresh()
-
-    def _resetFailed(self, message):
-        QMessageBox.critical(self, "Reset", f"The reset was not recorded: {message}")

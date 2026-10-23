@@ -24,7 +24,9 @@ where a volume is declared: the Reservoirs window's one read, and `rows`
 is its tracked part, the report's and the gate's.
 
 A declared volume -- a key under `loaded_volume_ul`, or every well of a
-gantry's plates -- adds only a limit. For such a tracked key the volume
+gantry's plates -- adds only a limit. The Reservoirs window sets one while
+the rig runs (`set_loaded`, through the manual verb, which writes the
+config file's volume fields first). For such a tracked key the volume
 tracker refuses a draw that would not fit, charges the one that does and
 writes the file, all before the plunger moves, so a crash or a write that
 fails can only leave the file reading high, never low; an untracked key
@@ -151,7 +153,8 @@ class VolumeTracker:
         """The keys with a declared volume, in key order; empty where the
         volume tracker is the tally alone and has nothing to refuse or
         declare."""
-        return tuple(sorted(self._defs))
+        with self._lock:
+            return tuple(sorted(self._defs))
 
     @property
     def declared(self):
@@ -171,9 +174,10 @@ class VolumeTracker:
 
     def loaded(self, key):
         """What tracked `key` holds when loaded: the most any one draw
-        from it can take. The definitions are fixed at construction, so no
-        lock."""
-        return self._defs[key]["loaded_ul"]
+        from it can take. Under the lock: set_loaded replaces definitions
+        while the rig runs."""
+        with self._lock:
+            return self._defs[key]["loaded_ul"]
 
     def check(self, key, volume_ul):
         """Refuse before a draw that would not fit, or that no loading
@@ -195,7 +199,7 @@ class VolumeTracker:
             return      # not a draw: no liquid moves, so there is nothing to refuse
         if self._undeclared:
             raise ReservoirUndeclared(undeclared_message(self._undeclared, self._defs))
-        loaded = self.loaded(key)
+        loaded = self._defs[key]["loaded_ul"]
         if volume_ul > loaded:
             raise ReservoirDrawTooLarge(key, volume_ul, loaded)
         if volume_ul > self._remaining(key):
@@ -331,21 +335,80 @@ class VolumeTracker:
                     self._undeclared.discard(k)
             _logger.info("Refilled: %s", ", ".join(resetting))
 
+    def set_loaded(self, volumes):
+        """Declare what each reservoir of `volumes` ({key: uL}) holds when
+        loaded: a tracked reservoir's definition replaced, an untracked
+        bottle given one, so it is tracked from now on -- undeclared until
+        its reset, since what it gave before it was tracked (before this
+        launch, say) is not known, and volume tracking does not guess. What
+        a tracked one has given since its last reset stands, so what is left
+        becomes the new volume less that, and an undeclared reservoir stays
+        undeclared: this changes a number, not what is in the reservoir, and
+        only a reset declares one loaded. All of them in one write, or none: every
+        key is checked first (loaded_refusal) and refuses them all
+        (ValueError) before anything changes, and a write that fails changes
+        nothing (ReservoirWriteError). A volume tracker with no file (a rig
+        that tracked nothing, a simulated rig) keeps the change in memory,
+        and the config file carries it to the next launch, where a rig that
+        keeps a file finds no entry for it there and brings that reservoir
+        up undeclared until it is reset -- the safe way round."""
+        if not volumes:
+            raise ValueError("no loaded volume to set: name a reservoir")
+        with self._lock:
+            refusal = self._loaded_refusal(volumes)
+            if refusal:
+                raise ValueError(refusal)
+            what = describe_keys(volumes, self._defs)
+            with self._committed(f"the loaded volume of {what} was not recorded"):
+                for key, ul in volumes.items():
+                    if key not in self._defs:
+                        self._undeclared.add(key)       # newly tracked: a reset declares it
+                    self._defs[key] = {"loaded_ul": int(ul)}
+            by_volume = {}
+            for key, ul in volumes.items():
+                by_volume.setdefault(int(ul), []).append(key)
+            set_to = "; ".join(f"{describe_keys(keys, self._defs)} {ul} uL"
+                               for ul, keys in by_volume.items())
+        _logger.info("Loaded volume set: %s.", set_to)
+
+    def loaded_refusal(self, volumes):
+        """Why set_loaded(volumes) would be refused, or None: asked by the
+        manual verb before it writes the config file, so a refusal leaves
+        the file alone too."""
+        with self._lock:
+            return self._loaded_refusal(volumes)
+
+    def _loaded_refusal(self, volumes):
+        for key, ul in volumes.items():
+            if isinstance(ul, bool) or not isinstance(ul, numbers.Integral) or ul <= 0:
+                return f"{key}: {ul!r} uL is not a loaded volume (a whole number of uL above 0)"
+            # A bottle listed without a volume is the one key that can
+            # become tracked; every well of every plate is defined already.
+            if key not in self._defs and (key not in self._dispatched or plate_of(key) is not None):
+                return f"{key} names no tracked reservoir or bottle"
+            # Below this the reservoir would have given more than it held,
+            # a balance the file's restore refuses as no draw could leave it.
+            given = self._dispatched[key]
+            if ul < given:
+                return (f"{key} has given {given:.0f} uL since its last reset: "
+                        "its loaded volume cannot be less")
+        return None
+
     # --- the disk ---
 
     @contextmanager
     def _committed(self, what):
-        """A change to the balances or the undeclared set that stands only
-        once the file holds it: the body changes them, the file is written
-        on the way out, and a write that fails puts both back and raises
-        ReservoirWriteError ending in `what`. Called with _lock held."""
-        balances, undeclared = dict(self._dispatched), set(self._undeclared)
+        """A change to the balances, the undeclared set or the definitions
+        that stands only once the file holds it: the body changes them, the
+        file is written on the way out, and a write that fails puts all
+        three back and raises ReservoirWriteError ending in `what`. Called
+        with _lock held."""
+        balances, undeclared, defs = dict(self._dispatched), set(self._undeclared), dict(self._defs)
         yield
         try:
             self._write()
         except Exception as e:
-            self._dispatched.update(balances)
-            self._undeclared = undeclared
+            self._dispatched, self._undeclared, self._defs = balances, undeclared, defs
             raise ReservoirWriteError(
                 f"the volume tracking file could not be written ({e}); {what}") from e
 
