@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import json
+import numbers
 import os
 import re
 from typing import Dict, List, Literal, Optional, Tuple
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PositiveInt, PrivateAttr, model_validator
 
 from ..files import atomic_write
-from ..robot.labware import RESERVOIR_NAME, PlateGeometry, agitation_problem
+from ..robot.labware import RESERVOIR_NAME, PlateGeometry, agitation_problem, ref_of
 from ..robot.stage import MIN_TRAVEL_Z_MM
 
 
@@ -64,8 +65,9 @@ class SelectorValvesConfig(_StrictModel):
     tubing_fluid_amount_ul: Dict[str, int]
     # Optional per port: a bulk bottle the volume tracker tracks (spec D6),
     # by what it holds when loaded. A port without an entry is not tracked,
-    # which is how every rig behaved before.
-    loaded_volume_ul: Optional[Dict[str, int]] = None
+    # which is how every rig behaved before; a volume of 0 or less would
+    # refuse every draw from it.
+    loaded_volume_ul: Optional[Dict[str, PositiveInt]] = None
 
     @model_validator(mode='after')
     def _check_valve_id_consistency(self):
@@ -112,17 +114,14 @@ class SelectorValvesConfig(_StrictModel):
 
     @model_validator(mode='after')
     def _check_tracked_bottles(self):
-        """A tracked bottle hangs on a plumbed port and is loaded with
-        something: a volume of 0 or less would refuse every draw from it.
+        """A tracked bottle hangs on a plumbed port.
 
         Defined after _check_port_keys so pydantic runs it second: a key
         beyond the cascade's reach is reported as such, not as unplumbed."""
-        for key, volume in (self.loaded_volume_ul or {}).items():
+        for key in (self.loaded_volume_ul or {}):
             if not self.tubing_fluid_amount_ul.get(key):
                 raise ValueError(f"loaded_volume_ul.{key}: not a plumbed port "
                                  "(no tubing_fluid_amount_ul entry)")
-            if volume <= 0:
-                raise ValueError(f"loaded_volume_ul.{key} ({volume}) must be positive")
         return self
 
 
@@ -145,7 +144,7 @@ class ReservoirConfig(_StrictModel):
     row_axis: PlateAxis         # rows A..H run along this
     loaded_ul: int = Field(gt=0)
     well_names: Optional[Dict[str, str]] = None
-    loaded_ul_by_well: Optional[Dict[str, int]] = None
+    loaded_ul_by_well: Optional[Dict[str, PositiveInt]] = None
 
     @property
     def geometry(self):
@@ -165,9 +164,6 @@ class ReservoirConfig(_StrictModel):
             for well in (getattr(self, field_name) or {}):
                 if not geometry.is_well(well):
                     raise ValueError(f"{self.name}.{field_name}: {well} is not a well on this plate")
-        for well, loaded in (self.loaded_ul_by_well or {}).items():
-            if loaded <= 0:
-                raise ValueError(f"{self.name}.loaded_ul_by_well.{well} ({loaded}) must be positive")
         return self
 
 
@@ -461,69 +457,80 @@ def save_config(config: FluidicsConfig, config_path: str = None) -> str:
     return config_path
 
 
-def save_loaded_volumes(config: FluidicsConfig, changes) -> None:
-    """Write what reservoirs hold when loaded to `config`'s file, and
-    nothing else: `changes` is {key: uL}, a key a plate's name (every well
-    of it), a well (`plate/well`) or a bottle (`port_N`, a plumbed port, not
-    the sipper's). The file is read fresh, changed and saved, rather than
+def loaded_volume_problem(ul):
+    """Why `ul` cannot be what a reservoir holds when loaded, or None: the
+    one rule, asked by the manual verb, the volume tracker and the config
+    save, each naming its own keys before it."""
+    if isinstance(ul, bool) or not isinstance(ul, numbers.Integral) or ul <= 0:
+        return f"{ul!r} uL is not a loaded volume (a whole number of uL above 0)"
+    return None
+
+
+def save_loaded_volumes(config: FluidicsConfig, keys, ul) -> None:
+    """Write that every reservoir `keys` names holds `ul` when loaded to
+    `config`'s file, and nothing else: a key is a plate's name (every well
+    of it), a well (`plate/well`) or a bottle (`port_N`, one of
+    bottle_keys). The file is read fresh, changed and saved, rather than
     `config` saved, because every assignment made to `config` since load
     rides along with save_config -- teaching the Teach window has not saved
     yet among them, and a volume set must not save that. `config` itself is
     not changed: assign_loaded_volumes does that, once the volume tracker
     has taken the change, so the two never disagree. A config built in
     memory has no file, and nothing is written. ValueError, before the file
-    is touched, for a key the config cannot place or a volume that is not a
-    whole number of uL above 0."""
-    _place_loaded_volumes(config, changes)     # refused before the file is touched
+    is touched, for a key the config cannot place or a volume that is not
+    one (loaded_volume_problem)."""
+    _place_loaded_volumes(config, keys, ul)     # refused before the file is touched
     if config.source_path is not None:
         fresh = load_config(config.source_path)
-        assign_loaded_volumes(fresh, changes)
+        assign_loaded_volumes(fresh, keys, ul)
         save_config(fresh)
 
 
-def _place_loaded_volumes(config, changes):
-    """(plates, bottles, whole, wells) for save_loaded_volumes' `changes`
-    in `config`: its plates by name, then {bottle key: uL}, {plate name:
-    uL} and {plate name: {well: uL}}; ValueError for a key it cannot place
-    or a volume that is not one."""
+def _place_loaded_volumes(config, keys, ul):
+    """(plates, bottles, whole, wells) for save_loaded_volumes' `keys` in
+    `config`: its plates by name, then the bottle keys, the plate names
+    and {plate name: [well]}; ValueError for a key it cannot place or a
+    volume that is not one."""
+    problem = loaded_volume_problem(ul)
+    if problem:
+        raise ValueError(f"{', '.join(keys)}: {problem}")
     g = gantry(config)
     plates = {} if g is None else {r.name: r for r in g.reservoirs.values()}
-    sipper = None if g is None else g.selector_valve_port
-    bottle_keys = {port_key(port) for port in available_ports(config) if port != sipper}
-    bottles, whole, wells = {}, {}, {}
-    for key, ul in changes.items():
-        if isinstance(ul, bool) or not isinstance(ul, int) or ul <= 0:
-            raise ValueError(f"{key}: {ul!r} uL is not a loaded volume (a whole number of uL above 0)")
-        plate, slash, well = key.partition("/")
-        if not slash and plate in plates:
-            whole[plate] = ul
-        elif slash and plate in plates and plates[plate].geometry.is_well(well):
-            wells.setdefault(plate, {})[well] = ul
-        elif key in bottle_keys:
-            bottles[key] = ul
+    plumbed = set(bottle_keys(config))
+    bottles, whole, wells = [], [], {}
+    for key in keys:
+        ref = ref_of(key)
+        if ref is None and key in plates:
+            whole.append(key)
+        elif ref is not None and ref.reservoir in plates and plates[ref.reservoir].geometry.is_well(ref.well):
+            wells.setdefault(ref.reservoir, []).append(ref.well)
+        elif key in plumbed:
+            bottles.append(key)
         else:
             raise ValueError(f"{key} names no plate, well or plumbed bottle in this config")
     return plates, bottles, whole, wells
 
 
-def assign_loaded_volumes(config, changes):
-    """Assign `changes` (save_loaded_volumes' shape) to `config`'s volume
-    fields, every key placed before anything is assigned. A plate's volume is its loaded_ul, its
-    overrides dropped; a well's is an override, dropped where it equals
-    the plate's loaded_ul; a bottle's is its loaded_volume_ul entry. Each
-    field is assigned a new value, never changed in place: save_config
-    writes only what was assigned."""
-    plates, bottles, whole, wells = _place_loaded_volumes(config, changes)
+def assign_loaded_volumes(config, keys, ul):
+    """Assign `ul` to the volume fields of every reservoir `keys` names
+    (save_loaded_volumes' keys) in `config`, every key placed before
+    anything is assigned. A plate's volume is its loaded_ul, its overrides
+    dropped; a well's is an override, dropped where it equals the plate's
+    loaded_ul; a bottle's is its loaded_volume_ul entry. Each field is
+    assigned a new value, never changed in place: save_config writes only
+    what was assigned."""
+    plates, bottles, whole, wells = _place_loaded_volumes(config, keys, ul)
+    ul = int(ul)        # an Integral that is not an int (numpy's) goes in the file as one
     sv = config.reagent_selection.selector_valves
     if bottles:
-        sv.loaded_volume_ul = {**(sv.loaded_volume_ul or {}), **bottles}
-    for name, ul in whole.items():
+        sv.loaded_volume_ul = {**(sv.loaded_volume_ul or {}), **dict.fromkeys(bottles, ul)}
+    for name in whole:
         plates[name].loaded_ul = ul
         _set_overrides(plates[name], {})
-    for name, by_well in wells.items():
+    for name, named in wells.items():
         r = plates[name]
         overrides = dict(r.loaded_ul_by_well or {})
-        for well, ul in by_well.items():
+        for well in named:
             if ul == r.loaded_ul:
                 overrides.pop(well, None)       # the plate's own volume: no override
             else:
@@ -653,6 +660,15 @@ def available_ports(config: FluidicsConfig) -> tuple:
     entries = config.reagent_selection.selector_valves.tubing_fluid_amount_ul
     return tuple(port for port in range(1, available_port_count(config) + 1)
                  if entries.get(port_key(port)))
+
+
+def bottle_keys(config):
+    """The bottles the valves can draw from, by port key: every port the
+    rig offers (available_ports, the only ports the valves will open) but
+    the sipper's, whose draws are its wells'."""
+    g = gantry(config)
+    sipper = None if g is None else g.selector_valve_port
+    return [port_key(port) for port in available_ports(config) if port != sipper]
 
 
 # --- Config Loading ---

@@ -50,7 +50,7 @@ import threading
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
-from .control.config import available_ports, gantry, port_key, port_of
+from .control.config import gantry, loaded_volume_problem, port_key, port_of
 from .errors import (ReservoirDrawTooLarge, ReservoirError, ReservoirInUse, ReservoirNoWell,
                      ReservoirOverdraw, ReservoirUndeclared, ReservoirWriteError)
 from .events import RunEnded, RunStarted
@@ -335,12 +335,12 @@ class VolumeTracker:
                     self._undeclared.discard(k)
             _logger.info("Refilled: %s", ", ".join(resetting))
 
-    def set_loaded(self, volumes):
-        """Declare what each reservoir of `volumes` ({key: uL}) holds when
-        loaded: a tracked reservoir's definition replaced, an untracked
-        bottle given one, so it is tracked from now on -- undeclared until
-        its reset, since what it gave before it was tracked (before this
-        launch, say) is not known, and volume tracking does not guess. What
+    def set_loaded(self, keys, ul):
+        """Declare that every reservoir of `keys` holds `ul` when loaded: a
+        tracked reservoir's definition replaced, an untracked bottle given
+        one, so it is tracked from now on -- undeclared until its reset,
+        since what it gave before it was tracked (before this launch, say)
+        is not known, and volume tracking does not guess. What
         a tracked one has given since its last reset stands, so what is left
         becomes the new volume less that, and an undeclared reservoir stays
         undeclared: this changes a number, not what is in the reservoir, and
@@ -352,36 +352,33 @@ class VolumeTracker:
         and the config file carries it to the next launch, where a rig that
         keeps a file finds no entry for it there and brings that reservoir
         up undeclared until it is reset -- the safe way round."""
-        if not volumes:
+        if not keys:
             raise ValueError("no loaded volume to set: name a reservoir")
         with self._lock:
-            refusal = self._loaded_refusal(volumes)
+            refusal = self._loaded_refusal(keys, ul)
             if refusal:
                 raise ValueError(refusal)
-            what = describe_keys(volumes, self._defs)
+            ul = int(ul)
+            what = describe_keys(keys, self._defs)
             with self._committed(f"the loaded volume of {what} was not recorded"):
-                for key, ul in volumes.items():
+                for key in keys:
                     if key not in self._defs:
                         self._undeclared.add(key)       # newly tracked: a reset declares it
-                    self._defs[key] = {"loaded_ul": int(ul)}
-            by_volume = {}
-            for key, ul in volumes.items():
-                by_volume.setdefault(int(ul), []).append(key)
-            set_to = "; ".join(f"{describe_keys(keys, self._defs)} {ul} uL"
-                               for ul, keys in by_volume.items())
-        _logger.info("Loaded volume set: %s.", set_to)
+                    self._defs[key] = {"loaded_ul": ul}
+        _logger.info("Loaded volume set: %s %d uL.", what, ul)
 
-    def loaded_refusal(self, volumes):
-        """Why set_loaded(volumes) would be refused, or None: asked by the
+    def loaded_refusal(self, keys, ul):
+        """Why set_loaded(keys, ul) would be refused, or None: asked by the
         manual verb before it writes the config file, so a refusal leaves
         the file alone too."""
         with self._lock:
-            return self._loaded_refusal(volumes)
+            return self._loaded_refusal(keys, ul)
 
-    def _loaded_refusal(self, volumes):
-        for key, ul in volumes.items():
-            if isinstance(ul, bool) or not isinstance(ul, numbers.Integral) or ul <= 0:
-                return f"{key}: {ul!r} uL is not a loaded volume (a whole number of uL above 0)"
+    def _loaded_refusal(self, keys, ul):
+        problem = loaded_volume_problem(ul)
+        if problem:
+            return f"{describe_keys(keys, self._defs)}: {problem}"
+        for key in keys:
             # A bottle listed without a volume is the one key that can
             # become tracked; every well of every plate is defined already.
             if key not in self._defs and (key not in self._dispatched or plate_of(key) is not None):
@@ -605,15 +602,6 @@ def default_volume_tracking_path(config_path):
     volume tracking file."""
     digest = hashlib.sha1(os.path.abspath(config_path).encode()).hexdigest()[:12]
     return get_default_log_directory() / "reservoirs" / f"{digest}.json"
-
-
-def bottle_keys(config):
-    """The bottles the valves can draw from, by port key: every port the
-    rig offers (available_ports, the only ports the valves will open) but
-    the sipper's, whose draws are its wells'."""
-    g = gantry(config)
-    sipper = None if g is None else g.selector_valve_port
-    return [port_key(port) for port in available_ports(config) if port != sipper]
 
 
 def reservoir_definitions(config):

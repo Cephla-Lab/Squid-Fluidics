@@ -642,7 +642,7 @@ class TestSetLoaded:
         tracker, pump, state = rig
         state["port"], state["well"] = SIPPER_PORT, "ssct/A1"
         pump.extract(EXTRACT_PORT, 1490)
-        tracker.set_loaded({"ssct/A1": 2500})
+        tracker.set_loaded(["ssct/A1"], 2500)
         assert tracker.loaded("ssct/A1") == 2500 and tracker.remaining("ssct/A1") == 1010
         assert ("ssct/A1", None, 1490.0, 1010.0, 2500, False) in tracker.balances()
         on_disk = self._on_disk(tmp_path)
@@ -654,7 +654,7 @@ class TestSetLoaded:
     def test_an_undeclared_reservoir_stays_undeclared_until_its_reset(self, rig):
         tracker, _, _ = rig
         tracker.restore({"undeclared": ["port_25"]})
-        tracker.set_loaded({"port_25": 6000})
+        tracker.set_loaded(["port_25"], 6000)
         assert tracker.undeclared == ["port_25"]
         tracker.refill("port_25")
         assert tracker.declared and tracker.remaining("port_25") == 6000
@@ -667,9 +667,9 @@ class TestSetLoaded:
         pump.extract(EXTRACT_PORT, 1490)
         with pytest.raises(ValueError, match=re.escape(
                 "ssct/A1 has given 1490 uL since its last reset: its loaded volume cannot be less")):
-            tracker.set_loaded({"ssct/A1": 1489})
+            tracker.set_loaded(["ssct/A1"], 1489)
         assert tracker.loaded("ssct/A1") == 1800
-        tracker.set_loaded({"ssct/A1": 1490})
+        tracker.set_loaded(["ssct/A1"], 1490)
         assert tracker.remaining("ssct/A1") == 0
 
     @pytest.mark.parametrize("volume", [0, -5, 1.5, True, "350"],
@@ -677,7 +677,7 @@ class TestSetLoaded:
     def test_a_volume_that_is_not_a_whole_number_above_0_is_refused(self, rig, volume):
         tracker, _, _ = rig
         with pytest.raises(ValueError, match=re.escape(f"port_25: {volume!r} uL is not a loaded volume")):
-            tracker.set_loaded({"port_25": volume})
+            tracker.set_loaded(["port_25"], volume)
         assert tracker.loaded("port_25") == 5000
 
     @pytest.mark.parametrize("key", ["water", "ssct/Z9", "probes/A1", "port_26"])
@@ -687,7 +687,7 @@ class TestSetLoaded:
         from) is no bottle it knows."""
         tracker, _, _ = rig
         with pytest.raises(ValueError, match=re.escape(f"{key} names no tracked reservoir or bottle")):
-            tracker.set_loaded({key: 1000})
+            tracker.set_loaded([key], 1000)
         assert key not in tracker.tracked
 
     def test_several_keys_are_set_in_one_write_or_not_at_all(self, rig, tmp_path):
@@ -695,13 +695,13 @@ class TestSetLoaded:
         writes = []
         write = tracker._write
         tracker._write = lambda: writes.append(1) or write()
-        with pytest.raises(ValueError, match="ssct/A2: 0 uL"):
-            tracker.set_loaded({"port_25": 6000, "ssct/A2": 0})
+        with pytest.raises(ValueError, match="water names no tracked reservoir"):
+            tracker.set_loaded(["port_25", "water"], 6000)
         assert writes == [] and tracker.loaded("port_25") == 5000
         assert not (tmp_path / "volumes.json").exists()
-        tracker.set_loaded({"port_25": 6000, "ssct/A2": 2000})
+        tracker.set_loaded(["port_25", "ssct/A2"], 6000)
         assert writes == [1]
-        assert tracker.loaded("port_25") == 6000 and tracker.loaded("ssct/A2") == 2000
+        assert tracker.loaded("port_25") == 6000 and tracker.loaded("ssct/A2") == 6000
 
     def test_an_untracked_bottle_given_a_volume_is_tracked_from_then_on(self, tmp_path):
         """Undeclared until its reset -- what it gave before it was tracked
@@ -711,7 +711,7 @@ class TestSetLoaded:
         tracker = VolumeTracker(DEFS, path=tmp_path / "volumes.json", bottles=["port_26"])
         tracker.attach(pump, SIPPER_PORT, EXTRACT_PORT, lambda: 26, lambda: None)
         pump.extract(EXTRACT_PORT, 300)               # untracked: counted in memory alone
-        tracker.set_loaded({"port_26": 1000})
+        tracker.set_loaded(["port_26"], 1000)
         assert tracker.tracked == ("port_25", "port_26", "ssct/A1", "ssct/A2")
         assert tracker.undeclared == ["port_26"]
         assert ("port_26", None, 300.0, 700.0, 1000, True) in tracker.balances()
@@ -732,7 +732,7 @@ class TestSetLoaded:
         pump = FakePump()
         tracker = VolumeTracker(DEFS, path=tmp_path / "volumes.json", bottles=["port_26"])
         tracker.attach(pump, SIPPER_PORT, EXTRACT_PORT, lambda: 26, lambda: None)
-        tracker.set_loaded({"port_26": 1000})
+        tracker.set_loaded(["port_26"], 1000)
         assert "port_26" in tracker.tracked and tracker.rows() == []
         tracker.refill("port_26")                     # newly tracked: declared by its reset
         pump.extract(EXTRACT_PORT, 100)
@@ -748,7 +748,7 @@ class TestSetLoaded:
         tracker.restore({"reservoirs": {"ssct/A1": {"dispatched_ul": 700}}})
         with pytest.raises(ReservoirWriteError,
                            match="the loaded volume of port_26, ssct/A1 was not recorded"):
-            tracker.set_loaded({"ssct/A1": 2500, "port_26": 1000})
+            tracker.set_loaded(["ssct/A1", "port_26"], 2500)
         assert tracker.loaded("ssct/A1") == 1800 and tracker.remaining("ssct/A1") == 1100
         assert "port_26" not in tracker.tracked
         assert ("port_26", None, 0.0, None, None, False) in tracker.balances()
@@ -759,7 +759,7 @@ class TestSetLoaded:
         the old figure finds them differ and leaves it undeclared."""
         tracker, pump, _ = rig
         pump.extract(EXTRACT_PORT, 500)
-        tracker.set_loaded({"port_25": 6000})
+        tracker.set_loaded(["port_25"], 6000)
         with closing(VolumeTracker.load(tmp_path / "volumes.json", tracker.snapshot()["definitions"])) as again:
             assert again.declared and again.remaining("port_25") == 5500
         with closing(VolumeTracker.load(tmp_path / "volumes.json", DEFS)) as stale:
@@ -767,7 +767,7 @@ class TestSetLoaded:
 
     def test_a_volume_tracker_with_no_file_keeps_it_in_memory(self):
         tracker = VolumeTracker({}, bottles=["port_26"])
-        tracker.set_loaded({"port_26": 1000})
+        tracker.set_loaded(["port_26"], 1000)
         assert tracker.tracked == ("port_26",) and tracker.remaining("port_26") == 1000
 
 
@@ -832,7 +832,7 @@ def test_bottle_keys_are_the_plumbed_ports_but_the_sippers(plate_sipper_config, 
     """What the Reservoirs window lists before any draw: every port with a
     tubing volume, the sipper's left out (its draws are its wells'), and a
     port whose tubing volume is 0 left out as unplumbed."""
-    from fluidics.reservoirs import bottle_keys
+    from fluidics.control.config import bottle_keys
     assert bottle_keys(plate_sipper_config) == ["port_24", "port_25", "port_26", "port_27", "port_28"]
     assert bottle_keys(flow_cell_config) == [f"port_{n}" for n in range(1, 29)]
     plate_sipper_config.reagent_selection.selector_valves.tubing_fluid_amount_ul["port_28"] = 0

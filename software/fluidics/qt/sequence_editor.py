@@ -274,6 +274,18 @@ def is_run_tab_job(session):
     return session.kind == "manual" and session.source == RUN_TAB_JOB_SOURCE
 
 
+def _field_text(seq, fname, finfo):
+    """A field's cell: the row's value, or its type's default where the row
+    leaves the field out -- rows are kept as typed."""
+    value = seq.get(fname, field_default(finfo))
+    return '' if value is None else str(value)
+
+
+def _check_state(seq):
+    """A row's checkbox: whether a run takes it."""
+    return Qt.Checked if is_included(seq) else Qt.Unchecked
+
+
 class SequencesWidget(PostsToQtThread, QWidget):
     """Edits the sequence list and runs it through the system's session, which
     owns the run's thread and its end; this widget renders the callbacks.
@@ -530,8 +542,7 @@ class SequencesWidget(PostsToQtThread, QWidget):
         seq_type = seq.get('type', '')
         item = QTreeWidgetItem([self._model.title(row),
                                 f"Type: {label_for_type(seq_type)}"])
-        item.setFlags(item.flags() | Qt.ItemIsEditable)
-        item.setCheckState(0, Qt.Checked if is_included(seq) else Qt.Unchecked)
+        item.setCheckState(0, _check_state(seq))
 
         try:
             type_fields = get_fields_for_type(seq_type)
@@ -541,14 +552,12 @@ class SequencesWidget(PostsToQtThread, QWidget):
             if fname in ('include', 'name'):
                 continue
             default = field_default(finfo)
-            value = seq.get(fname, default)
             if (fname in SIPPER_FIELDS and self._sipper is None
-                    and value in (None, default)):
+                    and seq.get(fname, default) in (None, default)):
                 continue
             child = QTreeWidgetItem([self.FIELD_LABELS.get(fname, fname),
-                                     '' if value is None else str(value)])
+                                     _field_text(seq, fname, finfo)])
             child.setData(0, Qt.UserRole, fname)
-            child.setFlags(child.flags() | Qt.ItemIsEditable)
             item.addChild(child)
 
         self._setRowFlags(item)
@@ -631,12 +640,13 @@ class SequencesWidget(PostsToQtThread, QWidget):
             # An editor that was open when the job started commits here: the
             # rows are read-only now, so the cell goes back to the model's.
             with QSignalBlocker(self.tree):
+                seq = self._model[row]
                 if parent is None:
                     item.setText(0, self._model.title(row))
-                    item.setCheckState(0, Qt.Checked if is_included(self._model[row]) else Qt.Unchecked)
+                    item.setCheckState(0, _check_state(seq))
                 else:
-                    value = self._model[row].get(item.data(0, Qt.UserRole))
-                    item.setText(1, '' if value is None else str(value))
+                    fname = item.data(0, Qt.UserRole)
+                    item.setText(1, _field_text(seq, fname, get_fields_for_type(seq['type'])[fname]))
             return
         if parent is None:
             self._model.set_included(row, item.checkState(0) == Qt.Checked)

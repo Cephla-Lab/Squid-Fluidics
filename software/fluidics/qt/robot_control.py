@@ -19,7 +19,7 @@ from qtpy.QtWidgets import (QCheckBox, QComboBox, QGridLayout, QGroupBox, QHBoxL
                             QMessageBox, QPushButton, QVBoxLayout, QWidget)
 
 from fluidics.control.config import gantry, save_config
-from fluidics.manual_operations import DEDICATED_WELLS
+from fluidics.manual_operations import DEDICATED_WELLS, dedicated_wells
 from fluidics.vocabulary import sipper_vocabulary
 
 from .deck_map import DeckMapWidget
@@ -343,9 +343,7 @@ class RobotControlWidget(PostsToQtThread, QWidget):
     def _paintNamedWells(self):
         """The deck map's marked wells, from the config as it stands: Set
         changes it, so it is read again whenever a job ends."""
-        g = gantry(self.config)
-        self.deckMap.setNamedWells({role: self._vocabulary.resolve(getattr(g, field))
-                                    for role, field in DEDICATED_WELLS.items()})
+        self.deckMap.setNamedWells(dedicated_wells(self.config))
 
     # --- position ---
 

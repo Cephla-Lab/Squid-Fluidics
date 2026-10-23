@@ -36,10 +36,6 @@ def settle(system):
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
-# The shipped sample configs. The plate sipper's config is read from here,
-# not from a fixture copy: one rig definition, so the suite cannot pass on
-# numbers the documented sample no longer has.
-
 
 # The two sequences the editor suites are built from: one fluidic row with
 # every port field, one that has none.
@@ -401,15 +397,23 @@ def plate_sipper_config():
 
 
 @pytest.fixture
-def plate_sipper_config_on_file(tmp_path):
-    """The sipper sample loaded from a byte-for-byte copy in the test's
-    tmp_path: for a test whose verb saves the config (a loaded volume
-    set), so the save lands in the copy, never in the shipped sample."""
-    import shutil
-    from fluidics.control.config import load_config
-    path = tmp_path / "plate_sipper_config.yaml"
-    shutil.copy(FIXTURES_DIR / "plate_sipper_config.yaml", path)
-    return load_config(str(path))
+def config_on_file(tmp_path):
+    """load(name): the fixture config `name` loaded from a byte-for-byte
+    copy in the test's tmp_path, for a test that saves the config (a
+    loaded volume set, Save in the Teach window), so the save lands in the
+    copy, never in tests/fixtures."""
+    def load(name):
+        import shutil
+        from fluidics.control.config import load_config
+        path = tmp_path / name
+        shutil.copy(FIXTURES_DIR / name, path)
+        return load_config(str(path))
+    return load
+
+
+@pytest.fixture
+def plate_sipper_config_on_file(config_on_file):
+    return config_on_file("plate_sipper_config.yaml")
 
 
 @pytest.fixture

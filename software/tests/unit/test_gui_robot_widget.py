@@ -3,7 +3,6 @@ jobs, the freeze on any job, teaching through the manual verbs (the
 dedicated wells among them), clicks that carry no bool, the editable well
 picker, the deck map."""
 import logging
-import shutil
 import threading
 import time
 
@@ -19,7 +18,7 @@ from fluidics.qt.deck_map import ROLE_COLORS
 from fluidics.qt.robot_control import RobotControlWidget
 from fluidics.robot.labware import WellRef, well_key
 
-from ..conftest import FIXTURES_DIR, HYB, PRIME, settle
+from ..conftest import HYB, PRIME, settle
 from .test_gui_deck_map import _at
 
 
@@ -320,12 +319,11 @@ def test_the_next_priming_row_primes_the_sipper_from_the_well_set(widget):
     assert tracker.remaining("ssct/H11") == 1800
 
 
-def test_save_writes_the_dedicated_wells_to_the_config_file(qapp, simulated_system, tmp_path):
+def test_save_writes_the_dedicated_wells_to_the_config_file(
+        qapp, simulated_system, plate_sipper_config_on_file):
     """Save, the teach window's one write, carries the dedicated wells
     with the rest of the teaching: read back from the file."""
-    path = tmp_path / "plate_sipper_config.yaml"
-    shutil.copy(FIXTURES_DIR / "plate_sipper_config.yaml", path)
-    config = load_config(str(path))
+    config = plate_sipper_config_on_file
     system = simulated_system(config)
     w = RobotControlWidget(config, system)
     try:
@@ -335,7 +333,7 @@ def test_save_writes_the_dedicated_wells_to_the_config_file(qapp, simulated_syst
     finally:
         w.deleteLater()
         QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
-    saved = gantry(load_config(str(path)))
+    saved = gantry(load_config(config.source_path))
     assert (saved.priming_well, saved.clean_up_well) == ("ssct/H10", "ssct/G12")
 
 

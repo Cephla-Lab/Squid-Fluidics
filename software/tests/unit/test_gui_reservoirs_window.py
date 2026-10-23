@@ -542,13 +542,10 @@ def test_a_setting_that_fails_is_a_dialog(reservoirs, plate_sipper_config_on_fil
 
 
 def test_a_rig_without_a_robot_sets_a_bottle_from_its_row(
-        reservoirs, flow_cell_config, monkeypatch, tmp_path):
+        reservoirs, config_on_file, monkeypatch):
     """No plates, so no plate buttons; an untracked bottle given a volume
     is tracked from then on, in the file the config came from."""
-    import shutil
-    path = tmp_path / "flow_cell_config.yaml"
-    shutil.copy(flow_cell_config.source_path, path)
-    config = load_config(str(path))
+    config = config_on_file("flow_cell_config.yaml")
     window, _, system = reservoirs(config)
     assert window.setPlateButtons == {}
     _enters(monkeypatch, 10000)
@@ -557,4 +554,4 @@ def test_a_rig_without_a_robot_sets_a_bottle_from_its_row(
     settle(system)
     assert system.devices.reservoirs.tracked == ("port_3",)
     assert _rows(window)["port_3"] == ("z", "0", "undeclared", "10000"), "newly tracked: a reset declares it"
-    assert load_config(str(path)).reagent_selection.selector_valves.loaded_volume_ul == {"port_3": 10000}
+    assert load_config(config.source_path).reagent_selection.selector_valves.loaded_volume_ul == {"port_3": 10000}

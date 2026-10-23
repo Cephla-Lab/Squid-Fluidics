@@ -35,9 +35,10 @@ from fluidics.run_log import configure_console
 from fluidics.system import FluidicsSystem
 from fluidics.vocabulary import sipper_vocabulary
 
-# The driver's own end-of-move check, 20 x the position window (6067h): about 1 mm
-# with the window at TOLERANCE_MM, as the adapter sets it at connect.
-DRIVE_TOLERANCE_MM = 1.0
+# The driver's own end-of-move check, 20 x the position window (6067h; motor.py's
+# max(20 * window, 1000)), with the window at TOLERANCE_MM as the adapter sets it
+# at connect (a count under it).
+DRIVE_TOLERANCE_MM = 20 * TOLERANCE_MM
 
 CHECKLIST = f"""\
 Checklist -- watch for these as the script runs:

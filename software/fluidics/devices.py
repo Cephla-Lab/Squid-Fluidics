@@ -19,7 +19,7 @@ import logging
 from functools import partial
 
 from .control._def import CMD_SET
-from .control.config import gantry
+from .control.config import bottle_keys, gantry
 from .control.controller import FluidController, FluidControllerSimulation
 from .control.disc_pump import DiscPump
 from .control.flow_sensor import start_flow_sensors
@@ -30,8 +30,7 @@ from .errors import RunControl
 from .experiment_worker import ExperimentWorker
 from .merfish_operations import MERFISHOperations
 from .open_chamber_operations import OpenChamberOperations
-from .reservoirs import (VolumeTracker, bottle_keys, default_volume_tracking_path,
-                         reservoir_definitions)
+from .reservoirs import VolumeTracker, default_volume_tracking_path, reservoir_definitions
 from .robot.sipper import RobotSipper
 from .robot.stage import POLL_SECONDS, XYZStage
 from .vocabulary import sipper_vocabulary

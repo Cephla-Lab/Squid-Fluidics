@@ -16,7 +16,7 @@ from qtpy.QtCore import QPointF, QRectF, QSize, Qt, Signal
 from qtpy.QtGui import QColor, QFont, QPainter, QPen
 from qtpy.QtWidgets import QSizePolicy, QWidget
 
-from fluidics.robot.labware import AXIS_DIRECTIONS, WellRef, well_key
+from fluidics.robot.labware import AXIS_DIRECTIONS, SBS_PITCH_MM, WellRef, well_key
 
 # The colors: the named wells, and the tip in each of its states.
 ROLE_COLORS = {"priming": QColor("#4a90e2"), "clean-up": QColor("#9b9b9b")}
@@ -157,7 +157,7 @@ class DeckMapWidget(QWidget):
     def _box(self):
         """The mm box the map shows: the strokes, padded by a pitch and a
         half so the row and column labels outside a plate at the edge fit."""
-        pad = 1.5 * max((p.pitch_mm for p in self._placements.values()), default=9.0)
+        pad = 1.5 * SBS_PITCH_MM
         (x0, x1), (y0, y1) = self._extents["x"], self._extents["y"]
         return (x0 - pad, x1 + pad), (y0 - pad, y1 + pad)
 
