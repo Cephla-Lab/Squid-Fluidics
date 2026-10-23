@@ -203,20 +203,16 @@ class DeckMapWidget(QWidget):
         corners = [xy for _, xy in placement.corners()]
         xs, ys = [c[0] for c in corners], [c[1] for c in corners]
         pad = 0.75 * pitch
-        # Both corners through the transform, then sorted: the turn lands
-        # the low-mm corner right and top.
-        xa, ya = self.pixel(min(xs) - pad, max(ys) + pad, frame)
-        xb, yb = self.pixel(max(xs) + pad, min(ys) - pad, frame)
-        left, right = sorted((xa, xb))
-        top, bottom = sorted((ya, yb))
+        rect = QRectF(QPointF(*self.pixel(min(xs) - pad, min(ys) - pad, frame)),
+                      QPointF(*self.pixel(max(xs) + pad, max(ys) + pad, frame))).normalized()
         painter.setPen(QPen(QColor("#444"), 1.2))
         painter.setBrush(QColor("#f7f7f7"))
-        painter.drawRoundedRect(QRectF(left, top, right - left, bottom - top), 6, 6)
+        painter.drawRoundedRect(rect, 6, 6)
         painter.setFont(QFont("Helvetica", 9, QFont.Bold))
         painter.setPen(QPen(QColor("#222")))
         # Under the plate: the half turn puts the row letters along its top
         # edge and the column numbers along its right.
-        painter.drawText(QPointF(left, bottom + 4 + painter.fontMetrics().ascent()),
+        painter.drawText(QPointF(rect.left(), rect.bottom() + 4 + painter.fontMetrics().ascent()),
                          f"{name}  (dip {placement.dip_z_mm:g} mm)")
         painter.setPen(WELL_PEN)
         for well in geometry.wells():

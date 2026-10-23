@@ -123,10 +123,10 @@ def test_the_plate_sipper_samples_load_validate_and_run(tmp_path, instant_device
         assert system.session.wait()
         assert [e.outcome for e in ended] == ["finished"], ended
         assert len(completed) == len(sequences)
-        ledger = system.devices.reservoirs
-        assert ledger.remaining("ssct/A1") == 1750 - 490 - 1000
-        assert ledger.remaining("probes/A1") == 5
+        tracker = system.devices.reservoirs
+        assert tracker.remaining("ssct/A1") == 1750 - 490 - 1000
+        assert tracker.remaining("probes/A1") == 5
         # Port 25's draws: its own priming (700) and the priming volume
         # (800), the 4x SSC row (1000), DAPI's tubing fill (240 + 340), the
         # rinse (1000).
-        assert ledger.remaining("port_25") == 480000 - (700 + 800 + 1000 + 580 + 1000)
+        assert tracker.remaining("port_25") == 480000 - (700 + 800 + 1000 + 580 + 1000)

@@ -30,7 +30,7 @@ from .errors import RunControl
 from .experiment_worker import ExperimentWorker
 from .merfish_operations import MERFISHOperations
 from .open_chamber_operations import OpenChamberOperations
-from .reservoirs import ReservoirLedger, default_ledger_path, reservoir_definitions
+from .reservoirs import VolumeTracker, default_volume_tracking_path, reservoir_definitions
 from .robot.sipper import RobotSipper
 from .robot.stage import POLL_SECONDS, XYZStage
 from .vocabulary import sipper_vocabulary
@@ -79,7 +79,7 @@ class DeviceSet:
     syringe_pump, selector_valves, disc_pump (None outside Open Chamber),
     temperature_controller (None when absent or failed), flow_sensors (possibly
     empty), robot (the RobotSipper, None without a gantry), reservoirs (the
-    ReservoirLedger, on every rig; persisted and limited where a volume is
+    VolumeTracker, on every rig; persisted and limited where a volume is
     declared), and run_control
     -- the one cancellation signal every waiting device shares; RunSession
     drives it (cancel, pause, reset), so an abort from anywhere reaches every
@@ -88,7 +88,7 @@ class DeviceSet:
 
     def __init__(self, config, controller, syringe_pump, selector_valves,
                  disc_pump, temperature_controller, flow_sensors, run_control,
-                 robot=None, reservoirs=None):
+                 robot=None, *, reservoirs):
         self.config = config
         self.run_control = run_control
         self.controller = controller
@@ -98,7 +98,7 @@ class DeviceSet:
         self.temperature_controller = temperature_controller
         self.flow_sensors = flow_sensors
         self.robot = robot                  # RobotSipper, or None without a gantry
-        self.reservoirs = reservoirs        # ReservoirLedger; None only in a set built by hand
+        self.reservoirs = reservoirs        # VolumeTracker, on every rig
         self._closed = False
 
     def make_safe(self):
@@ -179,8 +179,7 @@ class DeviceSet:
             steps.append(lambda: _raise_first(self.robot.close(quiescent=quiescent)))
         steps.append(lambda: self.syringe_pump.close(empty_syringe if quiescent else False))
         steps.append(self.controller.close)
-        if self.reservoirs is not None:
-            steps.append(self.reservoirs.close)
+        steps.append(self.reservoirs.close)
 
         return _run_shielded(steps)
 
@@ -220,45 +219,46 @@ def _build_robot(config, simulation, run_control, instant):
     return robot
 
 
-def _build_ledger(config, simulation, ledger_path):
-    """The ledger for everything this config tracks, placed as build_devices'
-    note on ledger_path says: on disk under its lock, or in memory."""
+def _build_volume_tracker(config, simulation, volume_tracking_path):
+    """The volume tracker for everything this config tracks, placed as
+    build_devices' note on volume_tracking_path says: its file on disk
+    under its lock, or in memory."""
     definitions = reservoir_definitions(config)
-    if not definitions or (simulation and ledger_path is None):
-        return ReservoirLedger(definitions)
-    path = ledger_path or default_ledger_path(config.source_path or "in-memory")
-    return ReservoirLedger.load(path, definitions)
+    if not definitions or (simulation and volume_tracking_path is None):
+        return VolumeTracker(definitions)
+    path = volume_tracking_path or default_volume_tracking_path(config.source_path or "in-memory")
+    return VolumeTracker.load(path, definitions)
 
 
 def build_devices(config, simulation=False, on_issue=None, run_control=None,
-                  instant=False, ledger_path=None):
+                  instant=False, volume_tracking_path=None):
     """Construct and start the full stack for `config`. Returns a DeviceSet.
 
-    Mirrors what the two entry points did, once: build the reservoir
-    ledger and, where the config declares a volume, take its lock (before
+    Mirrors what the two entry points did, once: build the volume tracker
+    and, where the config declares a volume, take its file's lock (before
     any device is constructed, so a second launch on a rig in use stops
     there); construct controller, syringe pump, and (optionally)
     temperature controller; begin() the controller and CLEAR the MCU;
     start the flow sensors; build the robot when the config has a gantry
     (connected, homed, retracted: after the sensors, before the valves);
     build the selector valves (which homes them, today a constructor side
-    effect); attach the disc pump for Open Chamber; attach the ledger to
-    the pump's draws, on every rig.
+    effect); attach the disc pump for Open Chamber; attach the volume
+    tracker to the pump's draws, on every rig.
 
     Degradation policy is the GUI's: a temperature controller that fails to
     come up on hardware, or flow sensors that fail in either mode, are
     reported through on_issue and left out rather than failing the launch.
     So is draw protection configured where nothing will act on it
     (draw_protection_available): reported, and switched off.
-    The controller, pump, valves, robot and ledger are not survivable --
-    those raise, after closing whatever had already started (the robot
-    without a move, the ledger's lock last).
+    The controller, pump, valves, robot and volume tracker are not
+    survivable -- those raise, after closing whatever had already started
+    (the robot without a move, the volume tracking file's lock last).
 
-    ledger_path: where the reservoir ledger lives. None: beside the run
-    reports, named after the config; on a simulated rig, a fresh ledger in
-    memory, every reservoir declared full. A rig that declares no volume
-    keeps its ledger -- the tally alone -- in memory either way, with no
-    file and no lock.
+    volume_tracking_path: where the volume tracking file lives. None:
+    beside the run reports, named after the config; on a simulated rig, a
+    fresh volume tracker in memory, every reservoir declared full. A rig
+    that declares no volume keeps its volume tracker -- the tally alone --
+    in memory either way, with no file and no lock.
 
     instant: switch the simulated rig's pacing off -- the controller's
     one-second commands and the pump's five-second moves take no time. For
@@ -285,16 +285,16 @@ def build_devices(config, simulation=False, on_issue=None, run_control=None,
     robot = None
     reservoirs = None
     try:
-        # The ledger first, its lock (where a volume is declared) before
-        # any device is constructed: a second launch on a rig already in
-        # use stops here, before it talks to the pump (the real pump's
+        # The volume tracker first, its lock (where a volume is declared)
+        # before any device is constructed: a second launch on a rig already
+        # in use stops here, before it talks to the pump (the real pump's
         # constructor sends it commands, and a pump that answers "not
         # initialized" is initialized by the vendor driver), clears the
         # MCU, homes the robot (lifting the first session's tip out of its
-        # well) or homes the valves. A ledger it cannot lock fails the
+        # well) or homes the valves. A file it cannot lock fails the
         # launch with nothing to release; a file it cannot read loads as
         # undeclared and the launch goes on.
-        reservoirs = _build_ledger(config, simulation, ledger_path)
+        reservoirs = _build_volume_tracker(config, simulation, volume_tracking_path)
 
         controller = controller_cls(config.microcontroller.serial_number)
         syringe_pump = pump_cls(
@@ -382,8 +382,10 @@ def build_devices(config, simulation=False, on_issue=None, run_control=None,
         if controller is not None:
             cleanups.append(controller.close)
         if reservoirs is not None:
-            # The lock last, as DeviceSet.close releases it: the rig stays
-            # held until every port this launch opened is released.
+            # None only when building it is what failed (its file locked by
+            # another session, say): then there is no lock to release. The
+            # lock last, as DeviceSet.close releases it: the rig stays held
+            # until every port this launch opened is released.
             cleanups.append(reservoirs.close)
         _run_shielded(cleanups)
         raise

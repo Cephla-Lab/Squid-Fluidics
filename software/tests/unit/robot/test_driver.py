@@ -2,7 +2,6 @@
 import dataclasses
 import threading
 import time
-from types import SimpleNamespace
 
 import pytest
 
@@ -12,6 +11,12 @@ from fluidics.robot.stage import TOLERANCE_MM, XYZStage
 from tests.conftest import driver_or_skip
 
 AXES = {"x": "X1", "y": "Y2", "z": "Z3"}
+
+# CiA402 status words (NiMotion manual B06): Operation Enabled, with the
+# target reached; Quick Stop Active, whose low three bits read like enabled;
+# Fault.
+ENABLED, REACHED, QUICK_STOP, FAULT = 0x0027, 0x0400, 0x0007, 0x0008
+READ_HOLDING_REGISTERS = 0x03
 
 
 def test_the_shim_says_whether_a_driver_is_present():
@@ -47,29 +52,42 @@ def driver():
 @pytest.fixture
 def fake_service(driver, monkeypatch):
     """A DriverService opened on the three axes over a recording fake of
-    the driver's ServoService: (service, names, calls)."""
+    the driver's ServoService, whose one motor records the registers read
+    (`reads`): (service, names, calls)."""
     calls = []
 
     class FakeMotor:
         def __init__(self, word, mode):
             self.word, self.mode = word, mode
             self.inputs = 0                      # 60FDh
+            self.position = 0                    # 6064h, pulses
+            self.error_code = 0                  # 603Fh
+            self.reads = []
+
+        def _read(self, register, value):
+            self.reads.append(register)
+            return value
 
         def read_status_word(self):
-            return self.word
+            return self._read("status word", self.word)
 
         def read_operation_mode(self):
-            return self.mode
+            return self._read("operation mode", self.mode)
 
         def read_digital_inputs(self):
-            return self.inputs
+            return self._read("digital inputs", self.inputs)
+
+        def read_error_code(self):
+            return self._read("error code", self.error_code)
+
+        def read_position(self):
+            return self._read("position", self.position)
 
     class FakeServo:
         def __init__(self, port, baudrate, axis_configs):
             self.axis_configs = axis_configs
             self.current_axis = None
             self.motor = FakeMotor(0x1000, 6)
-            self.reached = True
             calls.append(("init", sorted(a.value for a in axis_configs)))
 
         def connect(self):
@@ -80,10 +98,6 @@ def fake_service(driver, monkeypatch):
 
         def get_motor(self, axis):
             return self.motor
-
-        def get_axis_status(self, axis):
-            return SimpleNamespace(position_mm=1.0, is_target_reached=self.reached,
-                                   is_enabled=True, is_fault=False, error_code=0)
 
         def stop(self, axis, wait=True):
             calls.append(("stop", axis.value, wait))
@@ -129,14 +143,41 @@ def test_read_carries_the_limit_inputs_once_the_target_reads_reached(fake_servic
     asks them: a target reached on an active switch is not an arrival."""
     service, names, _ = fake_service
     motor = service._service.motor
+    motor.word = ENABLED | REACHED
     motor.inputs = 0b10
     assert service.read(names["x"]).on_limit is True
     motor.inputs = 0b100                           # another input: not a limit
     assert service.read(names["x"]).on_limit is False
-    service._service.reached = False
+    motor.word = ENABLED                           # still on its way
     motor.inputs = 0b01
+    motor.reads.clear()
     reading = service.read(names["x"])
     assert reading.target_reached is False and reading.on_limit is False
+    assert motor.reads == ["status word", "error code", "position"], "no limit read mid-move"
+
+
+def test_read_decodes_the_word_and_the_position_as_the_driver_does(fake_service):
+    """Three registers, decoded as get_axis_status decodes them: the
+    position through the axis's own pulses_to_mm, the fault and target
+    bits, and enabled as the driver's state machine reads the word -- a
+    quick stop sets the low bits an enabled drive does, and is not
+    enabled."""
+    service, names, _ = fake_service
+    y = names["y"]
+    motor = service._service.motor
+    motor.word, motor.position = ENABLED | REACHED, service._configs[y].mm_to_pulses(42.0)
+    motor.reads.clear()
+    reading = service.read(y)
+    assert reading.position_mm == pytest.approx(42.0, abs=0.001)
+    assert (reading.target_reached, reading.enabled, reading.fault, reading.error_code) == (
+        True, True, False, 0)
+    assert motor.reads == ["status word", "error code", "position", "digital inputs"]
+    motor.word, motor.error_code = FAULT, 0x2310
+    reading = service.read(y)
+    assert (reading.target_reached, reading.enabled, reading.fault, reading.error_code) == (
+        False, False, True, 0x2310)
+    motor.word, motor.error_code = QUICK_STOP, 0
+    assert service.read(y).enabled is False
 
 
 def test_stop_is_the_waited_controlled_stop_and_a_failure_is_a_device_error(fake_service):
@@ -195,14 +236,91 @@ def test_the_adapter_runs_a_leg_end_to_end_on_the_driver_simulator(driver, real_
         stage.close(quiescent=True)
 
 
+def test_a_read_of_a_drive_that_is_not_connected_is_a_device_error(fake_service):
+    """Where get_axis_status read a disconnected axis as zeroed and
+    disabled, the three-register read asks the motor, and a service that
+    is not connected says so: the stage's early-end path takes it as any
+    failed status read."""
+    service, names, _ = fake_service
+
+    def not_connected(axis):
+        raise RuntimeError("Not connected to the servo system")
+
+    service._service.get_motor = not_connected
+    with pytest.raises(DeviceError, match="axis X1: status read failed: Not connected"):
+        service.read(names["x"])
+
+
+def test_read_asks_three_registers_and_agrees_with_the_drivers_own_status(driver, real_clock):
+    """On the driver's own simulator: each poll is three requests on the
+    bus (status word, error code, position; a fourth, the limit inputs,
+    once the target reads reached), where get_axis_status makes six, and
+    what it returns is what get_axis_status says -- position, target
+    reached, enabled, fault, error code -- read by read across a move and
+    into a fault. The bus clock is held still around each pair of reads, so
+    both see the same instant of the drive."""
+    bus = driver.simulation.install_bus("sim://reads", driver.simulation.SimulatedBus(
+        list(driver.DEFAULT_AXIS_CONFIGS.values()), time_scale=20.0))
+    service, names = driver.open_service("sim://reads", 115200, AXES)
+    stage = XYZStage(service, names, travel_z_mm=1.0, xy_velocity_mm_s=100.0,
+                     z_velocity_mm_s=50.0, run_control=RunControl())
+    stage.connect()
+    x = names["x"]
+
+    def both():
+        requests.clear()
+        reading = service.read(x)
+        asked = list(requests)
+        status = service._service.get_axis_status(x)
+        assert (reading.position_mm, reading.target_reached, reading.enabled,
+                reading.fault, reading.error_code) == (
+            status.position_mm, status.is_target_reached, status.is_enabled,
+            status.is_fault, status.error_code)
+        return reading, asked
+
+    try:
+        # Not homed: the simulated X starts mid-stroke and move_to does not ask
+        # for homing, so the three axes' homing (3 s at this time scale) buys
+        # nothing read here.
+        now = [bus.now()]
+        bus.now = lambda: now[0]                  # the drives advance when the test says
+        requests = []
+        handle = bus.handle_frame
+        bus.handle_frame = lambda frame: requests.append(frame[1]) or handle(frame)
+        service.move_to(40.0, 100.0, x)
+        readings = []
+        for _ in range(100):
+            reading, asked = both()
+            assert asked == [READ_HOLDING_REGISTERS] * (4 if reading.target_reached else 3)
+            readings.append(reading)
+            if reading.target_reached:
+                break
+            now[0] += 0.05
+        assert len(readings) > 3, "the move was read on its way, not only at its end"
+        assert readings[-1].target_reached
+        assert readings[-1].position_mm == pytest.approx(40.0, abs=TOLERANCE_MM)
+        bus.inject_fault(driver.DEFAULT_AXIS_CONFIGS[x].slave_id, 0x2310)
+        reading, asked = both()
+        assert (reading.enabled, reading.fault, reading.error_code) == (False, True, 0x2310)
+        assert asked == [READ_HOLDING_REGISTERS] * (4 if reading.target_reached else 3)
+    finally:
+        # The bus's own clock and frame handler again, however the test
+        # ended: a frozen clock would make the reset and the close's stop
+        # wait out their timeouts.
+        bus.__dict__.pop("now", None)
+        bus.__dict__.pop("handle_frame", None)
+        service.reset_fault(x)
+        stage.close(quiescent=True)
+
+
 def test_a_move_after_a_halt_goes_to_the_new_target_not_the_old_one(driver, real_clock):
     """nm-servo PR #4 found that without PR #1 a move after Stop first
     resumes the halted move (Halt released re-arms the old set-point).
     The stage's halt contract needs the driver to have PR #1: pinned here
     on the driver's own simulator, which models the drive's handshake. Its
     bus runs 3 times real time: homing the three axes is 20 s of the test
-    at real time, and at 3x the cancel still lands near 65 mm, 0.4 s of
-    real time before X would reach 195, the far end of its stroke (at the
+    at real time, and at 3x the cancel still lands well before X would
+    reach 195, the far end of its stroke (at the
     siblings' 20x it does not land in time). The cancel waits for a reading (X past 30 mm),
     not the clock, and the move back is 5 mm short of where X stopped, so
     a rise past the stop can only be the old move resuming, however loaded

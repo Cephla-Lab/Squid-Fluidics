@@ -479,9 +479,6 @@ def run_widget(paused=False, at_rest=False, total_time=100, elapsed=0):
         runButton=Button(), pauseButton=Button(), abortButton=Button(),
         loadButton=Button(), addButton=Button(), removeButton=Button(),
         duplicateButton=Button(), moveUpButton=Button(), moveDownButton=Button(),
-        # The tab repaints its Reservoirs window with itself; the window
-        # has its own tests.
-        reservoirsWindow=SimpleNamespace(refresh=lambda: None),
         timeLabel=SimpleNamespace(setText=lambda text: None),
         progressBar=SimpleNamespace(setValue=lambda value: None),
         timer=SimpleNamespace(stop=lambda: None),

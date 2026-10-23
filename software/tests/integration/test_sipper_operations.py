@@ -11,19 +11,19 @@ from ..conftest import HYB, PRIME, PUSH, SKIPS_THE_SIPPER
 @pytest.fixture
 def rig(plate_sipper_config, instant_devices):
     """(devices, MERFISHOperations with a sipper) over the sipper fixture
-    config: an instant simulated rig with a fresh in-memory ledger, every
-    well full."""
+    config: an instant simulated rig with a fresh in-memory volume
+    tracker, every well full."""
     devices = instant_devices(plate_sipper_config)
     return devices, build_operations(plate_sipper_config, devices)
 
 
 def _dips_twice_then_draws(devices, ops, step, drawn_ul):
     """Run `step` (two dip cycles) and check its order: the tip dips -- dip
-    depth, up 5 mm, back, twice -- and the pump draws `drawn_ul` only after
-    the last dip ends."""
+    depth, up 5 mm, back, twice -- and the pump is asked for `drawn_ul`
+    only after the last dip ends."""
     events = []
     devices.robot.moves.subscribe(lambda pos: events.append(("z", pos[2])))
-    devices.syringe_pump.draws.subscribe(lambda port, ul: events.append(("draw", ul)))
+    devices.syringe_pump.draw_authorizers.append(lambda port, ul: events.append(("draw", ul)))
     ops.process_sequence(step)
     zs = [z for kind, z in events if kind == "z"]
     assert zs[-5:] == [52.0, 47.0, 52.0, 47.0, 52.0], "dip depth, up 5 mm, back, twice"
@@ -89,7 +89,8 @@ def test_a_bottle_overdraw_is_refused_at_the_pump_before_it_moves(rig):
 def test_priming_parks_the_sipper_in_the_priming_well_for_its_port(rig):
     devices, ops = rig
     seen = []
-    devices.syringe_pump.draws.subscribe(lambda port, ul: seen.append(devices.robot.current_well))
+    devices.syringe_pump.draw_authorizers.append(
+        lambda port, ul: seen.append(devices.robot.current_well))
     ops.process_sequence(PRIME)
     assert WellRef("ssct", "H11") in seen
     assert devices.reservoirs.remaining("ssct/H11") == 1750 - 250   # the sipper port's tip-to-valve volume
@@ -101,7 +102,8 @@ def test_clean_up_parks_the_sipper_in_the_clean_up_well_for_its_port(rig):
     the config's clean-up well (H12), never the priming well."""
     devices, ops = rig
     seen = []
-    devices.syringe_pump.draws.subscribe(lambda port, ul: seen.append(devices.robot.current_well))
+    devices.syringe_pump.draw_authorizers.append(
+        lambda port, ul: seen.append(devices.robot.current_well))
     ops.process_sequence({"type": "clean_up", "fluidic_port": 25, "flow_rate": 5000, "volume": 800})
     assert WellRef("ssct", "H12") in seen and WellRef("ssct", "H11") not in seen
     assert devices.reservoirs.remaining("ssct/H12") == 1750 - 250   # the sipper port's tip-to-valve volume

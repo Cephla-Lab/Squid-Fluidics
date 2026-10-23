@@ -81,8 +81,8 @@ class ReservoirDrawTooLarge(ReservoirError):
 
 
 class ReservoirUndeclared(ReservoirError):
-    """The ledger could not restore an entry and will not guess: the
-    operator declares its refill first."""
+    """The volume tracker could not restore an entry and will not guess:
+    the operator declares its refill first."""
 
 
 class ReservoirShortfall(ReservoirError):
@@ -104,12 +104,12 @@ class ReservoirNoWell(ReservoirError):
 
 
 class ReservoirWriteError(ReservoirError):
-    """The ledger could not be written, so the draw it would have recorded
-    was not started."""
+    """The volume tracking file could not be written, so the draw it
+    would have recorded was not started."""
 
 
 class ReservoirInUse(ReservoirError):
-    """Another process holds this rig's ledger."""
+    """Another process holds this rig's volume tracking file."""
 
 
 class Cancelled(FluidicsError):

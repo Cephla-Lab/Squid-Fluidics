@@ -2,6 +2,7 @@ import logging
 from .control.config import gantry
 from .errors import Cancelled, OperationError, ReservoirError
 from .flow_monitor import DrawGuard
+from .reservoirs import VolumeTracker
 from .robot.labware import well_key
 from .sequences import use_ports_problem
 from .vocabulary import sipper_vocabulary
@@ -19,13 +20,14 @@ class MERFISHOperations():
         self.sv = selector_valves
         self.tc = temperature_controller
         # The sipper's robot, None on a rig without a gantry (spec §5), and
-        # the reservoir ledger, None only when the operations are built by
-        # hand (fixtures, embedders): build_devices builds one on every rig.
-        # The gantry block goes with the robot: its port is read here, its
-        # wells and push volume where they are used. The vocabulary spells
-        # the wells.
+        # the volume tracker: build_devices builds one on every rig, and
+        # operations built by hand (fixtures, embedders) that pass none get
+        # a fresh one in memory, which refuses a volume that is not one (NaN,
+        # a negative) and tracks nothing. The gantry block goes with the robot: its port is
+        # read here, its wells and push volume where they are used. The
+        # vocabulary spells the wells.
         self.robot = robot
-        self.reservoirs = reservoirs
+        self.reservoirs = reservoirs if reservoirs is not None else VolumeTracker({})
         self._gantry = gantry(config) if robot is not None else None
         self.sipper_port = None if self._gantry is None else self._gantry.selector_valve_port
         self.vocabulary = sipper_vocabulary(config)
@@ -108,14 +110,14 @@ class MERFISHOperations():
 
     def _select(self, port, well=None, volume_ul=None):
         """Route reagent `port`; for a well, move the sipper into it first
-        (spec §5). The ledger's check here is asked before the sipper moves,
-        so a draw that cannot fit never moves the robot; the pump asks the
-        ledger again before it dispatches. The move ends before the valve
-        opens, so the pump never runs with the tip out of liquid (D9)."""
+        (spec §5). The volume tracker's check here is asked before the
+        sipper moves, so a draw that cannot fit never moves the robot; the
+        pump asks the volume tracker again before it dispatches. The move
+        ends before the valve opens, so the pump never runs with the tip out
+        of liquid (D9)."""
         if well is not None:
             ref = self.vocabulary.resolve(well)
-            if self.reservoirs is not None:
-                self.reservoirs.check(well_key(ref), volume_ul)
+            self.reservoirs.check(well_key(ref), volume_ul)
             self.robot.go_to_well(ref)
         self.sv.open_port(port)
 
@@ -148,8 +150,8 @@ class MERFISHOperations():
 
         except (Cancelled, ReservoirError):
             # The run ending on purpose -- an abort, or a flow fault raised on
-            # the draw with its sensor, band and measurement -- or the ledger
-            # refusing a draw, typed for the gate's replay. The wrapper
+            # the draw with its sensor, band and measurement -- or the volume
+            # tracker refusing a draw, typed for the gate's replay. The wrapper
             # below would flatten either into an OperationError string and
             # report it as a failed step.
             raise
@@ -161,7 +163,7 @@ class MERFISHOperations():
         through the sipper, so what the previous row drew into the line is
         in the flow cell for this row's incubation. A flow_reagent from the
         sipper's port with the config's volume and no tubing fill, so it
-        inherits the ledger's check before the move, the move-then-open
+        inherits the volume tracker's check before the move, the move-then-open
         order, the dips, the dump rule, the draw guard and the wrapper."""
         if self.robot is None:
             raise OperationError("push: this rig has no sipper")

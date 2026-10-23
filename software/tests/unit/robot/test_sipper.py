@@ -59,7 +59,7 @@ def test_agitate_goes_up_by_the_amplitude_and_back_and_keeps_the_witness(sipper)
 
 def test_an_interrupted_agitation_leaves_no_witness():
     """Stopped above dip depth, the residual below the tip is not the one
-    the ledger counted on: the well is no longer current."""
+    the volume tracker counted on: the well is no longer current."""
     robot, service, control = build(instant=False)
     robot.go_to_well(WellRef("ssct", "A1"))
 
@@ -98,9 +98,9 @@ def test_retract_halt_and_home_clear_the_current_well(sipper):
     assert robot.current_well is None
 
 
-def test_current_well_key_is_the_ledgers_spelling_of_the_witness(sipper):
-    """What the ledger asks before a draw through the sipper's port: the
-    well as a ledger key, or None with the tip in no well."""
+def test_current_well_key_is_the_reservoir_key_of_the_witness(sipper):
+    """What the volume tracker asks before a draw through the sipper's
+    port: the well as a reservoir key, or None with the tip in no well."""
     robot, _ = sipper
     robot.go_to_well(WellRef("probes", "A1"))
     assert robot.current_well_key() == "probes/A1"

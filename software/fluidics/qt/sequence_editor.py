@@ -1,8 +1,7 @@
 """The sequence editor and run display (SequencesWidget) and its
 Add-sequence dialog. Extracted from gui.py so an embedding application
 can import them; the list itself is fluidics.sequence_list, which this
-renders. Beside the run controls, Reservoirs… opens the ledger's window
-(fluidics.qt.reservoirs_window), whose resets run as this tab's jobs."""
+renders."""
 
 import logging
 import time
@@ -285,10 +284,9 @@ class SequencesWidget(PostsToQtThread, QWidget):
     coerces on the way out (its validated()/included(), which this
     widget's getSequences wraps); this widget paints those verdicts and
     turns clicks into its verbs. Reservoirs…, beside the run controls,
-    opens the ledger's window (ReservoirsWindow): every reservoir's
+    opens the Reservoirs window (ReservoirsWindow): every reservoir's
     figures and their resets -- the one place the GUI declares a refill.
-    The tab keeps the window current: its tick and every session-state
-    change repaint the window as well as the tab.
+    The window keeps itself current; the tab only opens it.
     """
 
     def __init__(self, config, system):
@@ -796,7 +794,7 @@ class SequencesWidget(PostsToQtThread, QWidget):
         start sites cannot drift. The tabs (and, for the offer, the modal
         chain) make a busy rig unreachable in practice; the dialog beats a
         traceback if it ever is not. A refusal at time zero -- the
-        reservoir gate's shortfall or undeclared ledger, or a step it
+        reservoir gate's shortfall or undeclared volumes, or a step it
         could not replay -- is a FluidicsError, said the same way."""
         try:
             self.system.run(sequences, plan=plan)
@@ -1008,7 +1006,6 @@ class SequencesWidget(PostsToQtThread, QWidget):
             self.sequenceLabel.setText("0/0 sequences")
             self.highlightRow(None)
         self._renderRunControls()
-        self.reservoirsWindow.refresh()
 
     def _onRunEvent(self, event):
         # On the worker's or session's thread; the paint crosses to Qt.

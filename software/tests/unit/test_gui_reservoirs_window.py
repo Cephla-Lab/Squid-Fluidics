@@ -1,7 +1,7 @@
 """The Reservoirs window, opened from the Run Experiments tab, over a
 simulated system: one row for every tracked reservoir and every bottle
 drawn from since its reset, blank where no volume is declared and
-`undeclared` where the ledger lacks a declaration; Reset selected, Reset
+`undeclared` where a volume is yet to be declared; Reset selected, Reset
 <plate> and Reset all as manual jobs the Run tab owns, the verb's refusal
 said before the question; and the repaints that keep it current."""
 import threading
@@ -139,10 +139,10 @@ def test_an_undeclared_reservoir_reads_undeclared_and_the_line_names_it(reservoi
     (a plate wholly undeclared once) and that a run is refused until it is
     reset; it goes with the last of them."""
     window, _, system = reservoirs(plate_sipper_config)
-    ledger = system.devices.reservoirs
+    tracker = system.devices.reservoirs
     assert window.undeclaredLabel.isHidden()
-    probes = [key for key in ledger.tracked if key.startswith("probes/")]
-    ledger.restore({"undeclared": ["port_25", *probes]})
+    probes = [key for key in tracker.tracked if key.startswith("probes/")]
+    tracker.restore({"undeclared": ["port_25", *probes]})
     window.refresh()
     rows = _rows(window)
     assert rows["port_25"] == ("4x SSC", "0", "undeclared", "500000")
@@ -150,7 +150,7 @@ def test_an_undeclared_reservoir_reads_undeclared_and_the_line_names_it(reservoi
     assert not window.undeclaredLabel.isHidden()
     assert window.undeclaredLabel.text() == \
         "Undeclared: port_25, every well of probes. A run is refused until they are reset."
-    ledger.refill("all")
+    tracker.refill("all")
     window.refresh()
     assert window.undeclaredLabel.isHidden() and window.undeclaredLabel.text() == ""
     assert _rows(window)["port_25"][2] == "480000"
@@ -162,9 +162,9 @@ def test_reset_selected_resets_the_highlighted_reservoirs_as_a_run_tab_job(
     each is reset through the verb in one manual job the session labels for
     the Run tab, and the job's end repaints the window."""
     window, _, system = reservoirs(plate_sipper_config)
-    ledger = system.devices.reservoirs
-    ledger.restore({"reservoirs": {"port_25": {"dispatched_ul": 2500},
-                                   "probes/A1": {"dispatched_ul": 50},
+    tracker = system.devices.reservoirs
+    tracker.restore({"reservoirs": {"port_25": {"dispatched_ul": 2500},
+                                    "probes/A1": {"dispatched_ul": 50},
                                    "ssct/A2": {"dispatched_ul": 100}}})
     window.refresh()
     asked, heard = _agrees(monkeypatch), _resets(monkeypatch, system)
@@ -175,8 +175,8 @@ def test_reset_selected_resets_the_highlighted_reservoirs_as_a_run_tab_job(
     settle(system)
     assert asked == [f"Reset port_25, probes/A1? {QUESTION}"]
     assert heard == [("port_25", RUN_TAB_JOB_SOURCE), ("probes/A1", RUN_TAB_JOB_SOURCE)]
-    assert ledger.remaining("port_25") == 480000 and ledger.remaining("probes/A1") == 105
-    assert ledger.remaining("ssct/A2") == 1650, "a row not highlighted is not reset"
+    assert tracker.remaining("port_25") == 480000 and tracker.remaining("probes/A1") == 105
+    assert tracker.remaining("ssct/A2") == 1650, "a row not highlighted is not reset"
     rows = _rows(window)
     assert rows["port_25"][1] == "0" and rows["probes/A1"][1] == "0" and rows["ssct/A2"][1] == "100"
 
@@ -185,15 +185,15 @@ def test_reset_plate_resets_every_well_of_it_and_nothing_else(reservoirs, plate_
     """A plate reloads as a plate: one button per plate."""
     window, _, system = reservoirs(plate_sipper_config)
     assert sorted(window.resetPlateButtons) == ["probes", "ssct"]
-    ledger = system.devices.reservoirs
-    ledger.restore({"reservoirs": {"ssct/A1": {"dispatched_ul": 1000}, "ssct/B3": {"dispatched_ul": 200},
-                                   "probes/A1": {"dispatched_ul": 50}}})
+    tracker = system.devices.reservoirs
+    tracker.restore({"reservoirs": {"ssct/A1": {"dispatched_ul": 1000}, "ssct/B3": {"dispatched_ul": 200},
+                                    "probes/A1": {"dispatched_ul": 50}}})
     asked, heard = _agrees(monkeypatch), _resets(monkeypatch, system)
     window.resetPlateButtons["ssct"].click()
     settle(system)
     assert asked == [f"Reset every well of ssct? {QUESTION}"] and heard == [("ssct", RUN_TAB_JOB_SOURCE)]
-    assert ledger.remaining("ssct/A1") == 1750 and ledger.remaining("ssct/B3") == 1750
-    assert ledger.remaining("probes/A1") == 55
+    assert tracker.remaining("ssct/A1") == 1750 and tracker.remaining("ssct/B3") == 1750
+    assert tracker.remaining("probes/A1") == 55
     assert _rows(window)["ssct/A1"] == ("sipper", "0", "1750", "1800")
 
 
@@ -279,17 +279,17 @@ def test_a_reset_that_fails_is_a_dialog(reservoirs, plate_sipper_config, monkeyp
     _agrees(monkeypatch)
 
     def refuse(key):
-        raise RuntimeError("the ledger could not be written")
+        raise RuntimeError("the volume tracking file could not be written")
 
     monkeypatch.setattr(system.manual, "refill", refuse)
     window.resetAllButton.click()
     settle(system)
-    assert said == ["The reset was not recorded: the ledger could not be written"]
+    assert said == ["The reset was not recorded: the volume tracking file could not be written"]
 
 
 def test_the_resets_wait_for_an_idle_rig(reservoirs, plate_sipper_config, real_clock):
     """A reset is a manual job: every reset is dead while any job runs and
-    live again after, from the tab's repaint on the session's state. On the
+    live again after, from its own repaint on the session's state. On the
     real clock: the fake one's Event.wait(5) returns at once."""
     window, tab, system = reservoirs(plate_sipper_config)
     _select(window, "port_25")

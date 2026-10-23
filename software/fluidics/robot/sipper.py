@@ -37,9 +37,9 @@ class RobotSipper:
         return dict(self._placements)
 
     def current_well_key(self):
-        """The ledger's spelling of the well the tip is in (`ssct/A1`), or
-        None with the tip in no well: what the ledger asks before a draw
-        through the sipper's port."""
+        """Volume tracking's spelling of the well the tip is in (`ssct/A1`),
+        or None with the tip in no well: what the volume tracker asks
+        before a draw through the sipper's port."""
         return None if self.current_well is None else well_key(self.current_well)
 
     def set_placement(self, name, placement):

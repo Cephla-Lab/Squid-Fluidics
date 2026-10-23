@@ -1,9 +1,9 @@
-"""The Reservoirs window: every reservoir the ledger knows, what each has
-given since its last reset and, where the config declares a volume, what
-is left of it and what was loaded -- with the resets. A tool window the
-Run Experiments tab opens from Reservoirs…, on every rig, declared
-volumes or not. It reads the ledger's balances() and nothing else; each
-reset is the manual refill verb, run as a job on the session under the
+"""The Reservoirs window: every reservoir volume tracking knows, what each
+has given since its last reset and, where the config declares a volume,
+what is left of it and what was loaded -- with the resets. A tool window
+the Run Experiments tab opens from Reservoirs…, on every rig, declared
+volumes or not. It reads the volume tracker's balances() and nothing
+else; each reset is the manual refill verb, run as a job on the session under the
 opener's `job_source`, so a reset waits for an idle rig like any move, a
 run's gate reads the file it rewrote, and the main window keeps the
 opener's tab live under it."""
@@ -15,7 +15,7 @@ from qtpy.QtWidgets import (QAbstractItemView, QHBoxLayout, QHeaderView, QLabel,
 from fluidics.reservoirs import describe_keys
 from fluidics.vocabulary import sipper_vocabulary
 
-from .support import PostsToQtThread, _ask_yes_no, connect_click
+from .support import PostsToQtThread, _ask_yes_no, connect_click, subscribe_until_detached
 
 COLUMNS = ("Reservoir", "Reagent", "Accumulated (µL)", "Current (µL)", "Loaded (µL)")
 
@@ -26,26 +26,30 @@ def _volume(ul):
 
 
 class ReservoirsWindow(PostsToQtThread, QWidget):
-    """One table, the ledger's balances, and the resets: Reset selected
-    (the highlighted rows), Reset <plate> per plate (a plate reloads as a
-    plate) and Reset all. Never modal, and owned by the tab that opens it,
+    """One table, the volume tracker's balances, and the resets: Reset
+    selected (the highlighted rows), Reset <plate> per plate (a plate
+    reloads as a plate) and Reset all. Never modal, and owned by the tab that opens it,
     so it goes with that tab.
 
     While it is open it repaints itself each second -- a run's draws, a
     manual draw, a port renamed on the Manual tab all show within one --
-    and the opener repaints it on every session state change, as does its
-    own reset's end; closed, it paints nothing, and opening it paints it.
-    The resets are live only while the rig is idle, read from the session
-    at each paint."""
+    and on every session state change, which it hears itself, so a job's
+    start and end (its own resets' among them) show at once whoever
+    opened it; closed, it paints nothing, and opening it paints it. The
+    resets are live only while the rig is idle, read from the session at
+    each paint."""
 
     def __init__(self, config, system, job_source, parent=None):
         super().__init__(parent, Qt.Tool)
         self.setWindowTitle("Reservoirs")
         self.system = system
         self.session = system.session
-        self.ledger = system.devices.reservoirs
+        self.tracker = system.devices.reservoirs
         self._jobSource = job_source
         self._keys = []             # the reservoir each row shows, as last painted
+        # Detached on destroyed: the window goes with its opener, the rig does not.
+        self.destroyed.connect(subscribe_until_detached(
+            (system.session.state, self._onSessionState)))
 
         layout = QVBoxLayout(self)
         # The reagent column takes the width; the numeric ones size to
@@ -94,7 +98,7 @@ class ReservoirsWindow(PostsToQtThread, QWidget):
     # --- the paint ---
 
     def showEvent(self, event):
-        """Opened, or brought back: the ledger as it stands now, the names
+        """Opened, or brought back: the volumes as they stand now, the names
         read fresh (a port renamed on the Manual tab while no job ran)."""
         super().showEvent(event)
         self._tick.start()
@@ -105,15 +109,20 @@ class ReservoirsWindow(PostsToQtThread, QWidget):
         self._tick.stop()
         super().hideEvent(event)
 
+    def _onSessionState(self, kind):
+        # On the session's thread; the paint crosses to Qt, and reads the
+        # session when it lands rather than trusting `kind` (RunSession.state).
+        self._post_event("refresh")
+
     def refresh(self):
-        """Paint the ledger and the resets as they stand. A row's cells are
+        """Paint the volumes and the resets as they stand. A row's cells are
         rewritten in place, so a tick does not disturb the selection; when
         the rows themselves change (an untracked bottle's first draw, or its
         reset), the selection follows the reservoirs rather than the row
         numbers."""
         if not self.isVisible():
             return
-        rows = self.ledger.balances()
+        rows = self.tracker.balances()
         selected = set(self.selectedKeys())
         self.table.setRowCount(len(rows))
         for index, (key, reagent, accumulated, current, loaded, undeclared) in enumerate(rows):
@@ -125,9 +134,10 @@ class ReservoirsWindow(PostsToQtThread, QWidget):
         if keys != self._keys:
             self._keys = keys
             self._select(selected)
-        undeclared = self.ledger.undeclared
+        # The rows' own flags: the line and the table read one instant.
+        undeclared = [key for key, *_, flag in rows if flag]
         self.undeclaredLabel.setText(
-            f"Undeclared: {describe_keys(undeclared, self.ledger.tracked)}. "
+            f"Undeclared: {describe_keys(undeclared, self.tracker.tracked)}. "
             "A run is refused until they are reset." if undeclared else "")
         self.undeclaredLabel.setVisible(bool(undeclared))
         self._paintResets()
@@ -166,7 +176,7 @@ class ReservoirsWindow(PostsToQtThread, QWidget):
     def resetSelected(self):
         keys = self.selectedKeys()
         if keys:
-            self._reset(keys, describe_keys(keys, self.ledger.tracked))
+            self._reset(keys, describe_keys(keys, self.tracker.tracked))
 
     def resetPlate(self, name):
         self._reset([name], f"every well of {name}")
@@ -194,7 +204,6 @@ class ReservoirsWindow(PostsToQtThread, QWidget):
         try:
             self.system.run_manual(lambda: manual.refill(*keys), callbacks={
                 "on_error": lambda message: self._post_event("_resetFailed", message),
-                "on_finished": lambda: self._post_event("refresh"),
             }, source=self._jobSource)
         except RuntimeError as e:
             QMessageBox.warning(self, "Rig busy", str(e))

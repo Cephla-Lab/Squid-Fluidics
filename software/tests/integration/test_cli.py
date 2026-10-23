@@ -82,17 +82,18 @@ def test_a_wrong_application_sequence_file_fails_at_time_zero(cli_pair, monkeypa
     assert built == [], "the rig was built for a file the check should have refused"
 
 
-def test_refilled_declares_the_ledger_before_the_run(cli, tmp_path):
-    """Task B10: no ledger file yet, so the ledger starts undeclared and the
-    run is refused; --refilled all declares it and the run goes."""
+def test_refilled_declares_volume_tracking_before_the_run(cli, tmp_path):
+    """Task B10: no volume tracking file yet, so every reservoir starts
+    undeclared and the run is refused; --refilled all declares them and
+    the run goes."""
     (tmp_path / "s.yaml").write_text(
         "sequences:\n  - {type: flow_reagent, fluidic_port: 1, well: A1, flow_rate: 2000, volume: 100}\n")
     config = str(SOFTWARE / "sample_config" / "plate_sipper_config.yaml")
     assert cli("--path", str(tmp_path / "s.yaml"), "--config", config, "--simulation",
-               "--ledger", str(tmp_path / "ledger.json")) == 1
+               "--volume-tracking-file", str(tmp_path / "volumes.json")) == 1
     assert cli("--path", str(tmp_path / "s.yaml"), "--config", config, "--simulation",
-               "--ledger", str(tmp_path / "ledger.json"), "--refilled", "all") == 0
+               "--volume-tracking-file", str(tmp_path / "volumes.json"), "--refilled", "all") == 0
     # Declared now and restored from the file: the well the second run drew
     # from has 5 uL left, so the same run is refused at time zero.
     assert cli("--path", str(tmp_path / "s.yaml"), "--config", config, "--simulation",
-               "--ledger", str(tmp_path / "ledger.json")) == 1
+               "--volume-tracking-file", str(tmp_path / "volumes.json")) == 1

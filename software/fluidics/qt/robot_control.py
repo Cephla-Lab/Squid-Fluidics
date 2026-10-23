@@ -182,6 +182,7 @@ class RobotControlWidget(PostsToQtThread, QWidget):
         self._dedicatedShown = {}       # role -> the config's well when its row last showed it
         for r, role in enumerate(DEDICATED_WELLS):
             self._addDedicatedRow(dedicated, r, role)
+        self._syncDedicatedRows()      # none shown yet: each row takes the config's well
         rows.addLayout(dedicated)
         teach.setLayout(rows)
         teaching.addWidget(teach)
@@ -201,16 +202,13 @@ class RobotControlWidget(PostsToQtThread, QWidget):
 
     def _addDedicatedRow(self, grid, r, role):
         """One dedicated well's row: a reservoir picker and a well picker,
-        prefilled from the config, and Set; held in dedicatedWells[role]."""
-        ref = self._vocabulary.resolve(getattr(gantry(self.config), DEDICATED_WELLS[role]))
+        and Set; held in dedicatedWells[role], blank until _syncDedicatedRows
+        shows the config's well on it."""
         grid.addWidget(QLabel(f"{role.capitalize()} well"), r, 0)
         reservoir = QComboBox()
         for name in sorted(self._vocabulary.reservoirs):
             reservoir.addItem(name, name)
-        reservoir.setCurrentIndex(reservoir.findData(ref.reservoir))
         well = WellCombo()
-        well.fill(self._vocabulary.well_names(ref.reservoir))
-        well.setCurrentIndex(well.findData(ref.well))
         reservoir.currentIndexChanged.connect(
             lambda _index: well.fill(self._vocabulary.well_names(reservoir.currentData())))
         grid.addWidget(reservoir, r, 1)
@@ -218,13 +216,12 @@ class RobotControlWidget(PostsToQtThread, QWidget):
         self._controls.extend((reservoir, well))
         button = self._button(grid, "Set", lambda: self.setDedicatedWell(role), r, 3)
         self.dedicatedWells[role] = (reservoir, well, button)
-        self._dedicatedShown[role] = getattr(gantry(self.config), DEDICATED_WELLS[role])
 
     def _syncDedicatedRows(self):
-        """A row whose well the config no longer names (a Set from a script
-        or an embedder, a Save loaded elsewhere) shows the config's again; a
-        row the operator is mid-way through editing, its well unchanged in
-        the config, is left alone."""
+        """A row not yet shown (the build), or whose well the config no
+        longer names (a Set from a script or an embedder, a Save loaded
+        elsewhere), shows the config's; a row the operator is mid-way
+        through editing, its well unchanged in the config, is left alone."""
         for role, (reservoir, well, _) in self.dedicatedWells.items():
             text = getattr(gantry(self.config), DEDICATED_WELLS[role])
             if text == self._dedicatedShown.get(role):

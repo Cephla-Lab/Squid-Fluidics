@@ -7,9 +7,9 @@ from fluidics.devices import build_devices
 from fluidics.errors import DeviceError, ReservoirInUse
 
 
-def test_a_gantry_rig_builds_a_homed_retracted_sipper_and_a_declared_ledger(plate_sipper_config, built, tmp_path):
+def test_a_gantry_rig_builds_a_homed_retracted_sipper_and_declared_volume_tracking(plate_sipper_config, built, tmp_path):
     devices = built(plate_sipper_config, simulation=True, instant=True,
-                    ledger_path=tmp_path / "ledger.json")
+                    volume_tracking_path=tmp_path / "volumes.json")
     assert devices.robot is not None and devices.robot.current_well is None
     assert devices.robot.position() == (0.5, 0.5, 0.5)           # every axis read after homing, cleared into its stroke
     assert devices.reservoirs.undeclared == list(devices.reservoirs.tracked), \
@@ -23,13 +23,14 @@ def test_a_simulated_rig_without_a_path_starts_declared(plate_sipper_config, bui
     assert devices.reservoirs.declared
 
 
-def test_a_rig_without_a_gantry_or_volumes_has_no_robot_and_a_ledger_that_is_the_tally_alone(
+def test_a_rig_without_a_gantry_or_volumes_has_no_robot_and_a_volume_tracker_that_is_the_tally_alone(
         flow_cell_config, built, tmp_path):
-    """The ledger is on every rig; with no volume declared it only counts:
-    in memory even where a path is given, so no file and no lock, nothing
-    to refuse or refill, and every draw counted under the valves' port."""
+    """The volume tracker is on every rig; with no volume declared it only
+    counts: in memory even where a path is given, so no file and no lock,
+    nothing to refuse or refill, and every draw counted under the valves'
+    port."""
     devices = built(flow_cell_config, simulation=True, instant=True,
-                    ledger_path=tmp_path / "ledger.json")
+                    volume_tracking_path=tmp_path / "volumes.json")
     assert devices.robot is None
     assert devices.reservoirs.tracked == ()
     devices.selector_valves.open_port(3)
@@ -39,7 +40,7 @@ def test_a_rig_without_a_gantry_or_volumes_has_no_robot_and_a_ledger_that_is_the
     sp.execute()
     assert devices.reservoirs.used_rows() == [(3, "z", 100)]
     assert devices.reservoirs.rows() == [], "nothing is tracked, so nothing has a balance"
-    assert list(tmp_path.iterdir()) == [], "a ledger that tracks nothing wrote a file or took a lock"
+    assert list(tmp_path.iterdir()) == [], "tracking nothing, it wrote a file or took a lock"
 
 
 def test_the_robot_comes_up_before_the_valves_and_is_not_survivable(plate_sipper_config, monkeypatch):
@@ -98,9 +99,9 @@ def _record_the_bring_up(monkeypatch, service_class=None):
     return services, controllers, started
 
 
-def test_a_second_launch_on_a_held_ledger_touches_no_device(plate_sipper_config, built, tmp_path, monkeypatch):
-    """The ledger's lock comes before any device is constructed: a second
-    launch on a rig already in use stops there, before it opens or clears
+def test_a_second_launch_on_a_held_volume_tracking_file_touches_no_device(plate_sipper_config, built, tmp_path, monkeypatch):
+    """The volume tracking file's lock comes before any device is
+    constructed: a second launch on a rig already in use stops there, before it opens or clears
     the MCU, homes the robot (lifting the first session's tip out of its
     well) or homes the valves."""
     import fluidics.devices as devices_module
@@ -113,16 +114,16 @@ def test_a_second_launch_on_a_held_ledger_touches_no_device(plate_sipper_config,
         return real_valves(*args, **kwargs)
 
     monkeypatch.setattr(devices_module, "SelectorValveSystem", recording_valves)
-    path = tmp_path / "ledger.json"
-    first = built(plate_sipper_config, simulation=True, instant=True, ledger_path=path)
+    path = tmp_path / "volumes.json"
+    first = built(plate_sipper_config, simulation=True, instant=True, volume_tracking_path=path)
     assert len(controllers) == len(services) == len(valves) == 1
     with pytest.raises(ReservoirInUse):
-        build_devices(plate_sipper_config, simulation=True, instant=True, ledger_path=path)
+        build_devices(plate_sipper_config, simulation=True, instant=True, volume_tracking_path=path)
     assert len(controllers) == 1, "no controller was constructed: the MCU was neither opened nor cleared"
     assert len(services) == 1, "no stage service was opened: nothing connected, homed or moved"
     assert len(valves) == 1, "the valves were not homed"
     assert first.close() == []
-    built(plate_sipper_config, simulation=True, instant=True, ledger_path=path)   # the lock was the first set's
+    built(plate_sipper_config, simulation=True, instant=True, volume_tracking_path=path)   # the lock was the first set's
 
 
 def _record_the_real_pump(monkeypatch, not_initialized=False):
@@ -159,12 +160,12 @@ def test_a_second_launch_sends_the_real_pump_nothing_before_the_lock_refuses_it(
     """The real pump's constructor talks to the pump, so the lock comes
     before it: a second launch on a rig in use sends the first session's
     pump no command at all."""
-    from fluidics.reservoirs import ReservoirLedger, reservoir_definitions
+    from fluidics.reservoirs import VolumeTracker, reservoir_definitions
     commands = _record_the_real_pump(monkeypatch)
-    path = tmp_path / "ledger.json"
-    with closing(ReservoirLedger.load(path, reservoir_definitions(plate_sipper_config))):
+    path = tmp_path / "volumes.json"
+    with closing(VolumeTracker.load(path, reservoir_definitions(plate_sipper_config))):
         with pytest.raises(ReservoirInUse):
-            build_devices(plate_sipper_config, simulation=False, ledger_path=path)
+            build_devices(plate_sipper_config, simulation=False, volume_tracking_path=path)
         assert commands == [], f"sent to the pump before the lock refused the launch: {commands}"
 
 
@@ -175,45 +176,45 @@ def test_a_second_launch_cannot_initialize_the_real_pump_before_the_lock_refuses
     of the first session's pump, perhaps mid-run. The second launch never
     gets that far: the lock refuses it, and the refusal is the lock's, not
     the TypeError the recovery leaves its interrupted query with."""
-    from fluidics.reservoirs import ReservoirLedger, reservoir_definitions
+    from fluidics.reservoirs import VolumeTracker, reservoir_definitions
     commands = _record_the_real_pump(monkeypatch, not_initialized=True)
-    path = tmp_path / "ledger.json"
-    with closing(ReservoirLedger.load(path, reservoir_definitions(plate_sipper_config))):
+    path = tmp_path / "volumes.json"
+    with closing(VolumeTracker.load(path, reservoir_definitions(plate_sipper_config))):
         with pytest.raises((ReservoirInUse, TypeError)) as refused:
-            build_devices(plate_sipper_config, simulation=False, ledger_path=path)
+            build_devices(plate_sipper_config, simulation=False, volume_tracking_path=path)
         initializations = [c for c in commands if c.startswith("Z") and c.endswith("R")]
         assert initializations == [], f"the pump was initialized before the lock refused: {commands}"
         assert refused.type is ReservoirInUse
 
 
-def test_a_pump_that_cannot_be_found_fails_the_launch_and_frees_the_ledger(
+def test_a_pump_that_cannot_be_found_fails_the_launch_and_frees_the_volume_tracking_file(
         plate_sipper_config, tmp_path, monkeypatch):
     """The lock is taken before the devices are constructed, so a
     constructor that raises (here the pump's port search) unwinds through
     the bring-up's cleanup and releases it: the next launch can take it."""
     from fluidics.control import syringe_pump
     from fluidics.errors import DeviceNotFoundError
-    from fluidics.reservoirs import ReservoirLedger, reservoir_definitions
+    from fluidics.reservoirs import VolumeTracker, reservoir_definitions
 
     def not_found(serial_number, device_name):
         raise DeviceNotFoundError(f"{device_name} with serial number {serial_number!r} not found")
 
     monkeypatch.setattr(syringe_pump, "find_serial_port", not_found)
-    path = tmp_path / "ledger.json"
+    path = tmp_path / "volumes.json"
     with pytest.raises(DeviceNotFoundError, match="Syringe pump") as failed:
-        build_devices(plate_sipper_config, simulation=False, ledger_path=path)
+        build_devices(plate_sipper_config, simulation=False, volume_tracking_path=path)
     # The failed launch's frames live on in `failed`, so the lock is free
     # here only if the launch released it, not the garbage collector.
-    ReservoirLedger.load(path, reservoir_definitions(plate_sipper_config)).close()
+    VolumeTracker.load(path, reservoir_definitions(plate_sipper_config)).close()
     assert failed.value is not None
 
 
-def test_a_failure_after_the_robot_is_up_closes_it_without_moves_and_frees_the_ledger(plate_sipper_config, tmp_path, monkeypatch):
+def test_a_failure_after_the_robot_is_up_closes_it_without_moves_and_frees_the_volume_tracking_file(plate_sipper_config, tmp_path, monkeypatch):
     """A stuck valve after the robot has homed: the robot is closed
-    non-quiescently with the rest, and the ledger's lock, taken first, is
-    released, so the next launch can take it."""
+    non-quiescently with the rest, and the volume tracking file's lock,
+    taken first, is released, so the next launch can take it."""
     import fluidics.devices as devices_module
-    from fluidics.reservoirs import ReservoirLedger, reservoir_definitions
+    from fluidics.reservoirs import VolumeTracker, reservoir_definitions
     closed = []
     real = devices_module._build_robot
 
@@ -228,13 +229,13 @@ def test_a_failure_after_the_robot_is_up_closes_it_without_moves_and_frees_the_l
 
     monkeypatch.setattr(devices_module, "_build_robot", tracking)
     monkeypatch.setattr(devices_module, "SelectorValveSystem", stuck)
-    path = tmp_path / "ledger.json"
+    path = tmp_path / "volumes.json"
     with pytest.raises(RuntimeError, match="expected 1") as failed:
-        build_devices(plate_sipper_config, simulation=True, instant=True, ledger_path=path)
+        build_devices(plate_sipper_config, simulation=True, instant=True, volume_tracking_path=path)
     assert closed == [False], "the robot was closed, without moves"
     # The failed launch's frames live on in `failed`, so the lock is free
     # here only if the launch released it, not the garbage collector.
-    ReservoirLedger.load(path, reservoir_definitions(plate_sipper_config)).close()
+    VolumeTracker.load(path, reservoir_definitions(plate_sipper_config)).close()
     assert failed.value is not None
 
 
@@ -274,9 +275,9 @@ def test_a_ctrl_c_while_z_homes_closes_the_launch_without_moves(plate_sipper_con
     """A KeyboardInterrupt while Z homes -- the bench's likeliest moment
     for one -- unwinds like any bring-up failure: the stage is closed
     without a move (halt, brake, disable, disconnect), everything started
-    before it is released, the ledger's lock too, and the interrupt goes
-    on."""
-    from fluidics.reservoirs import ReservoirLedger, reservoir_definitions
+    before it is released, the volume tracking file's lock too, and the
+    interrupt goes on."""
+    from fluidics.reservoirs import VolumeTracker, reservoir_definitions
     from fluidics.robot import simulation as robot_simulation
 
     class InterruptedService(robot_simulation.SimulatedService):
@@ -289,13 +290,13 @@ def test_a_ctrl_c_while_z_homes_closes_the_launch_without_moves(plate_sipper_con
             raise KeyboardInterrupt
 
     services, controllers, started = _record_the_bring_up(monkeypatch, InterruptedService)
-    path = tmp_path / "ledger.json"
+    path = tmp_path / "volumes.json"
     with pytest.raises(KeyboardInterrupt):
-        build_devices(plate_sipper_config, simulation=True, instant=True, ledger_path=path)
+        build_devices(plate_sipper_config, simulation=True, instant=True, volume_tracking_path=path)
     (service,) = services
     assert ("home", "Z3") in service.log and ("home", "X1") not in service.log, "Z was homing"
     _assert_closed_without_a_move(service, controllers, started)
-    ReservoirLedger.load(path, reservoir_definitions(plate_sipper_config)).close()
+    VolumeTracker.load(path, reservoir_definitions(plate_sipper_config)).close()
 
 
 def test_close_runs_the_robot_after_the_reset_and_before_the_syringe(plate_sipper_config, built):

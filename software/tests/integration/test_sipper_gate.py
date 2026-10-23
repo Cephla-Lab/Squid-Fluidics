@@ -45,14 +45,14 @@ def test_a_resumed_tail_is_refused_when_the_well_is_short(plate_sipper_system, r
         plate_sipper_system.run(None, plan=tail)
 
 
-def test_an_undeclared_ledger_refuses_the_run(plate_sipper_config, make_system, tmp_path, real_clock):
+def test_undeclared_volume_tracking_refuses_the_run(plate_sipper_config, make_system, tmp_path, real_clock):
     """Review focus 3, end to end: a mismatched file at bring-up."""
-    (tmp_path / "ledger.json").write_text(
+    (tmp_path / "volumes.json").write_text(
         '{"format": 2, "definitions": {"port_25": {"loaded_ul": 1, "residual_ul": 0}}, "reservoirs": {}}')
-    system = make_system(plate_sipper_config, ledger_path=tmp_path / "ledger.json")
+    system = make_system(plate_sipper_config, volume_tracking_path=tmp_path / "volumes.json")
     # every entry undeclared: the plates named once each, not 192 wells
     with pytest.raises(ReservoirUndeclared,
-                       match="undeclared for port_25, every well of probes, every well of ssct: "):
+                       match="not declared for port_25, every well of probes, every well of ssct: "):
         system.run([HYB])
     system.refill("all")
     system.run([HYB])
@@ -60,10 +60,10 @@ def test_an_undeclared_ledger_refuses_the_run(plate_sipper_config, make_system, 
 
 
 def test_a_rig_that_tracks_nothing_skips_the_gate(system, monkeypatch, caplog):
-    """Its ledger is the tally alone, with nothing to refuse, so no twin is
-    built, no step is replayed and nothing is said: a step the twin could
-    not replay must not become a refusal here, where plan_run deliberately
-    falls back."""
+    """Its volume tracker is the tally alone, with nothing to refuse, so
+    no twin is built, no step is replayed and nothing is said: a step the
+    twin could not replay must not become a refusal here, where plan_run
+    deliberately falls back."""
     import fluidics.time_estimate as time_estimate
     plan = system.plan([FLOW_CELL_STEP])         # priced by replay, before the twin is taken away
 

@@ -36,12 +36,12 @@ class FluidicsSystem:
                                            on_warning=self.warnings.notify)
         self.manual = ManualOperations(devices)
         self.session = RunSession(devices)
-        # The ledger's per-run figure follows the run's boundaries (zeroed
-        # at RunStarted, logged at RunEnded): subscribed first, before the
-        # reports and before any widget that can chain the next run from a
-        # RunEnded -- the order RunSession.events states for the system's
-        # bookkeeping. The ledger is built before the session exists, so
-        # the wiring is here rather than in attach.
+        # The volume tracker's per-run figure follows the run's boundaries
+        # (zeroed at RunStarted, logged at RunEnded): subscribed first,
+        # before the reports and before any widget that can chain the next
+        # run from a RunEnded -- the order RunSession.events states for the
+        # system's bookkeeping. The volume tracker is built before the
+        # session exists, so the wiring is here rather than in attach.
         self.session.events.subscribe(devices.reservoirs.on_run_event)
         # The written record of each run, one JSON per run_id beside the
         # rolling log; built before any widget subscribes (RunSession.events
@@ -50,14 +50,15 @@ class FluidicsSystem:
                                   self.warnings, directory=report_dir)
 
     @classmethod
-    def build(cls, config, simulation=False, on_issue=None, report_dir=None, ledger_path=None):
+    def build(cls, config, simulation=False, on_issue=None, report_dir=None,
+              volume_tracking_path=None):
         """Bring the rig up for `config` and assemble it. What build_devices
         reports through on_issue (a degraded bring-up) passes straight
         through; what it raises (no controller, no pump) raises.
-        ledger_path: where the reservoir ledger lives (None: beside the run
-        reports, named after the config)."""
+        volume_tracking_path: where the volume tracking file lives (None:
+        beside the run reports, named after the config)."""
         return cls(config, build_devices(config, simulation, on_issue=on_issue,
-                                         ledger_path=ledger_path),
+                                         volume_tracking_path=volume_tracking_path),
                    report_dir=report_dir)
 
     # --- the one job ---
@@ -95,24 +96,25 @@ class FluidicsSystem:
             raise OperationError("Do not lower tip is on: the sipper would travel to its wells "
                                  "without dipping, so nothing could be drawn; switch it off to run")
         # The reservoir gate (spec §7): the plan replayed on a simulated
-        # twin restored from the live ledger's snapshot (the live ledger is
-        # only read), so a run that would draw from an emptied well or
-        # bottle -- a fresh list or a resumed tail alike -- is refused
+        # twin restored from the live volume tracker's snapshot (the live
+        # one is only read), so a run that would draw from an emptied well
+        # or bottle -- a fresh list or a resumed tail alike -- is refused
         # here, not at the pump hours in.
         self.check_reservoirs(plan)
         self.session.start(sequences, self.operations, plan=plan)
 
     def check_reservoirs(self, plan):
         """The per-reservoir report for `plan`, replayed on a twin restored
-        from the live ledger's snapshot, which is only read; or the refusal
-        time_estimate.check_reservoirs raises. Empty, with no replay, on a
-        rig that tracks no volume: its ledger is the tally alone, with
-        nothing to refuse, and a step the twin cannot replay must not turn
-        into a refusal there (plan_run deliberately falls back)."""
-        ledger = self.devices.reservoirs
-        if not ledger.tracked:
+        from the live volume tracker's snapshot, which is only read; or the
+        refusal time_estimate.check_reservoirs raises. Empty, with no
+        replay, on a rig that tracks no volume: its volume tracker is the
+        tally alone, with nothing to refuse, and a step the twin cannot
+        replay must not turn into a refusal there (plan_run deliberately
+        falls back)."""
+        tracker = self.devices.reservoirs
+        if not tracker.tracked:
             return []
-        rows = check_reservoirs(plan, self.devices.config, ledger.snapshot())
+        rows = check_reservoirs(plan, self.devices.config, tracker.snapshot())
         # The general notice at the start of a run, once, at INFO: what the
         # replay says each touched reservoir has left when the run is done.
         # A refusal above is the error; nothing here is a warning.

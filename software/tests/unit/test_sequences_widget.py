@@ -17,6 +17,7 @@ import gui
 from qtpy.QtCore import Qt, QEvent
 from qtpy.QtWidgets import QApplication
 from fluidics.control.config import available_port_count, available_ports
+from fluidics.reservoirs import VolumeTracker
 from fluidics.sequences import SequenceListAdapter, sequence_problem
 from fluidics.subscribers import Subscribers
 from fluidics.vocabulary import sipper_vocabulary
@@ -28,12 +29,12 @@ from ..conftest import FLOW, TEMP
 
 def fake_system(port_names):
     """The system as this widget reads it on a rig that tracks no volume:
-    the valves' names, an idle session, a warnings channel and a ledger
-    that is the tally alone, with nothing drawn."""
+    the valves' names, an idle session, a warnings channel and a volume
+    tracker that is the tally alone, with nothing drawn."""
     return SimpleNamespace(
         devices=SimpleNamespace(
             selector_valves=SimpleNamespace(get_port_names=lambda: list(port_names)),
-            reservoirs=SimpleNamespace(tracked=(), balances=lambda: [], undeclared=[])),
+            reservoirs=VolumeTracker({})),
         session=FakeSession(),
         warnings=Subscribers("test warnings"),
     )

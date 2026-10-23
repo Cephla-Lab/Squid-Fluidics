@@ -24,7 +24,7 @@ class TestRunReports:
         assert report["run_id"] == ended[0]
         assert report["outcome"] == "finished"
         assert report["plan"], "the plan belongs in the record"
-        assert report["reagent_used_ul"], "the ledger's totals belong in it"
+        assert report["reagent_used_ul"], "the volume tracker's totals belong in it"
 
 
 def test_the_report_carries_the_reservoirs(plate_sipper_system, real_clock, tmp_path):

@@ -1,10 +1,10 @@
 """The written record of each run: one JSON file per run_id.
 
-`RunReports` is a subscriber beside the reservoir ledger and nothing more
+`RunReports` is a subscriber beside the volume tracker and nothing more
 -- no operation writes into it, so dropping it (or never building it)
 changes no operations code. It pairs RunStarted's plan with RunEnded by
-run_id, reads the ledger's per-run figures and balances at the ending,
-and writes what a post-mortem or a lab notebook wants -- outcome, elapsed
+run_id, reads the volume tracker's per-run figures and balances at the
+ending, and writes what a post-mortem or a lab notebook wants -- outcome, elapsed
 time, the plan with its estimates, the sequences as run, per-port reagent
 use, what each tracked reservoir has left, the run's warnings -- to
 `<reports directory>/<run_id>.json`, beside the rolling log.
@@ -12,7 +12,7 @@ use, what each tracked reservoir has left, the run's warnings -- to
 Everything is collected synchronously in the event dispatch, where the
 facts still hold: RunEnded arrives inside the session's end transition,
 and a later subscriber in the same delivery (the GUI's resume offer) may
-chain the next run -- whose RunStarted resets the very ledger this
+chain the next run -- whose RunStarted resets the very figures this
 report reads. Only the disk is off-thread: the writer thread is
 short-lived and non-daemon, so a dispatch never waits on a file and an
 interpreter shutting down right after a run still finishes the write.
@@ -58,10 +58,10 @@ def _utc(seconds):
 
 class RunReports:
     def __init__(self, run_events, reservoirs, warnings, directory=None):
-        """reservoirs: the ledger whose per-run figures (used_rows) and
-        balances (rows) the report carries. directory: where the reports
-        go; None resolves to default_report_directory() at each write, so
-        construction never touches the disk."""
+        """reservoirs: the volume tracker whose per-run figures (used_rows)
+        and balances (rows) the report carries. directory: where the
+        reports go; None resolves to default_report_directory() at each
+        write, so construction never touches the disk."""
         self._directory = directory
         self._reservoirs = reservoirs
         self._lock = threading.Lock()

@@ -9,8 +9,8 @@ the tip at each corner, Z3 holding unpowered (it has no brake: nm-servo
 PR #6) -- is the CHECKLIST printed when the script starts.
 
 Nothing moves until Enter is pressed at this console, and the jogs are
-typed here: the script holds the robot's port and the reservoir ledger's
-lock, so the GUI (and its Robot tab) must be closed while it runs. After
+typed here: the script holds the robot's port and the volume tracking
+file's lock, so the GUI (and its Robot tab) must be closed while it runs. After
 every move it prints each axis's settle error -- where the drive reads
 the axis once the move has ended, less where the stage sent it -- and
 their worst at the end. A failure or Ctrl+C closes without moving (a

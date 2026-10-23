@@ -22,8 +22,8 @@ def instant_devices(built):
     """A simulated DeviceSet with its pacing switched off (build_devices'
     instant knob): the controller's one-second commands and the pump's
     five-second moves would otherwise be spent for real under real_clock.
-    The gates are untouched; any other build_devices keyword (ledger_path)
-    passes through."""
+    The gates are untouched; any other build_devices keyword
+    (volume_tracking_path) passes through."""
     def _build(config, **build_kwargs):
         devices = built(config, simulation=True, instant=True, **build_kwargs)
         # The publish thread has nothing to say to these tests (none read
@@ -39,8 +39,8 @@ def instant_devices(built):
 @pytest.fixture
 def plate_sipper_rig(plate_sipper_config, instant_devices):
     """(MERFISHOperations with a sipper, syringe_pump) over the sipper
-    fixture config: an instant simulated rig with a fresh in-memory ledger,
-    every well full, for the rows only a sipper rig can run."""
+    fixture config: an instant simulated rig with a fresh in-memory volume
+    tracker, every well full, for the rows only a sipper rig can run."""
     devices = instant_devices(plate_sipper_config)
     return build_operations(plate_sipper_config, devices), devices.syringe_pump
 
@@ -49,8 +49,8 @@ def plate_sipper_rig(plate_sipper_config, instant_devices):
 def make_system(instant_devices, tmp_path):
     """FluidicsSystem(config, **build_kwargs) on the instant simulated
     DeviceSet, each one torn down clean -- the shape test_system, test_usage
-    and the sipper modules share, whichever config or ledger they build on.
-    Run reports land in the test's own tmp_path, never the user's log
+    and the sipper modules share, whichever config or volume tracking they
+    build on. Run reports land in the test's own tmp_path, never the user's log
     directory."""
     from fluidics.system import FluidicsSystem
     systems = []
@@ -74,8 +74,9 @@ def system(flow_cell_config, make_system):
 @pytest.fixture
 def plate_sipper_system(plate_sipper_config, make_system):
     """`system` on the sipper fixture config: a FluidicsSystem over an
-    instant simulated sipper rig with a fresh in-memory ledger, every well
-    full, torn down clean; its run reports land in the test's tmp_path."""
+    instant simulated sipper rig with a fresh in-memory volume tracker,
+    every well full, torn down clean; its run reports land in the test's
+    tmp_path."""
     return make_system(plate_sipper_config)
 
 

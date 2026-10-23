@@ -53,8 +53,8 @@ class RunSession:
         # deferral the early-end report has always had. Subscription order
         # is delivery order, and a subscriber may chain the next run from
         # RunEnded (the GUI's resume offer) while later subscribers still
-        # wait for theirs -- so system-level bookkeeping (the reservoir
-        # ledger's per-run figure, the reports) must subscribe before any
+        # wait for theirs -- so system-level bookkeeping (the volume
+        # tracker's per-run figure, the reports) must subscribe before any
         # widget that can chain.
         self.events = Subscribers("run events")
         self._run_ids = itertools.count(1)     # atomic under the GIL
@@ -157,8 +157,8 @@ class RunSession:
         except BaseException as e:
             # The worker's RunStarted already went out (from its
             # constructor); a launch that failed must not leave it
-            # unpaired -- consumers pairing starts with endings (the reservoir
-            # ledger's per-run figure, a display's lifecycle) would wait forever.
+            # unpaired -- consumers pairing starts with endings (the volume
+            # tracker's per-run figure, a display's lifecycle) would wait forever.
             # This one RunEnded lands after _finish's state(None), outside
             # the serialized ordering -- acceptable for a thread that would
             # not start, revisit if a chaining subscriber ever exists.

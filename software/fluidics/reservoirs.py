@@ -1,8 +1,8 @@
 """Every reagent draw, counted once; what every declared reservoir has
 left, on disk (spec §2.4, D6).
 
-The ledger is built on every rig, declared volumes or not, and is the one
-tally of the pump's draws: the pump asks it before every extract it
+The volume tracker is built on every rig, declared volumes or not, and is
+the one tally of the pump's draws: the pump asks it before every extract it
 dispatches (SyringePump.draw_authorizers), and only draws through the
 syringe's reagent path (the configured extract port) count -- a chamber
 draw, air and every dispense are not reagent consumption. The key is the
@@ -13,28 +13,29 @@ the no-air rule. The join of the pump's volume with the valves' port is
 sound by structure, not convention: the pump asks synchronously on the
 job thread, the only thread that moves valves, and the session admits one
 job at a time, so the port cannot change between the question and the
-dispatch. One charge keeps two figures: what each reservoir has drawn
-since the run started, kept by key and summed under the valves' ports for
-`used_rows` (the report's per-port block and the run-end log line; zeroed
-when a run starts, so a manual draw between runs stays in view until
-then), and what each reservoir has given since its last reset -- for a
-tracked one the file's own row (`rows`), for an untracked bottle a figure
-held in memory alone. `balances` reads the second per reservoir, beside
-what is loaded and left where a volume is declared: the Reservoirs
-window's one read.
+dispatch. One charge keeps two figures: what each port has drawn since
+the run started, a well's draw under the sipper's port (`used_rows`: the
+report's per-port block and the run-end log line; zeroed when a run
+starts, so a manual draw between runs stays in view until then), and what
+each reservoir has given since its last reset -- for a tracked one the
+file's own row, for an untracked bottle a figure held in memory alone.
+`balances` reads the second per reservoir, beside what is loaded and left
+where a volume is declared: the Reservoirs window's one read, and `rows`
+is its tracked part, the report's and the gate's.
 
 A declared volume -- a key under `loaded_volume_ul`, or every well of a
-gantry's plates -- adds only a limit. For such a tracked key the ledger
-refuses a draw that would not fit, charges the one that does and writes
-the file, all before the plunger moves, so a crash or a write that fails
-can only leave the file reading high, never low; an untracked key is
-counted, never refused and never written. Tracked entries are restored
+gantry's plates -- adds only a limit. For such a tracked key the volume
+tracker refuses a draw that would not fit, charges the one that does and
+writes the file, all before the plunger moves, so a crash or a write that
+fails can only leave the file reading high, never low; an untracked key
+is counted, never refused and never written. Tracked entries are restored
 at bring-up entry by entry: an entry whose definition matches the file
 keeps its balance; one that changed, is new, or has no file is undeclared,
-and nothing tracked is drawn until its refill is declared -- a ledger
-never guesses. One process at a time holds a rig's ledger (a lock file),
-where there is a file at all: build_devices decides that, and gives a rig
-that tracks nothing an in-memory ledger.
+and nothing tracked is drawn until its refill is declared -- volume
+tracking never guesses. One process at a time holds a rig's volume
+tracking file (a lock file), where there is a file at all: build_devices
+decides that, and gives a rig that tracks nothing an in-memory volume
+tracker.
 """
 
 import hashlib
@@ -52,7 +53,7 @@ from .errors import (ReservoirDrawTooLarge, ReservoirError, ReservoirInUse, Rese
                      ReservoirOverdraw, ReservoirUndeclared, ReservoirWriteError)
 from .events import RunEnded, RunStarted
 from .files import atomic_write
-from .robot.labware import G96, WellRef, plate_of, well_key
+from .robot.labware import G96, WellRef, plate_of, ref_of, well_key
 from .run_log import get_default_log_directory
 
 _logger = logging.getLogger(__name__)
@@ -61,19 +62,19 @@ FORMAT = 2
 
 
 def _no_name(key):
-    """What a ledger attached without the valves' or the plates' names
-    calls every reservoir."""
+    """What a volume tracker attached without the valves' or the plates'
+    names calls every reservoir."""
     return None
 
 
-class ReservoirLedger:
+class VolumeTracker:
     def __init__(self, definitions, path=None, declared=True):
         self._defs = {key: {"loaded_ul": int(d["loaded_ul"]), "residual_ul": int(d["residual_ul"])}
                       for key, d in definitions.items()}
         # reservoir key -> uL given since its last reset: every tracked key,
         # and an untracked bottle from its first draw (never on the file).
         self._dispatched = {key: 0.0 for key in self._defs}
-        self._used_run = {}          # reservoir key -> uL drawn since the run started
+        self._used_run = {}          # routed port -> uL drawn since the run started
         self._path = Path(path) if path is not None else None
         self._lock = threading.Lock()
         self._lockfile = None
@@ -118,9 +119,10 @@ class ReservoirLedger:
         key, port = self._route()
         if port == self._sipper_port and key not in self._defs:
             # Untracked is for bulk bottles. Every well of every plate is
-            # defined, so a well the ledger does not know would be a guess.
+            # defined, so a well the volume tracker does not know would be
+            # a guess.
             raise ReservoirUndeclared(
-                f"{key}: the sipper is in a well the reservoir ledger does not define; "
+                f"{key}: the sipper is in a well volume tracking does not define; "
                 "the draw was not started")
         with self._lock:
             self._check(key, volume_ul)
@@ -135,15 +137,17 @@ class ReservoirLedger:
                 self._dispatched[key] = self._dispatched.get(key, 0.0) + volume_ul
             # Counted last, once the draw is authorized: a refused draw, a
             # write that failed included, leaves the per-run figure as it
-            # was, with nothing to roll back.
-            self._used_run[key] = self._used_run.get(key, 0.0) + volume_ul
+            # was, with nothing to roll back. A well draw is counted under
+            # the sipper's port, the port the valves name.
+            self._used_run[port] = self._used_run.get(port, 0.0) + volume_ul
 
     # --- reading ---
 
     @property
     def tracked(self):
         """The keys with a declared volume, in key order; empty where the
-        ledger is the tally alone and has nothing to refuse or declare."""
+        volume tracker is the tally alone and has nothing to refuse or
+        declare."""
         return tuple(sorted(self._defs))
 
     @property
@@ -162,6 +166,13 @@ class ReservoirLedger:
     def remaining(self, key):
         with self._lock:
             return self._remaining(key)
+
+    def usable(self, key):
+        """What tracked `key` gives when full: its loaded volume less what
+        its tube end cannot reach. The definitions are fixed at
+        construction, so no lock."""
+        d = self._defs[key]
+        return d["loaded_ul"] - d["residual_ul"]
 
     def check(self, key, volume_ul):
         """Refuse before a draw that would not fit, or that no loading
@@ -183,32 +194,29 @@ class ReservoirLedger:
             return      # not a draw: no liquid moves, so there is nothing to refuse
         if self._undeclared:
             raise ReservoirUndeclared(undeclared_message(self._undeclared, self._defs))
-        d = self._defs[key]
-        usable = d["loaded_ul"] - d["residual_ul"]
+        usable = self.usable(key)
         if volume_ul > usable:
             raise ReservoirDrawTooLarge(key, volume_ul, usable)
         if volume_ul > self._remaining(key):
             raise ReservoirOverdraw(key, volume_ul, self._remaining(key), usable)
 
     def rows(self):
-        """(key, dispatched_ul, remaining_ul) for every touched reservoir."""
-        with self._lock:
-            return [(key, self._dispatched[key], self._remaining(key))
-                    for key in sorted(self._defs) if self._dispatched[key]]
+        """(key, dispatched_ul, remaining_ul) for every tracked reservoir
+        that has given anything since its last reset, in balances()' order:
+        its rows filtered, not a second reading, so the report, the gate's
+        notice and the Reservoirs window cannot disagree."""
+        return [(key, accumulated, current)
+                for key, _, accumulated, current, loaded, _ in self.balances()
+                if loaded is not None and accumulated]
 
     def used_rows(self):
         """(port, reagent name or None, uL) per port drawn from since the
-        run started, in port order: the per-key figures summed under the
-        ports the valves name (every well's under the sipper's), the
-        report's and the run-end log line's view. The names are read
-        fresh here, so a rename shows on the next paint."""
+        run started, in port order (every well's draws under the sipper's
+        port): the report's and the run-end log line's view. The names are
+        read fresh here, so a rename shows on the next paint."""
         with self._lock:
             used = dict(self._used_run)
-        by_port = {}
-        for key, ul in used.items():
-            port = self._port_of(key)
-            by_port[port] = by_port.get(port, 0.0) + ul
-        return [(port, self._port_to_reagent(port), by_port[port]) for port in sorted(by_port)]
+        return [(port, self._port_to_reagent(port), used[port]) for port in sorted(used)]
 
     def balances(self):
         """(key, reagent, accumulated_ul, current_ul or None, loaded_ul or
@@ -217,7 +225,7 @@ class ReservoirLedger:
         window's one read. Accumulated is what the reservoir has given
         since its last reset; current is what is left of it and loaded its
         declared volume, both None for an untracked bottle, which declares
-        none; undeclared is whether the ledger lacks its declaration (a run
+        none; undeclared is whether its volume is yet to be declared (a run
         that draws on anything tracked is refused until then). The bottles
         come first by port number, then the wells by plate and in the
         plate's own order. A bottle's reagent is the valves' name for its
@@ -232,11 +240,6 @@ class ReservoirLedger:
                      key in self._undeclared)
                     for key in keys]
         return [(key, self._reagent(key), *figures) for key, *figures in rows]
-
-    def _port_of(self, key):
-        """The valves' port a reservoir is drawn through: a well's is the
-        sipper's."""
-        return self._sipper_port if plate_of(key) is not None else port_of(key)
 
     def _reagent(self, key):
         if plate_of(key) is None:
@@ -287,7 +290,7 @@ class ReservoirLedger:
 
     def restore(self, snapshot):
         """Balances and the undeclared set from a snapshot of this same
-        ledger (the gate's replay copy)."""
+        volume tracker (the gate's replay copy)."""
         with self._lock:
             for key, entry in snapshot.get("reservoirs", {}).items():
                 if key in self._defs:
@@ -345,7 +348,7 @@ class ReservoirLedger:
             self._dispatched.update(balances)
             self._undeclared = undeclared
             raise ReservoirWriteError(
-                f"the reservoir ledger could not be written ({e}); {what}") from e
+                f"the volume tracking file could not be written ({e}); {what}") from e
 
     def _write(self):
         if self._path is None:
@@ -354,78 +357,78 @@ class ReservoirLedger:
         with atomic_write(self._path) as f:
             json.dump(self._snapshot(), f, indent=1)
             # Synced before the draw starts: a power cut after an unsynced
-            # write can bring the old file back, and the ledger would read low.
+            # write can bring the old file back, and the file would read low.
             f.flush()
             os.fsync(f.fileno())
         _sync_directory(self._path.parent)
 
     @classmethod
     def load(cls, path, definitions):
-        """A ledger over `definitions`, holding the lock on `path`: entries
-        whose definition matches the file are restored, every other entry
-        is undeclared (a missing, unreadable or corrupt file, one of the
-        wrong shape included: all of them). Anything else that goes wrong
-        releases the lock before it is raised."""
+        """A volume tracker over `definitions`, holding the lock on
+        `path`: entries whose definition matches the file are restored,
+        every other entry is undeclared (a missing, unreadable or corrupt
+        file, one of the wrong shape included: all of them). Anything else
+        that goes wrong releases the lock before it is raised."""
         path = Path(path)
-        ledger = cls(definitions, path=path, declared=False)
-        ledger._lockfile = _acquire_lock(path)
+        tracker = cls(definitions, path=path, declared=False)
+        tracker._lockfile = _acquire_lock(path)
         try:
-            ledger._reconcile(path)
+            tracker._reconcile(path)
         except BaseException:
-            ledger.close()
+            tracker.close()
             raise
-        return ledger
+        return tracker
 
     def _reconcile(self, path):
         """Restore from the file at `path` every entry it vouches for."""
         try:
             balances, declared = self._entries_from(json.loads(path.read_text()))
         except FileNotFoundError:
-            _logger.warning("No reservoir ledger at %s: every reservoir is undeclared until "
-                            "its refill is declared.", path)
+            _logger.warning("No volume tracking file at %s: every reservoir is undeclared "
+                            "until its refill is declared.", path)
             return
         except (OSError, ValueError, TypeError) as e:
-            _logger.error("The reservoir ledger at %s cannot be read (%s): every reservoir is "
-                          "undeclared until its refill is declared.", path, e)
+            _logger.error("The volume tracking file at %s cannot be read (%s): every "
+                          "reservoir is undeclared until its refill is declared.", path, e)
             return
         self._dispatched.update(balances)
         self._undeclared -= declared
         if self._undeclared:
-            _logger.warning("The reservoir ledger at %s does not cover %s: undeclared until "
-                            "their refills are declared.", path,
+            _logger.warning("The volume tracking file at %s does not cover %s: undeclared "
+                            "until their refills are declared.", path,
                             describe_keys(self._undeclared, self._defs))
 
     def _entries_from(self, on_disk):
-        """(balances, declared) from a parsed ledger file: a balance for
-        every entry whose definition matches, declared too unless the file
-        has it undeclared. A balance no draw could have left (not a number
+        """(balances, declared) from a parsed volume tracking file: a
+        balance for every entry whose definition matches, declared too
+        unless the file has it undeclared. A balance no draw could have left (not a number
         from 0 to the loaded volume) is not restored, so that entry stays
         undeclared. ValueError for a file of the wrong shape: it is corrupt
-        as a whole, and a corrupt ledger is not read in part."""
+        as a whole, and a corrupt file is not read in part."""
         if not isinstance(on_disk, dict):
-            raise ValueError("not a ledger")
+            raise ValueError("not a volume tracking file")
         disk_defs = on_disk.get("definitions", {})
         disk_rows = on_disk.get("reservoirs", {})
         disk_undeclared = on_disk.get("undeclared", [])
         if not (isinstance(disk_defs, dict) and isinstance(disk_rows, dict)
                 and isinstance(disk_undeclared, list)
                 and all(isinstance(k, str) for k in disk_undeclared)):
-            raise ValueError("not a ledger")
+            raise ValueError("not a volume tracking file")
         balances, declared = {}, set()
         for key, d in self._defs.items():
             if disk_defs.get(key) != d:
                 continue
             row = disk_rows.get(key, {})
             if not isinstance(row, dict):
-                raise ValueError(f"the entry for {key} is not a ledger row")
+                raise ValueError(f"the entry for {key} is not a reservoir's row")
             used = row.get("dispatched_ul", 0)
             if isinstance(used, bool) or not isinstance(used, (int, float)):
                 raise ValueError(f"the balance of {key} is not a number: {used!r}")
             # NaN fails every comparison, and so does an infinity here.
             if not 0 <= used <= d["loaded_ul"]:
-                _logger.error("The reservoir ledger's balance for %s (%r uL dispatched) is not "
-                              "one a draw could have left: undeclared until its refill is "
-                              "declared.", key, used)
+                _logger.error("The volume tracking file's balance for %s (%r uL dispatched) "
+                              "is not one a draw could have left: undeclared until its refill "
+                              "is declared.", key, used)
                 continue
             balances[key] = float(used)
             if key not in disk_undeclared:
@@ -433,7 +436,7 @@ class ReservoirLedger:
         return balances, declared
 
     def close(self):
-        """Release the lock; the ledger may not be used after this."""
+        """Release the lock; the volume tracker may not be used after this."""
         handle, self._lockfile = self._lockfile, None
         if handle is not None:
             _release_lock(handle)
@@ -443,11 +446,11 @@ def _order(key):
     """Where a reservoir sits in balances(): the bottles by port number,
     then the wells by plate and, within one, column-major -- the plate's
     own order, the well pickers' too."""
-    plate = plate_of(key)
-    if plate is None:
+    ref = ref_of(key)
+    if ref is None:
         return (0, port_of(key) or 0, key)
-    row, column = G96.index(key.partition("/")[2])
-    return (1, plate, column, row)
+    row, column = G96.index(ref.well)
+    return (1, ref.reservoir, column, row)
 
 
 def describe_keys(keys, defined):
@@ -456,7 +459,7 @@ def describe_keys(keys, defined):
     than four of its wells among them by their count ("<n> wells of
     <plate>": a label stays a line or two on a rig of 192 wells), every
     other key as it is (a bottle, the few wells of a plate). `defined` is
-    every key the ledger tracks: it says what a plate's wells are."""
+    every tracked key: it says what a plate's wells are."""
     keys = set(keys)
     plates = {}
     for key in defined:
@@ -480,7 +483,7 @@ def describe_keys(keys, defined):
 def undeclared_message(undeclared, defined):
     """The refusal of a draw, or of a run at time zero, while anything
     tracked is undeclared."""
-    return ("the reservoir ledger is undeclared for " + describe_keys(undeclared, defined)
+    return ("volume tracking is not declared for " + describe_keys(undeclared, defined)
             + ": reset them (Reservoirs… on the Run Experiments tab, or --refilled) first")
 
 
@@ -501,8 +504,8 @@ def _sync_directory(directory):
 
 def _acquire_lock(path):
     """An exclusive, process-wide lock on `<path>.lock`, or ReservoirInUse.
-    Advisory and non-blocking, so two sessions on one rig cannot both run a
-    ledger they would each believe to be the only writer."""
+    Advisory and non-blocking, so two sessions on one rig cannot both write
+    a volume tracking file each would believe it alone writes."""
     lock_path = path.with_name(path.name + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     handle = open(lock_path, "a+")
@@ -510,8 +513,8 @@ def _acquire_lock(path):
         _flock(handle, acquire=True)
     except OSError:
         handle.close()
-        raise ReservoirInUse(f"the reservoir ledger {path} is in use by another process "
-                             "(close that session first)") from None
+        raise ReservoirInUse(f"this rig's volume tracking file ({path}) is in use by another "
+                             "process (close that session first)") from None
     return handle
 
 
@@ -534,10 +537,10 @@ def _flock(handle, acquire):
         fcntl.flock(handle.fileno(), (fcntl.LOCK_EX | fcntl.LOCK_NB) if acquire else fcntl.LOCK_UN)
 
 
-def default_ledger_path(config_path):
+def default_volume_tracking_path(config_path):
     """Under the log directory, beside the run reports, named by a hash of
     the config's absolute path, so two rigs on one machine never share a
-    ledger."""
+    volume tracking file."""
     digest = hashlib.sha1(os.path.abspath(config_path).encode()).hexdigest()[:12]
     return get_default_log_directory() / "reservoirs" / f"{digest}.json"
 

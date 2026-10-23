@@ -5,7 +5,7 @@ config each time they are asked for, so a taught value is what the next
 placement carries."""
 
 from .control.config import gantry
-from .robot.labware import PlatePlacement, parse_ref, unknown_reservoir
+from .robot.labware import PlatePlacement, parse_ref, ref_of, unknown_reservoir
 
 
 class SipperVocabulary:
@@ -27,12 +27,12 @@ class SipperVocabulary:
                 for well in self.reservoirs[reservoir].geometry.wells()]
 
     def well_name(self, key):
-        """The config's label for the well a ledger key names (`ssct/A1`),
+        """The config's label for the well a reservoir key names (`ssct/A1`),
         or None where the plate gives it none: what the Reservoirs window
         calls a well's reagent."""
-        plate, _, well = key.partition("/")
-        r = self.reservoirs.get(plate)
-        return None if r is None else (r.well_names or {}).get(well)
+        ref = ref_of(key)
+        r = None if ref is None else self.reservoirs.get(ref.reservoir)
+        return None if r is None else (r.well_names or {}).get(ref.well)
 
     def placement(self, name):
         """The plate as the config has it now."""

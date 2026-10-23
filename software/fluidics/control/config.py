@@ -62,7 +62,7 @@ class SelectorValvesConfig(_StrictModel):
     tubing_fluid_amount_to_valve_ul: Dict[int, int]
     name_mapping: Optional[Dict[str, str]] = None
     tubing_fluid_amount_ul: Dict[str, int]
-    # Optional per port: a bulk bottle the reservoir ledger tracks (spec D6)
+    # Optional per port: a bulk bottle the volume tracker tracks (spec D6)
     # and what its tube end cannot reach. A port without an entry is not
     # tracked, which is how every rig behaved before.
     loaded_volume_ul: Optional[Dict[str, int]] = None

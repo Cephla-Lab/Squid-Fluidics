@@ -248,7 +248,7 @@ def test_a_reload_of_the_plate_the_tip_is_in_is_refused_until_retract(plate_sipp
     everything, is refused naming the well and the remedy; the other plate's
     goes through; after Retract so does this one's."""
     devices = built(plate_sipper_config, simulation=True, instant=True,
-                    ledger_path=tmp_path / "ledger.json")
+                    volume_tracking_path=tmp_path / "volumes.json")
     manual = ManualOperations(devices)
     manual.go_to_well("ssct/A2")
     with pytest.raises(RuntimeError, match="tip is in ssct/A2.*Retract"):
@@ -271,7 +271,7 @@ def test_without_the_witness_a_plate_reload_waits_for_a_retracted_tip(plate_sipp
     to be retracted lets a plate (or everything) reload; a bottle is never
     under the tip."""
     devices = built(plate_sipper_config, simulation=True, instant=True,
-                    ledger_path=tmp_path / "ledger.json")
+                    volume_tracking_path=tmp_path / "volumes.json")
     manual = ManualOperations(devices)
     manual.go_to_well("ssct/A2")
     manual.jog("z", -1.0)                          # Z 51: the witness is gone, the tip is not

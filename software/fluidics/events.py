@@ -3,7 +3,7 @@
 One channel (`RunSession.events`) carries typed facts about run
 boundaries; continuous state (paused, at rest, the clock) stays with
 `RunSession.snapshot()`. Consumers -- the GUI, the CLI's exit code, the
-reservoir ledger -- subscribe to the one channel instead of each holding
+volume tracker -- subscribe to the one channel instead of each holding
 its own callback wiring.
 
 The plan is the one expansion of "each sequence × its repeats": the

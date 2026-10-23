@@ -74,7 +74,8 @@ class ManualOperations:
     def extract(self, syringe_port, volume_ul, flow_rate_ul_min, on_started=None):
         """Draw `volume_ul` in through the pump's `syringe_port` at `flow_rate_ul_min`."""
         # Only the extract port draws through the selector and the sipper
-        # (the ledger's rule too); the pump's other ports never reach them.
+        # (the volume tracker's rule too); the pump's other ports never
+        # reach them.
         if (syringe_port == self._extract_port and self._sipper_port is not None
                 and self.sv.get_current_port() == self._sipper_port
                 and self.robot.current_well is None):
@@ -210,8 +211,7 @@ class ManualOperations:
         key = well_key(ref)
         # Priming and clean-up each draw the sipper's line full from it.
         need = self.sv.get_tubing_fluid_amount_to_port(self._sipper_port)
-        r = self._vocabulary.reservoirs[ref.reservoir]
-        usable = (r.loaded_ul_by_well or {}).get(ref.well, r.loaded_ul) - r.residual_ul
+        usable = self.reservoirs.usable(key)     # every well of every plate is tracked
         if usable < need:
             raise ValueError(f"{key} gives {usable} uL when full, less than the {need} uL the "
                              f"sipper's line takes to prime: pick a fuller well")
@@ -219,8 +219,8 @@ class ManualOperations:
         _logger.info("Taught: %s well %s.", role, key)
 
     def refill(self, *keys):
-        """Reset `keys` in the ledger, each `all`, a plate name, or one key
-        -- a tracked reservoir declared full, an untracked bottle's
+        """Reset `keys` in the volume tracker, each `all`, a plate name, or
+        one key -- a tracked reservoir declared full, an untracked bottle's
         accumulated figure zeroed -- all of them in one write or none. The
         tip's rule is asked of every key before anything changes."""
         for key in keys:

@@ -1,7 +1,8 @@
 # tests/integration/test_usage.py
-"""The ledger's per-run view against the real simulated rig: draws the
-operations actually queue land on the right port, from a run's beginning
--- on a rig that declares no volume, where the ledger is the tally alone."""
+"""The volume tracker's per-run view against the real simulated rig:
+draws the operations actually queue land on the right port, from a run's
+beginning -- on a rig that declares no volume, where the volume tracker is
+the tally alone."""
 
 import pytest
 
@@ -9,7 +10,7 @@ from .conftest import FLOW_CELL_STEP
 
 
 def used(system):
-    """{port: uL drawn since the run started}, from the ledger's rows."""
+    """{port: uL drawn since the run started}, from the volume tracker's rows."""
     return {port: used_ul for port, _, used_ul in system.devices.reservoirs.used_rows()}
 
 

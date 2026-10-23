@@ -176,20 +176,19 @@ class FluidicsControlGUI(PostsToQtThread, QMainWindow):
         Reads the session rather than the announcement it was posted
         with -- the rule for deferred subscribers, on RunSession.state."""
         kind = self.session.kind
-        robot_job = is_robot_job(self.session)
-        run_job = is_run_tab_job(self.session)
-        enabled = {self.RUN_TAB: kind != "manual" or run_job,
-                   self.MANUAL_TAB: kind != "run" and not robot_job and not run_job}
-        if self.ROBOT_TAB is not None:
-            enabled[self.ROBOT_TAB] = kind is None or robot_job
+        owner = (None if kind is None else
+                 self.ROBOT_TAB if is_robot_job(self.session) else
+                 self.RUN_TAB if kind == "run" or is_run_tab_job(self.session) else
+                 self.MANUAL_TAB)
+        enabled = {index: owner is None or index == owner
+                   for index in (self.RUN_TAB, self.MANUAL_TAB, self.ROBOT_TAB)
+                   if index is not None}
         # A tool window (Teach on the Robot tab, Reservoirs on the Run tab)
         # starts its tab's jobs while any tab may be in front. Qt moves off
         # a tab it greys to the next one and stays there, so the job's own
         # tab comes forward first.
         if not enabled.get(self.tabWidget.currentIndex(), True):
-            self.tabWidget.setCurrentIndex(
-                self.ROBOT_TAB if robot_job else
-                self.RUN_TAB if kind == "run" or run_job else self.MANUAL_TAB)
+            self.tabWidget.setCurrentIndex(owner)
         for index, on in enabled.items():
             self.tabWidget.setTabEnabled(index, on)
 

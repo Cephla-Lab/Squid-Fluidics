@@ -40,7 +40,7 @@ reagent_selection:
       port_26: 700
       port_27: 900
       port_28: 900
-    # Port 25's bottle is tracked by the reservoir ledger, like every well:
+    # Port 25's bottle is volume tracked, like every well:
     # after refilling it, declare it with --refilled port_25 or reset it in
     # Reservoirs… on the Run Experiments tab.
     loaded_volume_ul:

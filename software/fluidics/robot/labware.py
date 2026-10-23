@@ -89,15 +89,21 @@ def parse_ref(text, default_reservoir, geometry=G96):
 
 
 def well_key(ref):
-    """The ledger's and the log's spelling of a well."""
+    """Volume tracking's and the log's spelling of a well."""
     return f"{ref.reservoir}/{ref.well}"
 
 
+def ref_of(key):
+    """The inverse of well_key: the well a reservoir key names, or None for
+    a bottle's key (`port_25`)."""
+    plate, slash, well = key.partition("/")
+    return WellRef(plate, well) if slash else None
+
+
 def plate_of(key):
-    """The inverse of well_key: the plate a ledger key names a well of, or
-    None for a bottle's key (`port_25`)."""
-    plate, slash, _ = key.partition("/")
-    return plate if slash else None
+    """The plate a reservoir key names a well of, or None for a bottle's key."""
+    ref = ref_of(key)
+    return None if ref is None else ref.reservoir
 
 
 def unknown_reservoir(name, known):

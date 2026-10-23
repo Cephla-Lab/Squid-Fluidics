@@ -11,6 +11,14 @@ is present but broken otherwise (a SyntaxError, say) fails at import.
 DriverService is the adapter: it turns every driver or port exception into
 DeviceError naming the axis, so the stage's early-end path (halt, re-read,
 raise) runs for all of them.
+
+Its poll (DriverService.read) asks each drive for three registers, not the
+six the driver's get_axis_status reads: the status word, the error code and
+the position, decoded as get_axis_status decodes them. The driver's own
+simulator agrees with get_axis_status read for read
+(tests/unit/robot/test_driver.py), but
+this read path wants a bench check on the real drives (the X1/Y2/Z3 stage)
+before it is trusted on a rig.
 """
 
 from ..errors import DeviceError
@@ -20,10 +28,13 @@ try:
     from ..control.nimotion import simulation      # the driver's own sim:// drives, for tests
     from ..control.nimotion.high_level_api import AxisName, ServoService
     from ..control.nimotion.high_level_api.axis_config import DEFAULT_AXIS_CONFIGS
+    from ..control.nimotion.motor_control import (DriveState, decode_status_word, is_fault,
+                                                  is_target_reached)
     DRIVER_AVAILABLE = True
     _IMPORT_ERROR = None
 except ImportError as e:
     AxisName = ServoService = DEFAULT_AXIS_CONFIGS = simulation = None
+    DriveState = decode_status_word = is_fault = is_target_reached = None
     DRIVER_AVAILABLE = False
     _IMPORT_ERROR = e                               # kept for the bring-up error to name
 
@@ -114,15 +125,27 @@ class DriverService:
 
     def read(self, axis):
         def read():
-            status = self._service.get_axis_status(axis)
+            # What the stage polls on, and only that: get_axis_status would
+            # also read velocity, torque and the operation mode, three
+            # requests on the shared RS-485 line per axis per poll that
+            # nothing here reads. Decoded as get_axis_status decodes them --
+            # enabled is the driver's state machine reading the word as
+            # Operation Enabled, not one bit. Disconnected, get_motor raises
+            # (where get_axis_status would read a zeroed, disabled axis): a
+            # status read failed, which the stage handles as any other.
+            motor = self._service.get_motor(axis)
+            word = motor.read_status_word()
+            error_code = motor.read_error_code()
+            position_mm = self._configs[axis].pulses_to_mm(motor.read_position())
+            reached = is_target_reached(word)
             # The limit inputs (60FDh bits 0-1) only once the target reads
             # reached, as the driver's own wait asks them: a move that ends
             # on an active switch is not a completed move. One read more at
             # the end of a leg, none per poll.
-            on_limit = (status.is_target_reached
-                        and bool(self._service.get_motor(axis).read_digital_inputs() & 0b11))
-            return AxisReading(status.position_mm, status.is_target_reached,
-                               status.is_enabled, status.is_fault, status.error_code, on_limit)
+            on_limit = reached and bool(motor.read_digital_inputs() & 0b11)
+            return AxisReading(position_mm, reached,
+                               decode_status_word(word) == DriveState.OPERATION_ENABLED,
+                               is_fault(word), error_code, on_limit)
         return self._call(axis, "status read", read)
 
     def stop(self, axis):

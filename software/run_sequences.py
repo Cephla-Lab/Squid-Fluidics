@@ -39,9 +39,9 @@ def parse_args():
              "plate name (ssct), or all. Repeatable."
     )
     parser.add_argument(
-        '--ledger', default=None,
-        help="Where the reservoir ledger lives (default: beside the run reports, "
-             "named after the config). Tests and odd setups only."
+        '--volume-tracking-file', default=None, metavar='PATH',
+        help="Where the volume tracking file lives (default: beside the run "
+             "reports, named after the config). Tests and odd setups only."
     )
     return parser.parse_args()
 
@@ -69,7 +69,8 @@ def main():
         # before any hardware is touched.
         validate_sequences(included, config)
 
-        system = FluidicsSystem.build(config, args.simulation, ledger_path=args.ledger)
+        system = FluidicsSystem.build(config, args.simulation,
+                                      volume_tracking_path=args.volume_tracking_file)
         if args.refilled:
             system.refill(*args.refilled)       # every one of them, in one write
 

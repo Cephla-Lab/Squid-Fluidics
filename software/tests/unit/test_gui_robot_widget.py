@@ -315,9 +315,9 @@ def test_the_next_priming_row_primes_the_sipper_from_the_well_set(widget):
     _set_dedicated(w, system, "priming", "ssct", "H10")
     system.run([PRIME])
     settle(system)
-    ledger = system.devices.reservoirs
-    assert ledger.remaining("ssct/H10") < 1750, "the sipper's port primed from the well set"
-    assert ledger.remaining("ssct/H11") == 1750
+    tracker = system.devices.reservoirs
+    assert tracker.remaining("ssct/H10") < 1750, "the sipper's port primed from the well set"
+    assert tracker.remaining("ssct/H11") == 1750
 
 
 def test_save_writes_the_dedicated_wells_to_the_config_file(qapp, simulated_system, tmp_path):

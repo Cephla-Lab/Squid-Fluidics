@@ -15,7 +15,7 @@ from fluidics.subscribers import Subscribers
 from ..worker_helpers import plan_for
 
 def rig(directory):
-    """A RunReports on real channels, the ledger canned: its per-run
+    """A RunReports on real channels, the volume tracker canned: its per-run
     figures (used_rows) and its balances (rows)."""
     events = Subscribers("test run events")
     warnings = Subscribers("test warnings")
@@ -86,8 +86,8 @@ class TestTheRecord:
 class TestTheCollectionMoment:
     def test_totals_are_read_in_the_dispatch_not_at_the_write(self, tmp_path):
         """RunEnded's later subscribers may chain the next run and reset
-        the ledger; the report must take its copy before the dispatch
-        moves on -- on this thread, exactly once."""
+        the volume tracker's per-run figures; the report must take its copy
+        before the dispatch moves on -- on this thread, exactly once."""
         r = rig(tmp_path)
         calls = []
 
