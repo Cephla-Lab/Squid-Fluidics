@@ -201,6 +201,22 @@ class TestAManualMove:
         assert session.wait(5)
         assert reported == [("no reply from pump", False), "finished"]
 
+    def test_a_report_that_raises_still_publishes_idle_and_wakes_the_waiters(self, session, real_clock):
+        """A widget destroyed under its own job posts into nothing and raises:
+        the rig must still read idle, say so, and wake whoever waits."""
+        seen = []
+        session.state.subscribe(seen.append)
+
+        def broken():
+            raise IOError("no reply from pump")
+
+        def report(message):
+            raise RuntimeError("wrapped C/C++ object has been deleted")
+
+        session.run_manual(broken, callbacks={"on_error": report})
+        assert session.wait(5)
+        assert seen == ["manual", None] and not session.busy
+
     @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
     def test_a_move_that_dies_of_anything_still_frees_the_rig(self, session, real_clock):
         """Not an Exception -- the thread dies with it -- and the session must
@@ -231,6 +247,21 @@ class TestAManualMove:
         session.run_manual(manual.empty_to_waste, callbacks)
         assert session.wait(5)
         assert reports == ["stopped", "finished", "finished"]
+
+    def test_a_move_carries_its_source_for_as_long_as_it_runs(self, session, real_clock):
+        """Who started a manual job (the GUI's Robot tab labels its own):
+        set with the kind, cleared with it, None when no label is given."""
+        release = threading.Event()
+        seen = []
+        session.state.subscribe(lambda kind: seen.append((kind, session.source)))
+        session.run_manual(release.wait, source="robot")
+        assert (session.kind, session.source) == ("manual", "robot")
+        release.set()
+        assert session.wait()
+        assert session.source is None
+        session.run_manual(lambda: None)
+        assert session.wait()
+        assert seen == [("manual", "robot"), (None, None), ("manual", None), (None, None)]
 
     def test_a_run_while_a_move_is_going_is_refused(self, session, ops, real_clock):
         release = threading.Event()

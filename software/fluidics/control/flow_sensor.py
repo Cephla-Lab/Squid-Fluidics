@@ -135,7 +135,7 @@ class FlowSensor:
         armed under ("warn" or "stop"); timestamp is the tripping sample's, on
         the same clock as the reading subscription.
 
-        `faults` is the channel itself, the way syringe_pump.draws is:
+        `faults` is the channel itself, the way syringe_pump.held_volume is:
         subscribe/unsubscribe by identity, which is what lets an embedded
         widget hand back exactly the bound method it registered when it is
         destroyed while the rig runs on. close() drops the whole list.

@@ -19,6 +19,7 @@ import logging
 from functools import partial
 
 from .control._def import CMD_SET
+from .control.config import bottle_keys, gantry
 from .control.controller import FluidController, FluidControllerSimulation
 from .control.disc_pump import DiscPump
 from .control.flow_sensor import start_flow_sensors
@@ -29,6 +30,10 @@ from .errors import RunControl
 from .experiment_worker import ExperimentWorker
 from .merfish_operations import MERFISHOperations
 from .open_chamber_operations import OpenChamberOperations
+from .reservoirs import VolumeTracker, default_volume_tracking_path, reservoir_definitions
+from .robot.sipper import RobotSipper
+from .robot.stage import POLL_SECONDS, XYZStage
+from .vocabulary import sipper_vocabulary
 
 
 # The vocabulary of what a degraded bring-up reports, passed to on_issue as
@@ -73,14 +78,17 @@ class DeviceSet:
     Attributes are what the entry points already call them: controller,
     syringe_pump, selector_valves, disc_pump (None outside Open Chamber),
     temperature_controller (None when absent or failed), flow_sensors (possibly
-    empty), and run_control -- the one cancellation signal every waiting
-    device shares; RunSession drives it (cancel, pause, reset), so an abort
-    from anywhere reaches every device. Built by build_devices(); nothing
-    else should construct one.
+    empty), robot (the RobotSipper, None without a gantry), reservoirs (the
+    VolumeTracker, on every rig; persisted and limited where a volume is
+    declared), and run_control
+    -- the one cancellation signal every waiting device shares; RunSession
+    drives it (cancel, pause, reset), so an abort from anywhere reaches every
+    device. Built by build_devices(); nothing else should construct one.
     """
 
     def __init__(self, config, controller, syringe_pump, selector_valves,
-                 disc_pump, temperature_controller, flow_sensors, run_control):
+                 disc_pump, temperature_controller, flow_sensors, run_control,
+                 robot=None, *, reservoirs):
         self.config = config
         self.run_control = run_control
         self.controller = controller
@@ -89,6 +97,8 @@ class DeviceSet:
         self.disc_pump = disc_pump
         self.temperature_controller = temperature_controller
         self.flow_sensors = flow_sensors
+        self.robot = robot                  # RobotSipper, or None without a gantry
+        self.reservoirs = reservoirs        # VolumeTracker, on every rig
         self._closed = False
 
     def make_safe(self):
@@ -99,6 +109,8 @@ class DeviceSet:
         returns the exceptions raised, already logged, for the worker to
         report."""
         steps = [self.syringe_pump.halt]
+        if self.robot is not None:
+            steps.append(self.robot.halt)
         tc = self.temperature_controller
         if tc is not None:
             steps.extend(partial(tc.set_output_enabled, c, False)
@@ -107,7 +119,7 @@ class DeviceSet:
             steps.append(self.disc_pump.stop)
         return _run_shielded(steps, doing="making the rig safe")
 
-    def close(self, empty_syringe=None):
+    def close(self, empty_syringe=None, quiescent=True):
         """Release every device, tolerating failures along the way.
 
         Each step runs even if an earlier one fails: teardown is the one place
@@ -126,6 +138,20 @@ class DeviceSet:
         parking behaviour the GUI has always had on exit. Default (None)
         derives it from the application: Flow Cell empties, Open Chamber does
         not. The abort latch is cleared first so an aborted run still parks.
+
+        quiescent: False when a job is still running on these devices (the
+        facade's close after its wait timed out). Then nothing moves: the
+        abort latch stays set so the job cannot resume, the syringe is not
+        parked, and the robot halts where it is and makes no move. A
+        quiescent close leaves the robot where it is, the tip wet in its last well.
+
+        Threading: a non-quiescent close halts the robot from this, the
+        closer's, thread while the stuck job may still poll the same RS-485
+        service. The vendored driver serializes each Modbus request and its
+        response (the client's RLock in control/nimotion/modbus_rtu/client.py,
+        over the RLock serial_comm/serial_port.py takes per read and write);
+        how a halt interleaves with the job's polls on the drives is a bench
+        item.
         """
         if self._closed:
             return []
@@ -142,30 +168,101 @@ class DeviceSet:
         if self.temperature_controller is not None:
             steps.append(self.temperature_controller.close)
         steps.extend(sensor.close for sensor in self.flow_sensors)
-        steps.append(self.run_control.reset)
-        steps.append(lambda: self.syringe_pump.close(empty_syringe))
+        if quiescent:
+            steps.append(self.run_control.reset)
+        if self.robot is not None:
+            # After the reset, before the syringe parks (the order kept from
+            # when the robot parked on close). The robot makes no move either
+            # way: quiescent, the tip rests wet in its last well; otherwise
+            # it halts. The robot's own shielded steps are folded into
+            # this one.
+            steps.append(lambda: _raise_first(self.robot.close(quiescent=quiescent)))
+        steps.append(lambda: self.syringe_pump.close(empty_syringe if quiescent else False))
         steps.append(self.controller.close)
+        steps.append(self.reservoirs.close)
 
         return _run_shielded(steps)
 
 
+def _raise_first(errors):
+    if errors:
+        raise errors[0]
+
+
+def _build_robot(config, simulation, run_control, instant):
+    """A connected, homed, retracted RobotSipper, or raise. Partial state is
+    torn down here (the stage's non-quiescent close), the way the
+    flow-sensor starter closes what it started."""
+    g = gantry(config)
+    vocabulary = sipper_vocabulary(config)
+    names = dict(g.axes)
+    if simulation:
+        # No homing speeds: the simulated service homes in a set number of
+        # polls, and homing time is part of no estimate.
+        from .robot.simulation import XYG321A_STROKES_MM, SimulatedService
+        strokes = {name: XYG321A_STROKES_MM.get(name, (0.0, 300.0)) for name in names.values()}
+        service = SimulatedService(names.values(), strokes, instant=instant)
+    else:
+        from .robot._driver import open_service          # the one import site
+        from .control.discovery import find_serial_port
+        port = g.port or find_serial_port(g.serial_number, "RS-485 adapter")
+        service, names = open_service(port, g.baudrate, names,
+                                      homing_velocity_mm_s=g.homing_velocity_mm_s,
+                                      homing_acceleration_mm_s2=g.homing_acceleration_mm_s2)
+    stage = XYZStage(service, names, g.travel_z_mm, g.xy_velocity_mm_s,
+                     g.z_velocity_mm_s, run_control,
+                     poll_seconds=0.0 if instant else POLL_SECONDS)
+    robot = RobotSipper(stage, vocabulary.placements(), g.agitate_amplitude_mm)
+    try:
+        stage.connect()
+        robot.home()
+    except BaseException:
+        # A Ctrl+C while Z homes too: the drives must not stay enabled.
+        stage.close(quiescent=False)
+        raise
+    return robot
+
+
+def _build_volume_tracker(config, simulation, volume_tracking_path):
+    """The volume tracker for everything this config tracks, placed as
+    build_devices' note on volume_tracking_path says: its file on disk
+    under its lock, or in memory."""
+    definitions, bottles = reservoir_definitions(config), bottle_keys(config)
+    if not definitions or (simulation and volume_tracking_path is None):
+        return VolumeTracker(definitions, bottles=bottles)
+    path = volume_tracking_path or default_volume_tracking_path(config.source_path or "in-memory")
+    return VolumeTracker.load(path, definitions, bottles=bottles)
+
+
 def build_devices(config, simulation=False, on_issue=None, run_control=None,
-                  instant=False):
+                  instant=False, volume_tracking_path=None):
     """Construct and start the full stack for `config`. Returns a DeviceSet.
 
-    Mirrors what the two entry points did, once: construct controller, syringe
-    pump, and (optionally) temperature controller; begin() the controller and
-    CLEAR the MCU; start the flow sensors; build the selector valves (which
-    homes them, today a constructor side effect); attach the disc pump for
-    Open Chamber.
+    Mirrors what the two entry points did, once: build the volume tracker
+    and, where the config declares a volume, take its file's lock (before
+    any device is constructed, so a second launch on a rig in use stops
+    there); construct controller, syringe pump, and (optionally)
+    temperature controller; begin() the controller and CLEAR the MCU;
+    start the flow sensors; build the robot when the config has a gantry
+    (connected, homed, retracted: after the sensors, before the valves);
+    build the selector valves (which homes them, today a constructor side
+    effect); attach the disc pump for Open Chamber; attach the volume
+    tracker to the pump's draws, on every rig.
 
     Degradation policy is the GUI's: a temperature controller that fails to
     come up on hardware, or flow sensors that fail in either mode, are
     reported through on_issue and left out rather than failing the launch.
     So is draw protection configured where nothing will act on it
     (draw_protection_available): reported, and switched off.
-    The controller, pump, and valves are not survivable -- those raise, after
-    closing whatever had already started.
+    The controller, pump, valves, robot and volume tracker are not
+    survivable -- those raise, after closing whatever had already started
+    (the robot without a move, the volume tracking file's lock last).
+
+    volume_tracking_path: where the volume tracking file lives. None:
+    beside the run reports, named after the config; on a simulated rig, a
+    fresh volume tracker in memory, every reservoir declared full. A rig
+    that declares no volume keeps its volume tracker -- the tally alone --
+    in memory either way, with no file and no lock.
 
     instant: switch the simulated rig's pacing off -- the controller's
     one-second commands and the pump's five-second moves take no time. For
@@ -184,40 +281,56 @@ def build_devices(config, simulation=False, on_issue=None, run_control=None,
 
     # One cancellation signal for the whole run -- see RunControl.
     run_control = run_control if run_control is not None else RunControl()
-    controller = controller_cls(config.microcontroller.serial_number)
-    syringe_pump = pump_cls(
-        sn=config.syringe_pump.serial_number,
-        syringe_ul=config.syringe_pump.volume_ul,
-        speed_code_limit=config.syringe_pump.speed_code_limit,
-        waste_port=config.syringe_pump.waste_port,
-        run_control=run_control)
-    if instant:
-        # On the instances, before bring-up -- the valves' homing waits are
-        # paced too -- so a concurrently simulated rig keeps its own pacing.
-        controller.COMMAND_SECONDS = 0
-        syringe_pump.ESTIMATE_SECONDS = 0
 
+    controller = None
+    syringe_pump = None
     temperature_controller = None
-    if config.temperature_controller is not None:
-        tc_cfg = config.temperature_controller
-        try:
-            temperature_controller = tc_cls(
-                sn=tc_cfg.serial_number,
-                channels=tc_cfg.channels,
-                tolerance_celsius=tc_cfg.tolerance_celsius,
-                stabilization_timeout_seconds=tc_cfg.stabilization_timeout_seconds,
-            )
-        except Exception as e:
-            # Survivable only on hardware, where the usual cause is a flaky
-            # port or serial-number mismatch. In simulation there is no port
-            # to be flaky: a failure is a real bug and raises.
-            if simulation:
-                raise
-            on_issue(ISSUE_TEMPERATURE_CONTROLLER,
-                     f"Failed to initialize temperature controller: {e}")
-
     flow_sensors = []
+    robot = None
+    reservoirs = None
     try:
+        # The volume tracker first, its lock (where a volume is declared)
+        # before any device is constructed: a second launch on a rig already
+        # in use stops here, before it talks to the pump (the real pump's
+        # constructor sends it commands, and a pump that answers "not
+        # initialized" is initialized by the vendor driver), clears the
+        # MCU, homes the robot (lifting the first session's tip out of its
+        # well) or homes the valves. A file it cannot lock fails the
+        # launch with nothing to release; a file it cannot read loads as
+        # undeclared and the launch goes on.
+        reservoirs = _build_volume_tracker(config, simulation, volume_tracking_path)
+
+        controller = controller_cls(config.microcontroller.serial_number)
+        syringe_pump = pump_cls(
+            sn=config.syringe_pump.serial_number,
+            syringe_ul=config.syringe_pump.volume_ul,
+            speed_code_limit=config.syringe_pump.speed_code_limit,
+            waste_port=config.syringe_pump.waste_port,
+            run_control=run_control)
+        if instant:
+            # On the instances, before bring-up -- the valves' homing waits are
+            # paced too -- so a concurrently simulated rig keeps its own pacing.
+            controller.COMMAND_SECONDS = 0
+            syringe_pump.ESTIMATE_SECONDS = 0
+
+        if config.temperature_controller is not None:
+            tc_cfg = config.temperature_controller
+            try:
+                temperature_controller = tc_cls(
+                    sn=tc_cfg.serial_number,
+                    channels=tc_cfg.channels,
+                    tolerance_celsius=tc_cfg.tolerance_celsius,
+                    stabilization_timeout_seconds=tc_cfg.stabilization_timeout_seconds,
+                )
+            except Exception as e:
+                # Survivable only on hardware, where the usual cause is a flaky
+                # port or serial-number mismatch. In simulation there is no port
+                # to be flaky: a failure is a real bug and raises.
+                if simulation:
+                    raise
+                on_issue(ISSUE_TEMPERATURE_CONTROLLER,
+                         f"Failed to initialize temperature controller: {e}")
+
         controller.begin()
         controller.send_command(CMD_SET.CLEAR)
 
@@ -231,28 +344,59 @@ def build_devices(config, simulation=False, on_issue=None, run_control=None,
             on_issue(ISSUE_FLOW_SENSORS, f"Failed to initialize flow sensors: {e}")
         _switch_off_inert_draw_protection(config, flow_sensors, on_issue)
 
+        # The robot before the valves: its own port, no Teensy dependence,
+        # and a wrong adapter fails before the valves spend their homing
+        # time. Not survivable: a sipper that cannot home cannot select.
+        g = gantry(config)
+        if g is not None:
+            robot = _build_robot(config, simulation, run_control, instant)
+
         selector_valves = SelectorValveSystem(controller, config, run_control)
         disc_pump = (DiscPump(controller, run_control)
                      if config.application == "Open Chamber" else None)
-    except Exception:
-        # A dead controller or a stuck valve is not survivable, but the pieces
-        # already running must not outlive the failed launch: the controller's
-        # reader thread holds the MCU port, and a sensor left subscribed would
-        # keep a handler on a stream nobody owns. Shielded per step, so one
-        # close failure cannot strand the rest or replace the bring-up error
-        # this block re-raises. (The syringe pump is deliberately absent:
-        # SyringePump.close() only drops a reference, so calling it here would
-        # release nothing -- the port lives until the object is collected.)
+
+        # Attached once the draws it counts can be routed: it reads the
+        # valves' port and the sipper's well, and names a port's reagent
+        # as the valves do and a well's as the config does.
+        reservoirs.attach(
+            syringe_pump,
+            sipper_port=None if robot is None else g.selector_valve_port,
+            extract_port=config.syringe_pump.extract_port,
+            current_port=selector_valves.get_current_port,
+            current_well=(lambda: None) if robot is None else robot.current_well_key,
+            port_to_reagent=selector_valves.port_to_reagent,
+            well_name=(lambda key: None) if robot is None else sipper_vocabulary(config).well_name)
+    except BaseException:
+        # A pump that is not found, a dead controller, a stuck valve, or a
+        # Ctrl+C (an operator watching Z home) is not survivable, but the
+        # pieces already running must not outlive the failed launch: the
+        # controller's reader thread holds the MCU port, and a sensor left
+        # subscribed would keep a handler on a stream nobody owns. Only what
+        # was constructed is closed, since a constructor can be what failed.
+        # Shielded per step, so one close failure cannot strand the rest or
+        # replace the bring-up error this block re-raises. (The syringe pump
+        # is deliberately absent: SyringePump.close() only drops a reference,
+        # so calling it here would release nothing -- the port lives until
+        # the object is collected.)
         cleanups = [sensor.close for sensor in flow_sensors]
         if temperature_controller is not None:
             cleanups.append(temperature_controller.close)
-        cleanups.append(controller.close)
+        if robot is not None:
+            cleanups.append(lambda: robot.close(quiescent=False))
+        if controller is not None:
+            cleanups.append(controller.close)
+        if reservoirs is not None:
+            # None only when building it is what failed (its file locked by
+            # another session, say): then there is no lock to release. The
+            # lock last, as DeviceSet.close releases it: the rig stays held
+            # until every port this launch opened is released.
+            cleanups.append(reservoirs.close)
         _run_shielded(cleanups)
         raise
 
     return DeviceSet(config, controller, syringe_pump, selector_valves,
                      disc_pump, temperature_controller, flow_sensors,
-                     run_control)
+                     run_control, robot=robot, reservoirs=reservoirs)
 
 
 def _switch_off_inert_draw_protection(config, flow_sensors, on_issue):
@@ -292,7 +436,9 @@ def build_operations(config, devices, on_warning=None):
                                  devices.temperature_controller,
                                  devices.flow_sensors,
                                  on_warning=on_warning,
-                                 run_control=devices.run_control)
+                                 run_control=devices.run_control,
+                                 robot=devices.robot,
+                                 reservoirs=devices.reservoirs)
     if config.application == "Open Chamber":
         # Not handed the flow sensors: draw_protection_available says so to
         # everyone else. Arm them here and that predicate changes with it.

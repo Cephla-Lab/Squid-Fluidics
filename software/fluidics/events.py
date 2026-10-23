@@ -3,8 +3,8 @@
 One channel (`RunSession.events`) carries typed facts about run
 boundaries; continuous state (paused, at rest, the clock) stays with
 `RunSession.snapshot()`. Consumers -- the GUI, the CLI's exit code, the
-usage ledger -- subscribe to the one channel instead of each holding its
-own callback wiring.
+volume tracker -- subscribe to the one channel instead of each holding
+its own callback wiring.
 
 The plan is the one expansion of "each sequence × its repeats": the
 estimate produces it, the worker iterates it, and events refer to its
@@ -42,8 +42,8 @@ SequenceCompleted = namedtuple("SequenceCompleted", "run_id position")
 # offer's input; elapsed_seconds is the run's running time, held spans
 # excluded -- captured by the worker because the signal's clock is reset
 # before this is published, so no subscriber could derive it. Deliberately
-# carries no usage totals: consumers read system.usage, which the session
-# does not know.
+# carries no reagent totals: consumers read devices.reservoirs (used_rows(),
+# the one tally), not a copy riding on the event.
 RunEnded = namedtuple(
     "RunEnded", "run_id outcome message elapsed_seconds position")
 

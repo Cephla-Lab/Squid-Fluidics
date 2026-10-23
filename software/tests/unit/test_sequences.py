@@ -5,20 +5,43 @@ from pydantic import ValidationError
 
 from fluidics.sequences import (
     APPLICATION_SEQUENCES,
+    PORT_FIELDS,
     SEQUENCE_TYPES,
     SEQUENCE_TYPE_LABELS,
+    SIPPER_TYPES,
+    WELL_FIELDS,
     SequenceListAdapter,
     check_ports_against_config,
     check_types_against_application,
+    sequence_problem,
     sequence_type_problem,
+    sequence_well_problems,
+    types_for_rig,
+    validate_sequences,
     load_sequences,
+    port_list,
     save_sequences_yaml,
     get_included_sequences,
     get_fields_for_type,
 )
 
+from ..conftest import HYB, PRIME, PUSH
+
 
 class TestSequenceModels:
+    def test_a_push_names_a_well_and_a_flow_rate_and_nothing_else(self):
+        """The volume is the config's and the port the sipper's: neither is
+        the row's to give; dips are optional."""
+        [seq] = SequenceListAdapter.validate_python([
+            {"type": "push", "well": "ssct/A1", "flow_rate": 2000}])
+        assert (seq.well, seq.flow_rate, seq.dip_cycles) == ("ssct/A1", 2000, 0)
+        for extra in ({"volume": 710}, {"fluidic_port": 1}):
+            with pytest.raises(ValidationError):
+                SequenceListAdapter.validate_python([
+                    {"type": "push", "well": "ssct/A1", "flow_rate": 2000, **extra}])
+        with pytest.raises(ValidationError, match="well"):
+            SequenceListAdapter.validate_python([{"type": "push", "flow_rate": 2000}])
+
     def test_flow_reagent_valid(self):
         seq = SequenceListAdapter.validate_python([
             {"type": "flow_reagent", "fluidic_port": 1, "flow_rate": 5000, "volume": 2000}
@@ -223,6 +246,19 @@ class TestRegistryConsistency:
     def test_flow_cell_includes_set_temperature(self):
         assert "set_temperature" in APPLICATION_SEQUENCES["Flow Cell"]
 
+    def test_the_sipper_only_types_are_derived_from_the_models(self):
+        """A type whose rows name a well and carry no port draws through
+        the sipper and nowhere else; nothing declares it."""
+        assert SIPPER_TYPES == {"push"}
+        assert SIPPER_TYPES <= set(APPLICATION_SEQUENCES["Flow Cell"])
+        from fluidics.sequences import _CSV_NAME_TO_TYPE
+        assert "Push" not in _CSV_NAME_TO_TYPE, "a CSV's columns cannot express a push"
+
+    def test_a_rig_without_a_sipper_is_offered_no_sipper_only_type(self, vocabulary):
+        assert "push" not in types_for_rig("Flow Cell", None)
+        assert types_for_rig("Flow Cell", vocabulary) == APPLICATION_SEQUENCES["Flow Cell"]
+        assert types_for_rig("Open Chamber", None) == APPLICATION_SEQUENCES["Open Chamber"]
+
 
 class TestCheckPortsAgainstConfig:
     """The upper bound lives in the rig config, not the sequence file, so the
@@ -329,3 +365,195 @@ class TestRoundLabel:
             [{"type": "flow_reagent", "fluidic_port": 1, "flow_rate": 500, "volume": 500}]
         )[0]
         assert row.round is None
+
+
+# --- wells on a sipper rig (spec §6, Task B6) ---
+
+
+class TestWellFields:
+    def test_the_fields_are_optional_and_default(self):
+        [seq] = SequenceListAdapter.validate_python([{"type": "flow_reagent", "fluidic_port": 2,
+                                                      "flow_rate": 500, "volume": 500}])
+        assert seq.well is None and seq.dip_cycles == 0
+
+    def test_a_file_without_them_is_written_without_them(self, tmp_path):
+        path = tmp_path / "s.yaml"
+        save_sequences_yaml([{"type": "flow_reagent", "fluidic_port": 2, "flow_rate": 500,
+                              "volume": 500}], str(path))
+        assert "well" not in path.read_text() and "dip_cycles" not in path.read_text()
+        assert load_sequences(str(path))[0]["well"] is None
+
+    def test_every_port_or_well_valued_field_is_registered(self):
+        for model in SEQUENCE_TYPES.values():
+            for name in model.model_fields:
+                if name.endswith("port") or name.endswith("_with") or "well" in name:
+                    assert name in PORT_FIELDS or name in WELL_FIELDS, name
+
+
+class TestPairingRules:
+    def test_a_well_on_a_rig_without_a_sipper_is_refused(self, flow_cell_config):
+        """Review focus 1."""
+        with pytest.raises(ValueError, match="this rig has no sipper"):
+            validate_sequences([HYB], flow_cell_config)
+
+    def test_a_well_needs_the_sipper_port_and_the_sipper_port_needs_a_well(self, vocabulary):
+        assert sequence_well_problems(dict(HYB, fluidic_port=2), vocabulary) == [
+            "well=A1 needs fluidic_port=1 (the sipper)"]
+        assert sequence_well_problems({**HYB, "well": None}, vocabulary) == [
+            "fluidic_port=1 is the sipper: name a well"]
+        assert sequence_well_problems(HYB, vocabulary) == []
+
+    def test_a_push_row_is_the_sippers_and_names_only_its_well(self, plate_sipper_config, vocabulary):
+        assert sequence_well_problems(PUSH, vocabulary) == []
+        assert sequence_well_problems({"type": "push", "flow_rate": 2000}, vocabulary) == [
+            "a push row draws through the sipper: name a well"]
+        assert sequence_well_problems(dict(PUSH, well="water/A1"), vocabulary)[0].startswith("well=water/A1:")
+        validate_sequences([PUSH], plate_sipper_config)
+        # A script's raw dict still carrying the old push row's port or
+        # volume is refused, not drawn past: the gate never runs the model.
+        for stray in ("fluidic_port", "volume"):
+            message = f"{stray} is not a field of push rows"
+            assert sequence_well_problems({**PUSH, stray: 3}, vocabulary) == [message]
+            with pytest.raises(ValueError, match=message):
+                validate_sequences([{**PUSH, stray: 3}], plate_sipper_config)
+
+    def test_a_push_row_on_a_rig_without_a_sipper_is_refused_with_or_without_its_well(
+            self, flow_cell_config):
+        """The type gate offers push on every Flow Cell rig; the well gate
+        refuses the row where the rig has no sipper, a script's raw dict
+        with no well included."""
+        for row in (PUSH, {"type": "push", "flow_rate": 2000}):
+            with pytest.raises(ValueError, match="this rig has no sipper"):
+                validate_sequences([row], flow_cell_config)
+
+    def test_a_bare_set_temperature_row_on_a_sipper_rig_draws_no_well_complaint(
+            self, plate_sipper_config, vocabulary):
+        """The pairing is for rows with a port and for the sipper-only
+        types; a row with neither is nobody's well row."""
+        row = {"type": "set_temperature", "temperature": 37.0}
+        assert sequence_well_problems(row, vocabulary) == []
+        validate_sequences([row], plate_sipper_config)
+
+    def test_a_sipper_row_carries_no_fill(self, vocabulary):
+        assert sequence_well_problems(dict(HYB, fill_tubing_with=3), vocabulary) == [
+            "a sipper row cannot fill tubing: add a flow_reagent row from the paired well"]
+        assert sequence_well_problems({"type": "flow_reagent", "fluidic_port": 3, "flow_rate": 500,
+                                       "volume": 500, "fill_tubing_with": 1}, vocabulary) == [
+            "fill_tubing_with=1 is the sipper: the sipper cannot fill tubing"]
+
+    def test_dips_need_a_well_and_a_whole_number_and_references_must_resolve(self, vocabulary):
+        assert sequence_well_problems({"type": "flow_reagent", "fluidic_port": 3, "flow_rate": 500,
+                                       "volume": 500, "dip_cycles": 2}, vocabulary) == [
+            "dip_cycles needs a well"]
+        assert sequence_well_problems(dict(HYB, dip_cycles=-1), vocabulary)[0].startswith("dip_cycles=-1")
+        assert sequence_well_problems(dict(HYB, dip_cycles="2"), vocabulary)[0].startswith("dip_cycles='2'")
+        assert sequence_well_problems(dict(HYB, well="water/A1"), vocabulary)[0].startswith("well=water/A1:")
+
+    def test_priming_may_name_the_sipper_well(self, vocabulary):
+        prime = dict(PRIME, sipper_well="ssct/H10")
+        assert sequence_well_problems(prime, vocabulary) == []
+        assert sequence_problem(prime, "Flow Cell", (1, 3), sipper=vocabulary) is None
+        assert sequence_problem(dict(HYB, fluidic_port=3), "Flow Cell", (1, 3), sipper=vocabulary) \
+            == "well=A1 needs fluidic_port=1 (the sipper)"
+
+    def test_the_gate_names_the_row(self, plate_sipper_config):
+        with pytest.raises(ValueError, match=r"sequence 0 \(hyb\).*needs fluidic_port=1"):
+            validate_sequences([dict(HYB, name="hyb", fluidic_port=2)], plate_sipper_config)
+
+    def test_a_file_with_no_well_fields_validates_as_before(self, flow_cell_config):
+        validate_sequences([{"type": "flow_reagent", "fluidic_port": 2, "flow_rate": 500,
+                             "volume": 500, "fill_tubing_with": 25}], flow_cell_config)
+
+    def test_a_well_that_is_not_text_is_named_not_raised(self, plate_sipper_config):
+        """A raw row reaches the gate unvalidated: a number where a well
+        reference belongs is a named refusal, not a TypeError."""
+        with pytest.raises(ValueError, match=r"sequence 0 .*well=5: must be a well reference"):
+            validate_sequences([dict(HYB, well=5)], plate_sipper_config)
+        prime = dict(PRIME, sipper_well=7)
+        with pytest.raises(ValueError, match=r"sequence 0 .*sipper_well=7: must be a well reference"):
+            validate_sequences([prime], plate_sipper_config)
+
+    @pytest.mark.parametrize("row, message", [
+        (dict(HYB, sipper_well="ssct/H10"), "sipper_well is not a field of flow_reagent rows"),
+        ({"type": "priming", "fluidic_port": 1, "well": "A1", "dip_cycles": 3,
+          "flow_rate": 5000, "volume": 800}, "dip_cycles is not a field of priming rows"),
+        ({"type": "set_temperature", "temperature": 37.0, "fluidic_port": 1, "well": "A1"},
+         "well is not a field of set_temperature rows"),
+        (dict(PUSH, sipper_well="ssct/H10"), "sipper_well is not a field of push rows"),
+    ])
+    def test_a_well_field_the_row_type_lacks_is_refused(
+            self, plate_sipper_config, vocabulary, row, message):
+        """The model forbids these; the raw-dict gate must too, or the
+        field is silently ignored at run time (a priming row's dips never
+        happen). Named before the pairing rules."""
+        assert sequence_well_problems(row, vocabulary)[0] == message
+        with pytest.raises(ValueError, match=message):
+            validate_sequences([row], plate_sipper_config)
+        assert sequence_problem(row, "Flow Cell", (1, 3), sipper=vocabulary) is not None
+
+
+class TestSelectivePriming:
+    """use_ports, a field of priming and clean-up rows, picks the ports the
+    row primes, on any rig: it may leave out the sipper's port."""
+
+    @pytest.mark.parametrize("typed, ports", [
+        ("1, 3", [1, 3]), ("1 3", [1, 3]), ("[1, 3]", [1, 3]), ("3", [3]),
+        ("1, 3,", [1, 3]), (" [3] ", [3]), ([1, 3], [1, 3]), ("", None), (None, None),
+    ])
+    def test_use_ports_reads_as_typed(self, typed, ports):
+        """The editor's text is the list it spells; blank is every port."""
+        [row] = SequenceListAdapter.validate_python([dict(PRIME, use_ports=typed)])
+        assert row.use_ports == ports
+        assert port_list(typed) == ports
+
+    @pytest.mark.parametrize("typed", ["1, x", [], "[]", "1;3"])
+    def test_what_is_not_a_list_of_ports_is_refused(self, typed):
+        problem = sequence_problem(dict(PRIME, use_ports=typed), "Flow Cell", range(1, 7))
+        assert problem is not None and problem.startswith("use_ports"), problem
+        with pytest.raises(ValueError, match="use_ports="):
+            port_list(typed)
+
+    @pytest.mark.parametrize("given", ["1, 3", 3, [], ["3"], [True]])
+    def test_the_gate_refuses_a_port_list_in_any_other_shape(self, flow_cell_config, given):
+        """A run takes its rows as given, so the gate names a use_ports the
+        operation could not loop over, or would loop over priming nothing,
+        before anything moves."""
+        with pytest.raises(ValueError, match=r"sequence 0 \(priming\): use_ports=.*: a list of ports"):
+            validate_sequences([dict(PRIME, use_ports=given)], flow_cell_config)
+
+    def test_a_sipper_well_the_row_does_not_use_is_named(self, vocabulary):
+        """A row that skips the sipper's port never sits the sipper in its
+        sipper_well, so naming one is a contradiction, not silently dropped."""
+        row = dict(PRIME, sipper_well="ssct/A12")
+        assert sequence_well_problems(dict(row, use_ports=[3]), vocabulary) == [
+            "sipper_well=ssct/A12 is not used: use_ports leaves out port 1 (the sipper)"]
+        assert sequence_well_problems(dict(row, use_ports=[1, 3]), vocabulary) == []
+        assert sequence_well_problems(row, vocabulary) == []
+
+    def test_a_port_the_rig_does_not_offer_is_named(self, plate_sipper_config, vocabulary):
+        from fluidics.control.config import available_ports
+        ports = available_ports(plate_sipper_config)
+        problem = sequence_problem(dict(PRIME, use_ports="3, 7"), "Flow Cell", ports, sipper=vocabulary)
+        assert problem.startswith("use_ports includes 7:"), problem
+        with pytest.raises(ValueError, match=r"sequence 0 \(priming\): use_ports includes 7"):
+            validate_sequences([dict(PRIME, use_ports=[3, 7])], plate_sipper_config)
+
+    def test_a_file_carries_use_ports_both_ways(self, tmp_path):
+        path = tmp_path / "s.yaml"
+        path.write_text("sequences:\n  - {type: clean_up, fluidic_port: 3, flow_rate: 5000, "
+                        "volume: 800, use_ports: [1, 3]}\n")
+        [row] = load_sequences(str(path))
+        assert row["use_ports"] == [1, 3]
+        save_sequences_yaml([row], str(path))
+        assert load_sequences(str(path)) == [row]
+
+    @pytest.mark.parametrize("seq_type", ["priming", "clean_up"])
+    def test_a_row_may_leave_out_the_sipper(self, vocabulary, plate_sipper_config, seq_type):
+        row = dict(PRIME, type=seq_type)
+        assert sequence_well_problems(dict(row, use_ports=[3]), vocabulary) == []
+        assert sequence_well_problems(dict(row, use_ports=[1, 3]), vocabulary) == []
+        validate_sequences([dict(row, use_ports=[3])], plate_sipper_config)
+
+    def test_a_rig_without_a_sipper_keeps_selective_priming(self, flow_cell_config):
+        assert sequence_well_problems(dict(PRIME, use_ports=[3]), None) == []
+        validate_sequences([dict(PRIME, use_ports=[3])], flow_cell_config)

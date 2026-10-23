@@ -53,12 +53,14 @@ class RunSession:
         # deferral the early-end report has always had. Subscription order
         # is delivery order, and a subscriber may chain the next run from
         # RunEnded (the GUI's resume offer) while later subscribers still
-        # wait for theirs -- so system-level bookkeeping (usage, reports)
-        # must subscribe before any widget that can chain.
+        # wait for theirs -- so system-level bookkeeping (the volume
+        # tracker's per-run figure, the reports) must subscribe before any
+        # widget that can chain.
         self.events = Subscribers("run events")
         self._run_ids = itertools.count(1)     # atomic under the GIL
         self._lock = threading.RLock()
         self._kind = None
+        self._source = None
         self._thread = None
         self._done = threading.Event()
         self._done.set()
@@ -73,6 +75,15 @@ class RunSession:
     def kind(self):
         """One of "run", "manual", or None."""
         return self._kind
+
+    @property
+    def source(self):
+        """Who started the manual job in flight: the label run_manual was
+        handed (the GUI's Robot tab gives one, so the window can grey every
+        tab but the one whose job it is), or None -- a run, no job, or a
+        manual job started without a label. Set and cleared with kind,
+        under the same lock; like kind, a deferred reader re-reads it."""
+        return self._source
 
     @property
     def paused(self):
@@ -146,17 +157,18 @@ class RunSession:
         except BaseException as e:
             # The worker's RunStarted already went out (from its
             # constructor); a launch that failed must not leave it
-            # unpaired -- consumers pairing starts with endings (the usage
-            # ledger's totals, a display's lifecycle) would wait forever.
+            # unpaired -- consumers pairing starts with endings (the volume
+            # tracker's per-run figure, a display's lifecycle) would wait forever.
             # This one RunEnded lands after _finish's state(None), outside
             # the serialized ordering -- acceptable for a thread that would
             # not start, revisit if a chaining subscriber ever exists.
             self.events.notify(RunEnded(run_id, "failed", str(e), 0.0, None))
             raise
 
-    def run_manual(self, verb, callbacks=None):
+    def run_manual(self, verb, callbacks=None, source=None):
         """Run one manual verb -- a callable -- on a new thread. Refused with
-        RuntimeError while a job runs."""
+        RuntimeError while a job runs. `source` labels who started it, read
+        back as `source` while it runs."""
         callbacks = callbacks or {}
         on_stopped, on_error = callbacks.get("on_stopped"), callbacks.get("on_error")
 
@@ -171,9 +183,9 @@ class RunSession:
                 return on_error and partial(on_error, str(e))
             return None
 
-        self._launch("manual", body, callbacks.get("on_finished"))
+        self._launch("manual", body, callbacks.get("on_finished"), source=source)
 
-    def _launch(self, kind, body, on_finished):
+    def _launch(self, kind, body, on_finished, source=None):
         """Start `body` on the job's thread. It returns how the job ended --
         a callable that reports it (a run's RunEnded, a manual move's held
         callback), delivered by _finish once the rig reads free -- then
@@ -182,6 +194,7 @@ class RunSession:
             if self._kind is not None:
                 raise RuntimeError(f"the rig is busy: a {self._kind} is in progress")
             self._kind = kind
+            self._source = source
             self._done.clear()
             self.control.restart_clock()
             self.state.notify(kind)
@@ -220,11 +233,19 @@ class RunSession:
         """
         with self._lock:
             self._kind = None
+            self._source = None
             # The cancellation -- or pause -- belonged to the job that just
             # ended; the next one must not raise on a stale abort.
             self.control.reset()
             if report is not None:
-                report()
+                try:
+                    report()
+                except Exception:
+                    # A report that raises -- a widget destroyed under its own
+                    # job, an embedder's callback -- must not keep the rig
+                    # from reading idle: the state change and the waiters'
+                    # wake below are the session's, not the reporter's.
+                    _logger.exception("A job's report failed")
             self.state.notify(None)
             # Done means no job is current. A subscriber may have started the
             # next one just now, in which case waiters keep waiting for it --

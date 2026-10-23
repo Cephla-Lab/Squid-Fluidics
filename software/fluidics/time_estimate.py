@@ -13,12 +13,15 @@ the not-yet-run entries, whatever the finished ones actually took.
 estimate_run_time wraps the plan for callers that only price.
 """
 
+import contextlib
 import logging
 
 from .control._def import CMD_SET
 from .devices import build_devices, build_operations
-from .errors import RunControl
+from .errors import (OperationError, ReservoirError, ReservoirOverdraw, ReservoirShortfall,
+                     ReservoirUndeclared, RunControl)
 from .events import PlanEntry
+from .reservoirs import undeclared_message
 from .sequences import sequence_label
 
 _logger = logging.getLogger(__name__)
@@ -97,7 +100,11 @@ def _op_seconds(pump, op, held_ul):
     return abs(after - held_ul) / pump.get_flow_rate(op[-1]) * 60, after
 
 
-def _replay(config, sequences):
+@contextlib.contextmanager
+def _twin(config):
+    """The simulated twin of `config` the plan's replay prices on and the
+    reservoir gate checks on -- its devices, its operations and the metered
+    control they wait on -- closed on the way out."""
     control = _MeteredRunControl()
     # Without the flow sensors: an estimate is the pump's time, which a
     # sensor adds nothing to, and a simulated one starts a publish thread
@@ -112,7 +119,13 @@ def _replay(config, sequences):
     devices = build_devices(config, simulation=True, run_control=control,
                             instant=True)
     try:
-        ops = build_operations(config, devices)
+        yield devices, build_operations(config, devices), control
+    finally:
+        devices.close()
+
+
+def _replay(config, sequences):
+    with _twin(config) as (devices, ops, control):
         pump = devices.syringe_pump
         sent = devices.controller.sent
         # Bring-up (the homing moves, the initial CLEAR) is not the run's
@@ -125,6 +138,10 @@ def _replay(config, sequences):
         fixed = 0.0
         previous = 0.0
         durations = []
+        # The robot's travel, counted by its simulated service (XY legs
+        # concurrent, each leg's longest axis), from the build onward.
+        robot = devices.robot
+        robot_counted = robot._stage._service.travel_seconds if robot is not None else 0.0
         for seq in sequences:
             for _ in range(seq.get("repeat", 1)):
                 if seq["type"] == "set_temperature":
@@ -143,10 +160,53 @@ def _replay(config, sequences):
                                    for command, *_ in sent[commands_counted:])
                 commands_counted = len(sent)
 
+                robot_seconds = (robot._stage._service.travel_seconds - robot_counted
+                                 if robot is not None else 0.0)
                 total = (fixed + control.metered + chain_seconds
-                         + valve_moves * VALVE_MOVE_SECONDS)
+                         + valve_moves * VALVE_MOVE_SECONDS + robot_seconds)
                 durations.append(total - previous)
                 previous = total
         return durations
-    finally:
-        devices.close()
+
+
+def check_reservoirs(entries, config, snapshot):
+    """Replay `entries` (PlanEntry, each once) on an instant simulated twin
+    whose volume tracker starts from `snapshot`; the per-reservoir report
+    when every draw fits. Otherwise it raises, naming the step:
+    ReservoirShortfall for a draw a refill would make fit; the reservoir's
+    own error, its type and remedy kept, for any other refusal (a draw
+    larger than the reservoir holds when loaded, no well under the tip);
+    OperationError for a step the twin cannot replay; ReservoirUndeclared,
+    before any replay, when anything tracked is undeclared. Separate from
+    plan_run, which prices with every reservoir full and never raises
+    (spec §7)."""
+    if snapshot.get("undeclared"):
+        raise ReservoirUndeclared(undeclared_message(snapshot["undeclared"],
+                                                     snapshot.get("definitions", {})))
+    with _twin(config) as (devices, ops, _):
+        devices.reservoirs.restore(snapshot)
+        for entry in entries:
+            if entry.sequence["type"] == "set_temperature":
+                continue
+            try:
+                ops.process_sequence(entry.sequence)
+            except ReservoirOverdraw as e:
+                raise ReservoirShortfall(e.key, e.needed_ul, e.remaining_ul, e.loaded_ul,
+                                         entry.label) from e
+            except ReservoirError as e:
+                # A refill would not help: its own words and remedy, and
+                # the step that met it.
+                _at_step(e, entry.label)
+                raise
+            except Exception as e:
+                raise OperationError(f"{entry.label}: the reservoir check could not replay "
+                                     f"this step ({e})") from e
+        return devices.reservoirs.rows()
+
+
+def _at_step(error, label):
+    """Put the step's label before `error`'s message and on it as
+    `step_label`, its type and figures kept. In place: it is the twin's,
+    raised once, so nothing else holds it."""
+    error.args = (f"{label}: {error}",)
+    error.step_label = label

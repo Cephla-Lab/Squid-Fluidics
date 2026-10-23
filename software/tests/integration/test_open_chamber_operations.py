@@ -90,6 +90,13 @@ class TestOpenChamberVolumes:
             [("extract", 2, 300, 10), ("dispense", 3, 1000, c)],
         ]
 
+    @pytest.mark.parametrize("seq_type", ["priming", "clean_up"])
+    def test_use_ports_restricts_the_loop(self, open_chamber_rig, seq_type):
+        ops, sp = open_chamber_rig
+        ops.process_sequence({"type": seq_type, "fluidic_port": 10,
+                              "flow_rate": 1000, "volume": 1000, "use_ports": [1, 2]})
+        assert len(sp.executed) == 4  # dump, port 1, port 2, final fill-and-dispense
+
     def test_priming_uses_the_slower_priming_speed(self, open_chamber_rig):
         """Air in fresh tubing needs slow flow to stabilize, so the per-port
         draws run at the 8000 uL/min cap, not the sequence's rate."""

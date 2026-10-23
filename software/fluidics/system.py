@@ -11,13 +11,13 @@ once.
 import logging
 
 from .devices import build_devices, build_operations
+from .errors import OperationError
 from .manual_operations import ManualOperations
 from .reports import RunReports
 from .run_session import RunSession
 from .sequences import validate_sequences
 from .subscribers import Subscribers
-from .time_estimate import plan_run
-from .usage import ReagentUsage
+from .time_estimate import check_reservoirs, plan_run
 
 _logger = logging.getLogger(__name__)
 
@@ -36,22 +36,29 @@ class FluidicsSystem:
                                            on_warning=self.warnings.notify)
         self.manual = ManualOperations(devices)
         self.session = RunSession(devices)
-        # Per-port reagent totals, reset at each run's start and logged at
-        # its end; the GUI's table and any future API read this one object.
-        self.usage = ReagentUsage(config, devices.syringe_pump,
-                                  devices.selector_valves, self.session.events)
+        # The volume tracker's per-run figure follows the run's boundaries
+        # (zeroed at RunStarted, logged at RunEnded): subscribed first,
+        # before the reports and before any widget that can chain the next
+        # run from a RunEnded -- the order RunSession.events states for the
+        # system's bookkeeping. The volume tracker is built before the
+        # session exists, so the wiring is here rather than in attach.
+        self.session.events.subscribe(devices.reservoirs.on_run_event)
         # The written record of each run, one JSON per run_id beside the
         # rolling log; built before any widget subscribes (RunSession.events
         # states the order rule).
-        self.reports = RunReports(self.session.events, self.usage,
+        self.reports = RunReports(self.session.events, devices.reservoirs,
                                   self.warnings, directory=report_dir)
 
     @classmethod
-    def build(cls, config, simulation=False, on_issue=None, report_dir=None):
+    def build(cls, config, simulation=False, on_issue=None, report_dir=None,
+              volume_tracking_path=None):
         """Bring the rig up for `config` and assemble it. What build_devices
         reports through on_issue (a degraded bring-up) passes straight
-        through; what it raises (no controller, no pump) raises."""
-        return cls(config, build_devices(config, simulation, on_issue=on_issue),
+        through; what it raises (no controller, no pump) raises.
+        volume_tracking_path: where the volume tracking file lives (None:
+        beside the run reports, named after the config)."""
+        return cls(config, build_devices(config, simulation, on_issue=on_issue,
+                                         volume_tracking_path=volume_tracking_path),
                    report_dir=report_dir)
 
     # --- the one job ---
@@ -67,7 +74,9 @@ class FluidicsSystem:
         through session.events; `plan` from plan() rides along so the run
         is not priced twice, and is what gets checked when it is there --
         it is what the session executes. Gated by validate_sequences,
-        which says who else checks and why.
+        which says who else checks and why, and then, on a rig that tracks
+        a volume, by the reservoir gate (check_reservoirs), before the
+        session starts.
         """
         if plan is None:
             if not sequences:
@@ -78,11 +87,51 @@ class FluidicsSystem:
             # A list, not a generator: validate_sequences walks it twice.
             validate_sequences([entry.sequence for entry in plan],
                                self.devices.config)
+        # "Do not lower tip" (the Robot tab's switch for checking taught
+        # positions over empty plates): the sipper would never dip, so no
+        # well row could draw. Refused here, before the replay and before
+        # anything moves, as a FluidicsError the start slot shows.
+        robot = self.devices.robot
+        if robot is not None and not robot.lower_tip:
+            raise OperationError("Do not lower tip is on: the sipper would travel to its wells "
+                                 "without dipping, so nothing could be drawn; switch it off to run")
+        # The reservoir gate (spec §7): the plan replayed on a simulated
+        # twin restored from the live volume tracker's snapshot (the live
+        # one is only read), so a run that would draw from an emptied well
+        # or bottle -- a fresh list or a resumed tail alike -- is refused
+        # here, not at the pump hours in.
+        self.check_reservoirs(plan)
         self.session.start(sequences, self.operations, plan=plan)
 
-    def run_manual(self, verb, callbacks=None):
+    def check_reservoirs(self, plan):
+        """The per-reservoir report for `plan`, replayed on a twin restored
+        from the live volume tracker's snapshot, which is only read; or the
+        refusal time_estimate.check_reservoirs raises. Empty, with no
+        replay, on a rig that tracks no volume: its volume tracker is the
+        tally alone, with nothing to refuse, and a step the twin cannot
+        replay must not turn into a refusal there (plan_run deliberately
+        falls back)."""
+        tracker = self.devices.reservoirs
+        if not tracker.tracked:
+            return []
+        rows = check_reservoirs(plan, self.devices.config, tracker.snapshot())
+        # The general notice at the start of a run, once, at INFO: what the
+        # replay says each touched reservoir has left when the run is done.
+        # A refusal above is the error; nothing here is a warning.
+        _logger.info("Reservoirs after this run: %s.",
+                     "; ".join(f"{key} {remaining:.0f} uL left" for key, _, remaining in rows)
+                     if rows else "no tracked reservoir is drawn from")
+        return rows
+
+    def refill(self, *keys):
+        """Declare reservoirs full, each `all`, a plate name, or one key, in
+        one write. Through the manual verb, which refuses a plate the
+        sipper's tip is in."""
+        self.manual.refill(*keys)
+
+    def run_manual(self, verb, callbacks=None, source=None):
         """Start one manual verb; see RunSession.run_manual."""
-        self.session.run_manual(verb, callbacks)
+        self.session.run_manual(verb, callbacks, source=source)
 
     def wait(self, timeout=None):
         """Block until the current job has ended; see RunSession.wait."""
@@ -117,6 +166,7 @@ class FluidicsSystem:
         thread still driving them. Returns the exceptions the close raised,
         as DeviceSet.close does; safe to call twice.
         """
+        quiescent = True
         try:
             if self.session.busy:
                 what = self.session.kind
@@ -125,10 +175,12 @@ class FluidicsSystem:
                 if not self.session.wait(timeout):
                     _logger.error("The %s did not stop within %s s; closing the devices under it.",
                                   what, timeout)
+                    quiescent = False
         finally:
             # Unconditional: a second Ctrl+C lands in the wait above, and the
             # ports must still be released -- the exception goes on afterwards.
-            errors = self.devices.close()
+            # Under a job that did not stop, the devices make no moves.
+            errors = self.devices.close(quiescent=quiescent and not self.session.busy)
         return errors
 
     def __enter__(self):

@@ -33,6 +33,16 @@ def parse_args():
         default=False,
         help='Run in simulation mode without operating hardware'
     )
+    parser.add_argument(
+        '--refilled', action='append', default=[], metavar='KEY',
+        help="Declare a reservoir full before the run: a port key (port_25), a "
+             "plate name (ssct), or all. Repeatable."
+    )
+    parser.add_argument(
+        '--volume-tracking-file', default=None, metavar='PATH',
+        help="Where the volume tracking file lives (default: beside the run "
+             "reports, named after the config). Tests and odd setups only."
+    )
     return parser.parse_args()
 
 def main():
@@ -59,7 +69,10 @@ def main():
         # before any hardware is touched.
         validate_sequences(included, config)
 
-        system = FluidicsSystem.build(config, args.simulation)
+        system = FluidicsSystem.build(config, args.simulation,
+                                      volume_tracking_path=args.volume_tracking_file)
+        if args.refilled:
+            system.refill(*args.refilled)       # every one of them, in one write
 
         # The worker narrates its own run through the fluidics logger, so
         # the CLI renders nothing -- but a failed run must not exit 0, and

@@ -25,8 +25,6 @@ from qtpy.QtWidgets import (
     QPushButton,
     QSpinBox,
     QSplitter,
-    QTableWidget,
-    QTableWidgetItem,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -34,35 +32,54 @@ from qtpy.QtWidgets import (
 )
 
 from fluidics.control.config import available_ports
+from fluidics.errors import FluidicsError
 from fluidics.events import RunEnded, RunStarted, SequenceCompleted, SequenceStarted, plan_seconds, repeat_suffix
 from fluidics.files import atomic_write
-from fluidics.qt.support import GuiLogHandler, PostsToQtThread, _ask_yes_no, _hms, subscribe_until_detached
+from fluidics.qt.reservoirs_window import ReservoirsWindow
+from fluidics.qt.support import (GuiLogHandler, PostsToQtThread, WellCombo, _ask_yes_no, _hms, connect_click,
+                                 subscribe_until_detached)
 from fluidics.run_log import LOGGER_NAME
 from fluidics.sequence_list import SequenceList
 from fluidics.sequences import (
     PORT_FIELDS,
+    SIPPER_FIELDS,
+    WELL_FIELDS,
+    field_default,
     get_fields_for_type,
+    port_list,
     is_included,
     label_for_type,
     load_sequences,
     save_sequences_yaml,
-    types_for_application,
+    types_for_rig,
     validate_sequences,
 )
+from fluidics.vocabulary import sipper_vocabulary
 
 _logger = logging.getLogger("fluidics.gui")
 
 
 class AddSequenceDialog(QDialog):
-    """Dialog for adding a new sequence to the tree."""
+    """Dialog for adding a new sequence to the tree.
 
-    def __init__(self, parent, application, port_names):
+    sipper: the rig's SipperVocabulary, or None on a rig without one. With
+    it, a fluidic row offers its well -- picked or typed, on the reservoir
+    beside it -- live only while the port is the sipper's, where the fill
+    combo hides (a sipper row cannot fill tubing); priming and clean-up
+    offer where the sipper sits; flow_reagent offers its dips (spec §9).
+    A sipper-only row (push) has no port, so its well and its dips are
+    live throughout. Without it, none of those fields is offered (D8),
+    nor a sipper-only type (types_for_rig)."""
+
+    def __init__(self, parent, application, port_names, sipper=None):
         super().__init__(parent)
         self.setWindowTitle("Add Sequence")
         self.application = application
         self.port_names = port_names
+        self.sipper = sipper
         self.result_dict = None
         self._field_widgets = {}
+        self._well_reservoirs = {}      # well field -> the reservoir combo beside it
 
         self.initUI()
 
@@ -73,7 +90,7 @@ class AddSequenceDialog(QDialog):
         type_layout = QHBoxLayout()
         type_layout.addWidget(QLabel("Type:"))
         self.typeCombo = QComboBox()
-        available_types = types_for_application(self.application)
+        available_types = types_for_rig(self.application, self.sipper)
         for seq_type in available_types:
             self.typeCombo.addItem(label_for_type(seq_type), seq_type)
         type_layout.addWidget(self.typeCombo)
@@ -98,6 +115,7 @@ class AddSequenceDialog(QDialog):
         while self.formLayout.rowCount() > 0:
             self.formLayout.removeRow(0)
         self._field_widgets.clear()
+        self._well_reservoirs.clear()
 
         seq_type = self.typeCombo.currentData()
         fields = get_fields_for_type(seq_type)
@@ -105,24 +123,31 @@ class AddSequenceDialog(QDialog):
         for field_name, field_info in fields.items():
             if field_name == 'include':
                 continue  # handled by tree checkbox
+            if field_name in SIPPER_FIELDS and self.sipper is None:
+                continue  # no sipper on this rig: nothing to offer (D8)
 
-            # A required field has no default, and pydantic spells that
-            # PydanticUndefined -- which is not None, so it used to reach
-            # int()/float() below and raise. Every fluidic type has required
-            # fields, so the dialog raised for all of them: Add Sequence was
-            # dead on arrival.
-            default = None if field_info.is_required() else field_info.default
+            default = field_default(field_info)
 
             if field_name in ('name', 'round'):
                 widget = QLineEdit()
                 if default is not None:
                     widget.setText(str(default))
+            elif field_name == 'use_ports':
+                # Typed as the table types it; blank primes every port.
+                widget = QLineEdit()
+                widget.setPlaceholderText("every port, or e.g. 1, 3")
+            elif field_name in WELL_FIELDS:
+                self._addWellRow(field_name)
+                continue
             elif field_name in PORT_FIELDS:
                 # fill_tubing_with is a port too, and sequences.py checks it
                 # as one -- offering it as a free-typed number was the same
                 # bug this change exists to fix, one field over.
                 widget = QComboBox()
                 for port, label in self.port_names:
+                    if (field_name == 'fill_tubing_with' and self.sipper is not None
+                            and port == self.sipper.sipper_port):
+                        continue  # the sipper cannot fill tubing (spec §6)
                     widget.addItem(label, port)
                 if default is not None:
                     # An unmatched port selects nothing rather than silently
@@ -134,6 +159,10 @@ class AddSequenceDialog(QDialog):
                 widget.setRange(0, 100000)
                 if default is not None:
                     widget.setValue(float(default))
+            elif field_name == 'dip_cycles':
+                widget = QSpinBox()
+                widget.setRange(0, 20)
+                widget.setValue(int(default or 0))
             else:
                 # int fields: flow_rate, volume, repeat
                 widget = QSpinBox()
@@ -144,15 +173,101 @@ class AddSequenceDialog(QDialog):
             self._field_widgets[field_name] = widget
             self.formLayout.addRow(field_name, widget)
 
+        port = self._field_widgets.get('fluidic_port')
+        if self.sipper is not None and port is not None:
+            port.currentIndexChanged.connect(self._followPort)
+            self._followPort()
+
+    def _addWellRow(self, field_name):
+        """A well field: the reservoir, then the well -- an editable combo
+        of that reservoir's wells, labelled with their names. Starts blank:
+        `well` must be chosen, and a blank `sipper_well` means the config's
+        own priming or clean-up well."""
+        reservoirs = QComboBox()
+        for name in sorted(self.sipper.reservoirs):
+            reservoirs.addItem(name, name)
+        reservoirs.setCurrentIndex(reservoirs.findData(self.sipper.default_reservoir))
+        well = WellCombo()
+        self._fillWells(well, reservoirs)
+        reservoirs.currentIndexChanged.connect(
+            lambda _index, well=well, reservoirs=reservoirs: self._fillWells(well, reservoirs))
+        row = QHBoxLayout()
+        row.addWidget(reservoirs)
+        row.addWidget(well, 1)
+        self._field_widgets[field_name] = well
+        self._well_reservoirs[field_name] = reservoirs
+        self.formLayout.addRow(field_name, row)
+
+    def _fillWells(self, well, reservoirs):
+        well.fill(self.sipper.well_names(reservoirs.currentData()))
+        self._clearWell(well)
+
+    @staticmethod
+    def _clearWell(well):
+        well.setCurrentIndex(-1)
+        well.clearEditText()
+
+    def _onSipperPort(self):
+        port = self._field_widgets.get('fluidic_port')
+        return (self.sipper is not None and port is not None
+                and port.currentData() == self.sipper.sipper_port)
+
+    def _followPort(self):
+        """The well (and its dips) is live only while the port is the
+        sipper's, and cleared otherwise; the fill combo is hidden while it
+        is, since a sipper row cannot fill tubing. `sipper_well` is not
+        tied to the port: it is where the sipper sits while priming."""
+        on_sipper = self._onSipperPort()
+        well = self._field_widgets.get('well')
+        if well is not None:
+            well.setEnabled(on_sipper)
+            self._well_reservoirs['well'].setEnabled(on_sipper)
+            if not on_sipper:
+                self._clearWell(well)
+        dips = self._field_widgets.get('dip_cycles')
+        if dips is not None:
+            dips.setEnabled(on_sipper)
+            if not on_sipper:
+                dips.setValue(0)
+        fill = self._field_widgets.get('fill_tubing_with')
+        if fill is not None:
+            fill.setVisible(not on_sipper)
+            label = self.formLayout.labelForField(fill)
+            if label is not None:
+                label.setVisible(not on_sipper)
+
     def accept(self):
         seq_type = self.typeCombo.currentData()
         d = {'type': seq_type}
         for field_name, widget in self._field_widgets.items():
-            if isinstance(widget, QLineEdit):
+            if field_name == 'use_ports':
+                # The run's list, as the other fields hand back what a run
+                # takes; text that spells none stays as typed, for the
+                # row's verdict to name.
+                val = widget.text().strip()
+                try:
+                    ports = port_list(val)
+                except ValueError:
+                    ports = val
+                if ports:
+                    d[field_name] = ports
+            elif isinstance(widget, QLineEdit):
                 val = widget.text().strip()
                 if val:
                     d[field_name] = val
+            elif isinstance(widget, WellCombo):
+                # Its value, never currentData(): the text the operator
+                # sees, typed or picked. On another reservoir it is written
+                # reservoir/well; one typed that way already stays as typed.
+                value = widget.value()
+                if widget.isEnabled() and value:
+                    reservoir = self._well_reservoirs[field_name].currentData()
+                    d[field_name] = (value if "/" in value
+                                     or reservoir == self.sipper.default_reservoir
+                                     else f"{reservoir}/{value}")
             elif isinstance(widget, QComboBox):
+                if field_name == 'fill_tubing_with' and self._onSipperPort():
+                    continue  # hidden: a sipper row carries no fill
                 d[field_name] = widget.currentData()
             elif isinstance(widget, QDoubleSpinBox):
                 d[field_name] = widget.value()
@@ -161,6 +276,33 @@ class AddSequenceDialog(QDialog):
         self.result_dict = d
         super().accept()
 
+
+# The session's `source` for a manual job this tab started (a reset from
+# its Reservoirs window): the main window keeps this tab live for it and
+# greys the others, as it does for the Robot tab's own jobs.
+RUN_TAB_JOB_SOURCE = "run tab"
+
+
+def is_run_tab_job(session):
+    """Whether the job in flight is one the Run tab started: a manual job
+    the session labels RUN_TAB_JOB_SOURCE, read from the session, which
+    sets and clears its source with its kind."""
+    return session.kind == "manual" and session.source == RUN_TAB_JOB_SOURCE
+
+
+def _field_text(seq, fname, finfo):
+    """A field's cell: the row's value, or its type's default where the row
+    leaves the field out -- rows are kept as typed. A list (use_ports) is
+    shown as it is typed, "1, 3"."""
+    value = seq.get(fname, field_default(finfo))
+    if isinstance(value, (list, tuple)):
+        return ", ".join(str(v) for v in value)
+    return '' if value is None else str(value)
+
+
+def _check_state(seq):
+    """A row's checkbox: whether a run takes it."""
+    return Qt.Checked if is_included(seq) else Qt.Unchecked
 
 
 class SequencesWidget(PostsToQtThread, QWidget):
@@ -172,7 +314,10 @@ class SequencesWidget(PostsToQtThread, QWidget):
     holds what the operator typed, judges each row as it goes, and
     coerces on the way out (its validated()/included(), which this
     widget's getSequences wraps); this widget paints those verdicts and
-    turns clicks into its verbs.
+    turns clicks into its verbs. Reservoirs…, beside the run controls,
+    opens the Reservoirs window (ReservoirsWindow): every reservoir's
+    figures and their resets -- the one place the GUI declares a refill.
+    The window keeps itself current; the tab only opens it.
     """
 
     def __init__(self, config, system):
@@ -182,12 +327,17 @@ class SequencesWidget(PostsToQtThread, QWidget):
         self.session = system.session
         self.selectorValveSystem = system.devices.selector_valves
 
+        # The rig's well vocabulary, or None without a sipper: the list
+        # judges wells by it, the tree and the Add dialog offer them by it.
+        self._sipper = sipper_vocabulary(config)
         # THE sequence list (fluidics.sequence_list, Qt-free): it holds the
         # dicts, validates them and performs the structural verbs; this
         # widget renders it and turns clicks into its calls.
         self._model = SequenceList(config.application,
-                                   available_ports(config))
+                                   available_ports(config),
+                                   sipper=self._sipper)
         self._plan = ()          # the running run's plan, rows = model rows
+        self._rowsLocked = False # fields, names and checkboxes read-only: a job rides the list
         # Which sequences the operator has open, by identity: a move swaps
         # the dicts themselves, so an open row follows its sequence rather
         # than staying behind at the index it was rendered at.
@@ -281,6 +431,12 @@ class SequencesWidget(PostsToQtThread, QWidget):
         self.abortButton = QPushButton("Abort")
         self.abortButton.clicked.connect(self.abortSequences)
         self.abortButton.setEnabled(False)  # Initially disabled
+        # Opening the window is not a job, so the button stays live under
+        # one; the window's resets are what wait for an idle rig.
+        self.reservoirsButton = QPushButton("Reservoirs…")
+        connect_click(self.reservoirsButton, self.showReservoirs)
+        self.reservoirsWindow = ReservoirsWindow(self.config, self.system, RUN_TAB_JOB_SOURCE,
+                                                 parent=self)
 
         editLayout = QHBoxLayout()
         for button in (self.loadButton, self.saveButton, self.addButton,
@@ -291,7 +447,7 @@ class SequencesWidget(PostsToQtThread, QWidget):
         layout.addLayout(editLayout)
 
         runLayout = QHBoxLayout()
-        for button in (self.runButton, self.pauseButton, self.abortButton):
+        for button in (self.runButton, self.pauseButton, self.abortButton, self.reservoirsButton):
             runLayout.addWidget(button)
         layout.addLayout(runLayout)
 
@@ -318,18 +474,6 @@ class SequencesWidget(PostsToQtThread, QWidget):
         statusRow.addWidget(self.timeLabel)
         progressSection.addLayout(statusRow)
         progressSection.addWidget(self.warningLabel)
-
-        # Reagent drawn per port since the run began (manual draws show
-        # between runs). Hidden until something has been drawn.
-        self.usageTable = QTableWidget(0, 3)
-        self.usageTable.setHorizontalHeaderLabels(["Port", "Reagent", "Used (\u00b5L)"])
-        self.usageTable.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self.usageTable.verticalHeader().setVisible(False)
-        self.usageTable.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.usageTable.setMaximumHeight(120)
-        self.usageTable.setVisible(False)
-        progressSection.addWidget(self.usageTable)
-
         layout.addLayout(progressSection)
 
         self.setLayout(layout)
@@ -338,6 +482,9 @@ class SequencesWidget(PostsToQtThread, QWidget):
         self.timer = QTimer()
         self.timer.timeout.connect(self.updateTimeRemaining)
         self.total_time = None
+        # A job already running greys the controls before the first tick
+        # or state change.
+        self._renderRunControls()
 
     # What the log pane keeps. Enough to cover a long run's narration
     # without holding the whole session's text in the widget -- the run
@@ -353,10 +500,16 @@ class SequencesWidget(PostsToQtThread, QWidget):
         'repeat': 'Repeat',
         'temperature': 'Temperature (\u00b0C)',
         'round': 'Round',
+        'well': 'Well',
+        'dip_cycles': 'Dip Cycles',
+        'sipper_well': 'Sipper Well',
+        'use_ports': 'Use Ports',
     }
 
     def _onItemDoubleClicked(self, item, column):
         """Allow editing: name (col 0) for top-level items, value (col 1) for children."""
+        if self._rowsLocked:
+            return
         is_top_level = item.parent() is None
         if is_top_level and column == 0:
             self.tree.editItem(item, 0)
@@ -403,12 +556,13 @@ class SequencesWidget(PostsToQtThread, QWidget):
     def _renderSequenceRow(self, row, seq):
         """One top-level item per sequence; one child per field of its type
         -- every field, defaults included, so a value at its default can
-        still be edited."""
+        still be edited. On a rig without the sipper, its fields are left
+        out (D8) unless the row carries one, which shows so it can be
+        cleared: the row is red for it."""
         seq_type = seq.get('type', '')
         item = QTreeWidgetItem([self._model.title(row),
                                 f"Type: {label_for_type(seq_type)}"])
-        item.setFlags(item.flags() | Qt.ItemIsEditable)
-        item.setCheckState(0, Qt.Checked if is_included(seq) else Qt.Unchecked)
+        item.setCheckState(0, _check_state(seq))
 
         try:
             type_fields = get_fields_for_type(seq_type)
@@ -417,15 +571,40 @@ class SequencesWidget(PostsToQtThread, QWidget):
         for fname, finfo in type_fields.items():
             if fname in ('include', 'name'):
                 continue
-            value = seq.get(fname, finfo.default)
+            default = field_default(finfo)
+            if (fname in SIPPER_FIELDS and self._sipper is None
+                    and seq.get(fname, default) in (None, default)):
+                continue
             child = QTreeWidgetItem([self.FIELD_LABELS.get(fname, fname),
-                                     '' if value is None else str(value)])
+                                     _field_text(seq, fname, finfo)])
             child.setData(0, Qt.UserRole, fname)
-            child.setFlags(child.flags() | Qt.ItemIsEditable)
             item.addChild(child)
 
+        self._setRowFlags(item)
         self.tree.addTopLevelItem(item)
         item.setExpanded(id(seq) in self._opened)
+
+    def _setRowFlags(self, item):
+        """A row's name and checkbox, and its fields' values, editable
+        unless the rows are locked (_lockRows)."""
+        def flags(it, extra):
+            return (it.flags() & ~extra) if self._rowsLocked else (it.flags() | extra)
+        item.setFlags(flags(item, Qt.ItemIsEditable | Qt.ItemIsUserCheckable))
+        for j in range(item.childCount()):
+            child = item.child(j)
+            child.setFlags(flags(child, Qt.ItemIsEditable))
+
+    def _lockRows(self, locked):
+        """Read-only while a job rides the list: a run executes the rows as
+        they were when Run was pressed (its plan holds copies), so an edit
+        made under it would show in the table and never run. Everything
+        comes back when the rig is idle."""
+        if locked == self._rowsLocked:
+            return
+        self._rowsLocked = locked
+        with QSignalBlocker(self.tree):
+            for i in range(self.tree.topLevelItemCount()):
+                self._setRowFlags(self.tree.topLevelItem(i))
 
     def _handle_log_line(self, line):
         """On the Qt thread: the pane keeps the last LOG_LINES lines, and
@@ -477,6 +656,18 @@ class SequencesWidget(PostsToQtThread, QWidget):
         row = self.tree.indexOfTopLevelItem(top)
         if not 0 <= row < len(self._model):
             return
+        if self._rowsLocked:
+            # An editor that was open when the job started commits here: the
+            # rows are read-only now, so the cell goes back to the model's.
+            with QSignalBlocker(self.tree):
+                seq = self._model[row]
+                if parent is None:
+                    item.setText(0, self._model.title(row))
+                    item.setCheckState(0, _check_state(seq))
+                else:
+                    fname = item.data(0, Qt.UserRole)
+                    item.setText(1, _field_text(seq, fname, get_fields_for_type(seq['type'])[fname]))
+            return
         if parent is None:
             self._model.set_included(row, item.checkState(0) == Qt.Checked)
             # The title renders from the model, always: an emptied name --
@@ -487,6 +678,11 @@ class SequencesWidget(PostsToQtThread, QWidget):
         else:
             self._model.set_field(row, item.data(0, Qt.UserRole),
                                   item.text(1).strip())
+            # The title carries the well: repaint it, or the next
+            # top-level change hands set_name the stale title, whose old
+            # suffix it cannot strip, and the stale text becomes the name.
+            with QSignalBlocker(self.tree):
+                top.setText(0, self._model.title(row))
         self._renderValidation()
         self._renderRunControls()
 
@@ -549,7 +745,8 @@ class SequencesWidget(PostsToQtThread, QWidget):
 
     def addSequence(self):
         port_names = self.selectorValveSystem.get_port_names()
-        dialog = AddSequenceDialog(self, self.config.application, port_names)
+        dialog = AddSequenceDialog(self, self.config.application, port_names,
+                                   sipper=self._sipper)
         if dialog.exec_() == QDialog.Accepted and dialog.result_dict:
             self._refresh(select=self._model.add(dialog.result_dict))
 
@@ -648,8 +845,8 @@ class SequencesWidget(PostsToQtThread, QWidget):
         # unchecked ones. Relabel once, so highlight and resume land on
         # tree rows without a translation table riding alongside. The
         # labels stay true because the verbs that reorder rows are the
-        # ones greyed out during a run -- field edits and checkboxes stay
-        # live, and neither moves a row. A holder without those buttons
+        # ones greyed out during a run, and the rows themselves are
+        # read-only then (_lockRows). A holder without those buttons
         # (a script, an API) would need the plan to carry identity, the
         # way the open-state set does.
         plan = tuple(entry._replace(row=rows[entry.row]) for entry in plan)
@@ -663,11 +860,16 @@ class SequencesWidget(PostsToQtThread, QWidget):
         ending shared by the Run button and the resume offer, so the two
         start sites cannot drift. The tabs (and, for the offer, the modal
         chain) make a busy rig unreachable in practice; the dialog beats a
-        traceback if it ever is not."""
+        traceback if it ever is not. A refusal at time zero -- the
+        reservoir gate's shortfall or undeclared volumes, or a step it
+        could not replay -- is a FluidicsError, said the same way."""
         try:
             self.system.run(sequences, plan=plan)
         except RuntimeError as e:
             QMessageBox.warning(self, "Rig busy", str(e))
+            return
+        except FluidicsError as e:
+            QMessageBox.warning(self, "Cannot start the run", str(e))
             return
         self._beginRunDisplay(len(plan))
 
@@ -698,18 +900,12 @@ class SequencesWidget(PostsToQtThread, QWidget):
         """
         self._showTimeRemaining()
         self._renderRunControls()
-        self._renderUsage()
 
-    def _renderUsage(self):
-        """The per-port totals as they stand; the ledger's rows carry the
-        names, read fresh per call, so a rename shows on the next tick."""
-        rows = self.system.usage.rows()
-        self.usageTable.setVisible(bool(rows))
-        self.usageTable.setRowCount(len(rows))
-        for index, (port, name, used) in enumerate(rows):
-            for column, text in enumerate((str(port), name or "",
-                                           f"{used:.0f}")):
-                self.usageTable.setItem(index, column, QTableWidgetItem(text))
+    def showReservoirs(self):
+        """Open the Reservoirs window, or bring it back to the front."""
+        self.reservoirsWindow.show()
+        self.reservoirsWindow.raise_()
+        self.reservoirsWindow.activateWindow()
 
     def _showTimeRemaining(self):
         """Draw the label and the bar from one session snapshot: the clock a
@@ -761,6 +957,8 @@ class SequencesWidget(PostsToQtThread, QWidget):
                        self.duplicateButton, self.moveUpButton,
                        self.moveDownButton):
             button.setEnabled(idle)
+        # And the rows themselves: an edit under a run would never reach it.
+        self._lockRows(not idle)
 
     def pauseSequences(self):
         """Hold the run after the move in flight, or let it go on."""
@@ -836,9 +1034,8 @@ class SequencesWidget(PostsToQtThread, QWidget):
         """
         tail = self._plan[position:]
         entry = tail[0]
-        # The plan's own captured label: field edits stay live during a
-        # run, and the offer must name what will actually execute, not
-        # what the tree says by now.
+        # The plan's own captured label: the offer names what will
+        # actually execute, the rows as they were when the run started.
         label = entry.label
         which = repeat_suffix(entry)
         if not _ask_yes_no(
@@ -877,7 +1074,6 @@ class SequencesWidget(PostsToQtThread, QWidget):
             self.sequenceLabel.setText("0/0 sequences")
             self.highlightRow(None)
         self._renderRunControls()
-        self._renderUsage()
 
     def _onRunEvent(self, event):
         # On the worker's or session's thread; the paint crosses to Qt.

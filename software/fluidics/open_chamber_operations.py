@@ -50,17 +50,13 @@ class OpenChamberOperations():
                 sequence['flow_rate'],
                 sequence['volume'],
                 sequence.get('fill_tubing_with'))
-        elif seq_type == "priming":
-            self.priming_or_clean_up(
-                sequence['fluidic_port'],
-                sequence['flow_rate'],
-                sequence['volume'])
-        elif seq_type == "clean_up":
+        elif seq_type in ("priming", "clean_up"):
             self.priming_or_clean_up(
                 sequence['fluidic_port'],
                 sequence['flow_rate'],
                 sequence['volume'],
-                clean_up=True)
+                sequence.get('use_ports'),
+                clean_up=(seq_type == "clean_up"))
         elif seq_type == "set_temperature":
             self.set_temperature(sequence['temperature'])
         else:

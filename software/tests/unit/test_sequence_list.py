@@ -7,14 +7,23 @@ and every structural verb can be exercised (or driven by a script, or a
 headless embedder) with no GUI in the process.
 """
 
+from fluidics.control.config import available_ports
 from fluidics.sequence_list import SequenceList
 from fluidics.sequences import label_for_type
+from fluidics.vocabulary import sipper_vocabulary
 
-from ..conftest import FLOW, TEMP, in_a_fresh_interpreter
+from ..conftest import FLOW, HYB, TEMP, in_a_fresh_interpreter
 
 
 def flow_cell(*sequences):
     return SequenceList("Flow Cell", ports=range(1, 25), sequences=sequences)
+
+
+def sipper_rig(config, *sequences):
+    """The list over the sample plate-sipper rig, where FLOW's port (1) is
+    the sipper's: FLOW is the sipper row with no well, HYB the one with."""
+    return SequenceList("Flow Cell", available_ports(config), sequences,
+                        sipper=sipper_vocabulary(config))
 
 
 class TestWhatARunWouldTake:
@@ -101,6 +110,17 @@ class TestWhatSetFieldTakes:
         model = flow_cell(dict(FLOW, fill_tubing_with=3))
         model.set_field(0, "fill_tubing_with", "")
         assert model[0]["fill_tubing_with"] is None
+
+    def test_a_typed_port_list_is_kept_as_typed_and_validates_as_a_list(self):
+        model = flow_cell(dict(FLOW, type="priming"))
+        model.set_field(0, "use_ports", "1, 3")
+        assert model[0]["use_ports"] == "1, 3"
+        assert model.problem(0) is None, model.problem(0)
+        assert model.validated()[0]["use_ports"] == [1, 3]
+        model.set_field(0, "use_ports", "1, 30")
+        assert model.problem(0).startswith("use_ports includes 30:"), model.problem(0)
+        model.set_field(0, "use_ports", "")
+        assert model[0]["use_ports"] is None and model.problem(0) is None
 
     def test_the_row_holds_what_was_typed_not_what_validates(self):
         """A half-typed field must stay as typed -- rewriting it under the
@@ -199,3 +219,26 @@ def test_the_model_needs_no_qt():
         "'fluidic_port': 1, 'flow_rate': 1, 'volume': 1}]).validated(); "
         "print([n for n in sys.modules if 'qt' in n.lower()])")
     assert loaded == "[]", f"Qt was imported: {loaded}"
+
+
+def test_a_sipper_row_is_titled_by_its_well_and_validated_with_the_sipper(plate_sipper_config):
+    rows = sipper_rig(plate_sipper_config, dict(HYB, name="hyb"), FLOW)
+    assert rows.title(0) == "hyb: A1"
+    assert rows.problem(0) is None
+    assert rows.problem(1) == "fluidic_port=1 is the sipper: name a well"
+
+
+def test_a_well_rows_title_typed_back_leaves_its_name_alone(plate_sipper_config):
+    """The editor hands set_name the item's text -- the title, well and
+    all -- on every change to a top-level item: the well must not pile up
+    on the name, and an unnamed row stays unnamed."""
+    rows = sipper_rig(plate_sipper_config, dict(HYB, name="hyb"), dict(HYB, well="ssct/A1"))
+    for _ in range(2):
+        rows.set_name(0, rows.title(0))
+        rows.set_name(1, rows.title(1))
+    assert rows[0]["name"] == "hyb" and rows.title(0) == "hyb: A1"
+    assert rows[1].get("name") is None and rows.title(1) == "Flow Reagent: ssct/A1"
+    rows.set_name(0, "hyb2")
+    assert rows[0]["name"] == "hyb2" and rows.title(0) == "hyb2: A1"
+    rows.set_name(1, "wash: ssct/A1")
+    assert rows[1]["name"] == "wash"

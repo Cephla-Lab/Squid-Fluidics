@@ -68,8 +68,9 @@ class FakeSession:
     from it, and the controls recorded."""
 
     def __init__(self, kind=None, paused=False, at_rest=False, cancelled=False,
-                 elapsed_seconds=0.0):
+                 elapsed_seconds=0.0, source=None):
         self.kind = kind
+        self.source = source
         self.paused = paused
         self.at_rest = at_rest
         self.cancelled = cancelled
@@ -488,11 +489,12 @@ def run_widget(paused=False, at_rest=False, total_time=100, elapsed=0):
     # them on the stub too.
     for name in ("_showTimeRemaining", "_renderRunControls"):
         stub.__dict__[name] = _bind(name, stub)
-    # A static method needs no stub of its own; a valid list blocks nothing;
-    # the usage table has its own tests.
+    # A static method needs no stub of its own; a valid list blocks nothing.
     stub.__dict__["_pauseSuffix"] = gui.SequencesWidget._pauseSuffix
     stub.__dict__["_blockingError"] = lambda: None
-    stub.__dict__["_renderUsage"] = lambda: None
+    # The rows' lock acts on the tree, which the stub has none of: tested
+    # on the real widget (test_sequences_widget).
+    stub.__dict__["_lockRows"] = lambda locked: None
     return stub
 
 
@@ -758,10 +760,13 @@ class TestMainWindowJobs:
     runs, and asks before closing under a live job (the system then stops it
     before the devices close)."""
 
-    def _tabs(self, kind):
+    def _tabs(self, kind, robot_tab=None, source=None):
         enabled = {}
-        stub = SimpleNamespace(RUN_TAB=0, MANUAL_TAB=1, session=FakeSession(kind=kind),
-                               tabWidget=SimpleNamespace(setTabEnabled=enabled.__setitem__))
+        stub = SimpleNamespace(RUN_TAB=0, MANUAL_TAB=1, ROBOT_TAB=robot_tab,
+                               session=FakeSession(kind=kind, source=source),
+                               tabWidget=SimpleNamespace(setTabEnabled=enabled.__setitem__,
+                                                         currentIndex=lambda: 0,
+                                                         setCurrentIndex=lambda index: None))
         gui.FluidicsControlGUI._renderTabs(stub)
         return enabled
 
@@ -772,6 +777,17 @@ class TestMainWindowJobs:
         assert self._tabs("run") == {0: True, 1: False}
         assert self._tabs("manual") == {0: False, 1: True}
         assert self._tabs(None) == {0: True, 1: True}
+
+    def test_one_job_greys_every_tab_but_its_own(self):
+        """A run greys the manual and Robot tabs; a manual-tab move greys
+        the run and Robot tabs; a Robot-tab move (a manual job whose source
+        is the Robot tab) greys the run and manual tabs."""
+        from fluidics.qt.robot_control import ROBOT_JOB_SOURCE
+        assert self._tabs("run", robot_tab=2) == {0: True, 1: False, 2: False}
+        assert self._tabs("manual", robot_tab=2) == {0: False, 1: True, 2: False}
+        assert self._tabs("manual", robot_tab=2, source=ROBOT_JOB_SOURCE) == \
+            {0: False, 1: False, 2: True}
+        assert self._tabs(None, robot_tab=2) == {0: True, 1: True, 2: True}
 
     def _closing(self, busy):
         session = FakeSession(kind="run" if busy else None)
@@ -1095,36 +1111,6 @@ class TestShowingWhereTheValvesAre:
         assert combo.currentData() is None
 
 
-class TestUsageTable:
-    """The run tab's per-port table: painted from the ledger's snapshot,
-    names read fresh from the config at each paint, hidden when empty."""
-
-    def _stub(self, rows):
-        from qtpy.QtWidgets import QTableWidget
-        table = QTableWidget(0, 3)
-        stub = SimpleNamespace(
-            usageTable=table,
-            system=SimpleNamespace(
-                usage=SimpleNamespace(rows=lambda: list(rows))),
-        )
-        return stub, table
-
-    def test_totals_paint_with_fresh_names(self, qapp):
-        stub, table = self._stub([(1, None, 500.0), (3, "DAPI", 1500.0)])
-        gui.SequencesWidget._renderUsage(stub)
-        assert not table.isHidden()
-        assert table.rowCount() == 2
-        rows = [(table.item(r, 0).text(), table.item(r, 1).text(),
-                 table.item(r, 2).text()) for r in range(2)]
-        assert rows == [("1", "", "500"), ("3", "DAPI", "1500")]
-
-    def test_nothing_drawn_hides_the_table(self, qapp):
-        stub, table = self._stub([])
-        table.setVisible(True)
-        gui.SequencesWidget._renderUsage(stub)
-        assert table.isHidden()
-
-
 class TestHeldVolumePaint:
     def test_the_bar_paints_the_published_reading(self, qapp):
         from qtpy.QtWidgets import QProgressBar
@@ -1267,10 +1253,11 @@ class TestDetachOnDestroy:
         to build; the sensor widgets pin the same invariant by behaviour
         in test_gui_flow_widget/test_gui_temperature_widget."""
         import inspect
-        from fluidics.qt import manual_control, sensor_plots, sequence_editor
+        from fluidics.qt import manual_control, robot_control, sensor_plots, sequence_editor
 
         for cls in (sequence_editor.SequencesWidget,
                     manual_control.ManualControlWidget,
+                    robot_control.RobotControlWidget,
                     sensor_plots.FlowSensorWidget,
                     sensor_plots.TemperatureControlWidget):
             src = inspect.getsource(cls.__init__)

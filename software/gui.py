@@ -36,8 +36,9 @@ _logger = logging.getLogger("fluidics.gui")
 # removing them breaks the suite.
 from fluidics.qt.support import (WorkerEvent, PostsToQtThread, GuiLogHandler,  # noqa: E402,F401
                                  _ask_yes_no, _hms)
-from fluidics.qt.sequence_editor import AddSequenceDialog, SequencesWidget  # noqa: E402,F401
+from fluidics.qt.sequence_editor import AddSequenceDialog, SequencesWidget, is_run_tab_job  # noqa: E402,F401
 from fluidics.qt.manual_control import PortNamesDialog, ManualControlWidget  # noqa: E402,F401
+from fluidics.qt.robot_control import RobotControlWidget, is_robot_job  # noqa: E402,F401
 from fluidics.qt.sensor_plots import (_safe_filename_part, TimeSeriesPlotWidget,  # noqa: E402,F401
                                       TemperatureControlWidget, FlowSensorWidget,
                                       FlowSensorControlWidget)
@@ -100,6 +101,13 @@ class FluidicsControlGUI(PostsToQtThread, QMainWindow):
         self.session.state.subscribe(lambda kind: self._post_event("_renderTabs"))
         self.temperatureController = self.system.devices.temperature_controller
         self.flowSensors = self.system.devices.flow_sensors
+        # "Do not lower tip" starts on in this window, so a Go to well
+        # before the taught positions are checked never dips; the operator
+        # switches it off to draw or run. Set on the robot before the Robot
+        # tab is built to show it. A run from the command line or a script
+        # lowers the tip as before.
+        if self.system.devices.robot is not None:
+            self.system.manual.set_lower_tip(False)
 
         self.initUI()
 
@@ -131,6 +139,12 @@ class FluidicsControlGUI(PostsToQtThread, QMainWindow):
             self.tabWidget.addTab(flowSensorTab, "Flow Sensors")
             self.sensorTabs.append(flowSensorTab)
 
+        # The sipper's tab, when the gantry block is configured (spec §9).
+        self.ROBOT_TAB = None
+        if self.system.devices.robot is not None:
+            robotTab = RobotControlWidget(self.config, self.system)
+            self.ROBOT_TAB = self.tabWidget.addTab(robotTab, "Robot")
+
         self.setCentralWidget(self.tabWidget)
 
     # What build_devices reports through on_issue is entry-point-neutral; the
@@ -157,16 +171,33 @@ class FluidicsControlGUI(PostsToQtThread, QMainWindow):
     RUN_TAB, MANUAL_TAB = 0, 1
 
     def _renderTabs(self):
-        """The tab that did not start the job goes dead while it runs: a run
-        must not start under a manual move (the operations' valve turn would
-        pass its gate and change the reagent under a live draw), nor a manual
-        move under a run.
+        """The tabs that did not start the job go dead while it runs -- one
+        job on the rig: a run must not start under a manual move (the
+        operations' valve turn would pass its gate and change the reagent
+        under a live draw), nor a manual move under a run, nor a move from
+        one of the manual and Robot tabs under the other's. Three tabs
+        start manual jobs -- the Manual tab's moves, the Robot tab's, and
+        the Run tab's refill declaration; the session's source says which
+        (the Robot and Run tabs label their own).
 
         Reads the session rather than the announcement it was posted
         with -- the rule for deferred subscribers, on RunSession.state."""
         kind = self.session.kind
-        self.tabWidget.setTabEnabled(self.RUN_TAB, kind != "manual")
-        self.tabWidget.setTabEnabled(self.MANUAL_TAB, kind != "run")
+        owner = (None if kind is None else
+                 self.ROBOT_TAB if is_robot_job(self.session) else
+                 self.RUN_TAB if kind == "run" or is_run_tab_job(self.session) else
+                 self.MANUAL_TAB)
+        enabled = {index: owner is None or index == owner
+                   for index in (self.RUN_TAB, self.MANUAL_TAB, self.ROBOT_TAB)
+                   if index is not None}
+        # A tool window (Teach on the Robot tab, Reservoirs on the Run tab)
+        # starts its tab's jobs while any tab may be in front. Qt moves off
+        # a tab it greys to the next one and stays there, so the job's own
+        # tab comes forward first.
+        if not enabled.get(self.tabWidget.currentIndex(), True):
+            self.tabWidget.setCurrentIndex(owner)
+        for index, on in enabled.items():
+            self.tabWidget.setTabEnabled(index, on)
 
     def _quiesce(self):
         """A live job must end before the devices close (system.close does

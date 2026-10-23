@@ -1,10 +1,11 @@
-"""Shared Qt plumbing for the fluidics widgets: worker-thread event posting, small dialog/format
-helpers and the log-pane handler. Moved verbatim from gui.py; imports go through qtpy."""
+"""Shared Qt plumbing for the fluidics widgets: worker-thread event posting, the well picker and
+the click wrapper the editor and the Robot tab share, small dialog/format helpers and the log-pane
+handler. Moved verbatim from gui.py; imports go through qtpy."""
 
 import logging
 
 from qtpy.QtCore import QCoreApplication, QEvent
-from qtpy.QtWidgets import QMessageBox
+from qtpy.QtWidgets import QComboBox, QMessageBox
 
 from fluidics.run_log import LOGGER_NAME
 
@@ -52,6 +53,36 @@ def _hms(seconds):
     seconds = int(seconds)
     return f"{seconds // 3600:02d}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
 
+
+class WellCombo(QComboBox):
+    """An editable well picker whose value is what the operator sees: the
+    typed text, or the picked item's well. QComboBox.currentData() keeps the
+    last picked item while the text says something else, so it is never
+    read here."""
+
+    def __init__(self):
+        super().__init__()
+        self.setEditable(True)
+        self.setInsertPolicy(QComboBox.NoInsert)
+
+    def fill(self, wells):
+        """`wells`: [(well, label)] as SipperVocabulary.well_names gives them."""
+        self.clear()
+        for well, label in wells:
+            self.addItem(label, well)
+
+    def value(self):
+        text = self.currentText().strip()
+        index = self.findText(text)
+        if index >= 0:
+            return self.itemData(index)
+        return text.split(":")[0].strip()
+
+
+def connect_click(button, slot):
+    """`clicked` carries a `checked` bool; a slot with defaulted arguments
+    would take it as its first one. The wrapper drops it."""
+    button.clicked.connect(lambda _checked=False, slot=slot: slot())
 
 
 class GuiLogHandler(logging.Handler):

@@ -1,0 +1,312 @@
+"""The service a simulated stage runs over: the driver's shape, no driver.
+
+Motion is modelled: a dispatched move advances at its velocity until it
+arrives, so a poll can see an axis in flight, a stale target-reached bit,
+or a halt landing mid-leg. Under `instant` the clock is virtual and every
+read lands after the moves dispatched since the last read, so a leg costs
+no real time but its travel is still counted (`travel_seconds`, the
+longest axis of each leg, since X and Y run together). Every call is
+logged for the tests; a test can plant a fault, freeze an axis, make a
+stop or a read fail, make the target-reached bit read stale, put a limit
+switch inside the stroke, make a limit input read active, make a move
+end short of its target, or make one overshoot it and creep back
+(`overshoot`). Homing
+presents the drive's real protocol: the attained bit reads stale once,
+clears while the axis moves, then sets again in homing mode; it parks the
+axis 0.3 mm short of the stroke's low end, floored at 0 (the drives park
+0.1 to 0.5 mm past the switch, below the 0.5 mm the driver's strokes start
+at, which is why a travel height of 0 is refused on the real driver and why
+the stage clears every axis into its stroke after homing). A test can make
+an axis creep after homing (`creep`), as the drives do before they settle,
+or attain later than another (`homing_polls`).
+"""
+
+import math
+import time
+from collections import namedtuple
+
+from .stage import LIMIT_SWITCH_ALARM, TOLERANCE_MM, AxisReading, HomingReading
+
+# The XYG321-A's strokes as the driver's axis table has them at the vendored
+# commit (nm-servo #8, #13, #15, #16: switch spacing less a margin, every stroke
+# starting 0.5 mm clear of the origin switch, Y2 measured to 109 mm), keyed by
+# driver axis name. A simulated rig uses these so a placement the real stage
+# cannot reach is refused in simulation too.
+XYG321A_STROKES_MM = {"X1": (0.5, 200.0), "Y2": (0.5, 109.0), "Z3": (0.5, 58.5)}
+
+HOMING_POLLS = 3          # reads between the stale bit clearing and homing attained
+HOMING_PARK_SHORT_MM = 0.3   # where homing parks, short of a stroke that starts above 0
+
+_Move = namedtuple("_Move", "start target velocity t0")
+
+
+class SimulatedService:
+    def __init__(self, axes, strokes, instant=False):
+        axes = list(axes)
+        self._strokes = {axis: tuple(strokes[axis]) for axis in axes}
+        self._position = {axis: 0.0 for axis in axes}     # at the last event
+        self._target = dict(self._position)
+        self._moves = {}                                   # axis -> _Move in flight
+        self._enabled = {axis: False for axis in axes}
+        self._homed = {axis: False for axis in axes}
+        self._homing = {}                                  # axis -> polls since home()
+        self._homing_polls = {}                            # axis -> polls its homing takes, if not HOMING_POLLS
+        self._frozen = set()
+        self._faults = {}                                  # axis -> (polls until, error_code)
+        self._stop_failures = {}
+        self._read_failures = {}
+        self._creep = {}                                   # axis -> [mm per read, reads left or None]
+        self._limits = {}                                  # axis -> mm of a switch inside the stroke
+        self._on_limit = set()                             # axes a switch stopped, alarm 8614h showing
+        self._limit_inputs = set()                         # axes whose limit input (60FDh) reads active
+        self._short = {}                                   # axis -> mm where the next move ends, "reached"
+        self._overshoot = {}                               # axis -> (mm past, mm back per read), next move
+        self._settling = {}                                # axis -> (set-point, mm back per read) after one
+        self._polls = {axis: 0 for axis in axes}
+        self.instant = instant
+        self._clock = 0.0
+        self._leg = []                 # travel of the moves dispatched since the last read
+        self.travel_seconds = 0.0
+        self.stale_target_reached = False
+        self.on_poll = None            # a test hook, called on every read()
+        self.log = []
+        self.connected = False
+
+    # --- the driver's shape ---
+
+    def connect(self):
+        self.connected = True
+        self.log.append(("connect", None))
+
+    def disconnect(self):
+        self.connected = False
+        self.log.append(("disconnect", None))
+
+    def enable(self, axis):
+        self._enabled[axis] = True
+        self.log.append(("enable", axis))
+
+    def disable(self, axis):
+        self._enabled[axis] = False
+        self.log.append(("disable", axis))
+
+    def engage_brake(self, axis):
+        self.log.append(("engage_brake", axis))
+
+    def stroke(self, axis):
+        return self._strokes[axis]
+
+    def homing_timeout_s(self, axis):
+        return 60.0
+
+    def move_to(self, position_mm, velocity_mm_s, axis):
+        self.log.append(("move_to", axis))
+        now = self._now()
+        start = self._position_at(axis, now)
+        self._position[axis] = start
+        self._on_limit.discard(axis)       # a new set-point leading away clears the alarm
+        self._settling.pop(axis, None)
+        short = self._short.pop(axis, None)
+        if short is not None:
+            position_mm = short            # the drive stops early and still reports the target reached
+        over = self._overshoot.pop(axis, None)
+        if over is not None:
+            past, back = over
+            self._settling[axis] = (position_mm, back)
+            position_mm += math.copysign(past, position_mm - start)    # past it, the way it was going
+        self._target[axis] = position_mm
+        self._moves[axis] = _Move(start, position_mm, float(velocity_mm_s), now)
+        if axis not in self._frozen:
+            self._leg.append(abs(position_mm - start) / velocity_mm_s)
+
+    def home(self, axis):
+        self.log.append(("home", axis))
+        self._homed[axis] = False
+        self._homing[axis] = 0
+
+    def homing_state(self, axis):
+        self._poll(axis)
+        fault = self._fault_reading(axis)
+        if fault is not None:
+            return HomingReading(False, False, True, True)
+        polls = self._homing.get(axis)
+        if polls is None:
+            return HomingReading(self._homed[axis], False, False, False)
+        self._homing[axis] = polls + 1
+        if polls == 0:
+            return HomingReading(True, False, False, True)      # stale, from the last homing
+        if polls <= self._homing_polls.get(axis, HOMING_POLLS) or axis in self._frozen:
+            return HomingReading(False, False, False, True)     # the axis is moving
+        del self._homing[axis]
+        self._moves.pop(axis, None)
+        low = self._strokes[axis][0]
+        self._position[axis] = self._target[axis] = max(0.0, low - HOMING_PARK_SHORT_MM)
+        self._homed[axis] = True
+        return HomingReading(True, False, False, True)
+
+    def read(self, axis):
+        self._poll(axis)
+        failure = self._read_failures.get(axis)
+        if failure is not None and self._polls[axis] >= failure[0]:
+            del self._read_failures[axis]
+            raise failure[1]
+        creep = self._creep.get(axis)
+        if creep is not None and axis not in self._moves:
+            self._position[axis] += creep[0]
+            if creep[1] is not None:
+                creep[1] -= 1
+                if creep[1] <= 0:
+                    del self._creep[axis]
+        fault = self._fault_reading(axis)
+        if fault is not None:
+            return fault
+        position = self._position_at(axis, self._now())
+        limit = self._limits.get(axis)
+        if limit is not None and axis in self._moves and self._crossed(axis, limit, position):
+            self._on_limit.add(axis)       # as the drives do: enabled, alarm 8614h, never target reached
+            del self._moves[axis]
+            self._position[axis] = self._target[axis] = limit
+        if axis in self._on_limit:
+            return AxisReading(self._position[axis], False, self._enabled[axis], False,
+                               LIMIT_SWITCH_ALARM, True)
+        arrived = axis not in self._moves or math.isclose(position, self._target[axis], abs_tol=1e-9)
+        if arrived and axis in self._moves:
+            del self._moves[axis]
+            self._position[axis] = self._target[axis]
+            position = self._target[axis]
+        reached = arrived or self.stale_target_reached
+        if arrived and axis in self._settling:
+            position, reached = self._creep_back(axis)
+        return AxisReading(position, reached, self._enabled[axis], False, 0, axis in self._limit_inputs)
+
+    def stop(self, axis):
+        self.log.append(("stop", axis))
+        failure = self._stop_failures.pop(axis, None)
+        if failure is not None:
+            raise failure
+        self._position[axis] = self._position_at(axis, self._now())
+        self._moves.pop(axis, None)
+        self._target[axis] = self._position[axis]
+        self._on_limit.discard(axis)
+        self._settling.pop(axis, None)
+
+    # --- test hooks ---
+
+    def fault(self, axis, after_polls=1, error_code=0x1000):
+        """The axis reads faulted from its `after_polls`-th poll from now."""
+        self._faults[axis] = (self._polls[axis] + after_polls, error_code)
+
+    def creep(self, axis, per_read_mm, reads=None):
+        """The axis drifts by `per_read_mm` on each of the next `reads` reads
+        while no move is in flight (None: for ever), as a drive does after
+        homing attained before it settles."""
+        self._creep[axis] = [float(per_read_mm), reads]
+
+    def freeze(self, axis):
+        """The axis never arrives (and never homes)."""
+        self._frozen.add(axis)
+
+    def homing_polls(self, axis, polls):
+        """The axis's homing attains `polls` reads after its stale bit
+        clears, not HOMING_POLLS: one axis attaining well after another, as
+        Y2 (13 s) did after X1 (6 s) on the bench."""
+        self._homing_polls[axis] = int(polls)
+
+    def overshoot(self, axis, past_mm, back_per_read_mm):
+        """The axis's next move ends `past_mm` beyond its target and creeps
+        back `back_per_read_mm` a read (0: it stays there), reading target
+        reached only within TOLERANCE_MM of the target, the position window
+        the real adapter sets at connect. X1 on the bench (2026-10-22): a
+        0.5 mm move ended 62 um past and came back at about 10 um/s."""
+        self._overshoot[axis] = (float(past_mm), float(back_per_read_mm))
+
+    def limit_switch(self, axis, at_mm):
+        """A limit switch inside the stroke at `at_mm`: a move that reaches
+        it stops there and reads enabled, not reached, alarm 8614h until
+        a stop or a move away (what the drives do, nm-servo PR #10)."""
+        self._limits[axis] = float(at_mm)
+
+    def limit_input(self, axis, active=True):
+        """The axis's limit input (60FDh bits 0-1) reads active from now. A
+        move can still report its target reached there -- a switch with a
+        wide span, a target on the switch -- which is not a completed move
+        (the driver's own wait refuses it, and so must the stage)."""
+        if active:
+            self._limit_inputs.add(axis)
+        else:
+            self._limit_inputs.discard(axis)
+
+    def end_short(self, axis, at_mm):
+        """The axis's next move ends at `at_mm` with target reached set, as
+        X1's flickering far switch once made the drive do."""
+        self._short[axis] = float(at_mm)
+
+    def reset_fault(self, axis):
+        self.log.append(("reset_fault", axis))
+        self._faults.pop(axis, None)
+        self._enabled[axis] = False        # the drive's fault reset ends in Switch On Disabled
+
+    def fail_stop(self, axis, exc=None):
+        self._stop_failures[axis] = exc or OSError(f"{axis}: no response to stop")
+
+    def fail_read(self, axis, exc=None, after_polls=1):
+        """The axis's `after_polls`-th read from now raises `exc`."""
+        self._read_failures[axis] = (self._polls[axis] + after_polls,
+                                     exc or OSError(f"{axis}: no response"))
+
+    def position_of(self, axis):
+        """Where the axis is right now, for a test's eyes."""
+        return self._position_at(axis, self._now())
+
+    # --- the model ---
+
+    def _now(self):
+        return self._clock if self.instant else time.monotonic()
+
+    def _poll(self, axis):
+        self._polls[axis] += 1
+        if self._leg:
+            longest = max(self._leg)
+            self.travel_seconds += longest
+            if self.instant:
+                self._clock += longest
+            self._leg = []
+        if self.on_poll is not None:
+            self.on_poll()
+
+    def _creep_back(self, axis):
+        """One read's creep of an overshot axis toward its set-point: the
+        position, and whether it is inside the window."""
+        set_point, back = self._settling[axis]
+        position = self._position[axis]
+        position += max(-back, min(back, set_point - position))
+        self._position[axis] = position
+        if position == set_point:
+            del self._settling[axis]
+        return position, abs(position - set_point) <= TOLERANCE_MM
+
+    def _fault_reading(self, axis):
+        fault = self._faults.get(axis)
+        if fault is not None and self._polls[axis] >= fault[0]:
+            position = self._position_at(axis, self._now())
+            return AxisReading(position, False, self._enabled[axis], True, fault[1])
+        return None
+
+    def _crossed(self, axis, limit, position):
+        """Whether the move in flight has carried the axis onto `limit`."""
+        start = self._moves[axis].start
+        if self._target[axis] > start:
+            return start < limit <= position
+        return position <= limit < start
+
+    def _position_at(self, axis, now):
+        move = self._moves.get(axis)
+        if move is None:
+            return self._position[axis]
+        if axis in self._frozen:
+            return move.start
+        distance = move.target - move.start
+        travelled = move.velocity * (now - move.t0)
+        if travelled >= abs(distance):
+            return move.target
+        return move.start + math.copysign(travelled, distance)

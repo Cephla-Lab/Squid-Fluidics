@@ -11,7 +11,9 @@ from types import SimpleNamespace
 import pytest
 
 import run_sequences
+from fluidics.vocabulary import sipper_vocabulary
 
+from ..conftest import SIPPER_CONFIG
 from .test_sample_files import QUICKSTART_PAIRS, SOFTWARE
 
 
@@ -80,3 +82,24 @@ def test_a_wrong_application_sequence_file_fails_at_time_zero(cli_pair, monkeypa
                         SimpleNamespace(build=lambda *a, **k: built.append(True)))
     assert cli_pair("open-chamber-experiment.yaml", "flow_cell_config.yaml") == 1
     assert built == [], "the rig was built for a file the check should have refused"
+
+
+def test_refilled_declares_volume_tracking_before_the_run(cli, plate_sipper_config, tmp_path):
+    """Task B10: no volume tracking file yet, so every reservoir starts
+    undeclared and the run is refused; --refilled all declares them and
+    the run goes. The run draws just over half of what probes/A1 holds
+    when loaded, so a full well gives it once."""
+    volume = sipper_vocabulary(plate_sipper_config).reservoirs["probes"].loaded_ul // 2 + 1
+    (tmp_path / "s.yaml").write_text(
+        "sequences:\n  - {type: flow_reagent, fluidic_port: 1, well: A1, flow_rate: 2000, "
+        f"volume: {volume}}}\n")
+    config = str(SIPPER_CONFIG)
+    assert cli("--path", str(tmp_path / "s.yaml"), "--config", config, "--simulation",
+               "--volume-tracking-file", str(tmp_path / "volumes.json")) == 1
+    assert cli("--path", str(tmp_path / "s.yaml"), "--config", config, "--simulation",
+               "--volume-tracking-file", str(tmp_path / "volumes.json"), "--refilled", "all") == 0
+    # Declared now and restored from the file: the well the second run drew
+    # from has less left than the run draws, so the same run is refused at
+    # time zero.
+    assert cli("--path", str(tmp_path / "s.yaml"), "--config", config, "--simulation",
+               "--volume-tracking-file", str(tmp_path / "volumes.json")) == 1

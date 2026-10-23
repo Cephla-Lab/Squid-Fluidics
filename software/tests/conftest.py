@@ -21,7 +21,34 @@ def qapp():
     from qtpy.QtWidgets import QApplication
     yield QApplication.instance() or QApplication([])
 
+
+def settle(system):
+    """The job over, its thread gone, every report it posted delivered: for a
+    widget test that reads the GUI after a manual job. Untimed, as the suite
+    waits on a session: under the fake clock a timed wait cannot block, and
+    wait_until's budget is fake seconds, which other threads spend and a job's
+    error path (a logged traceback) can outlast. The join matters too: the
+    job's on_finished is posted after `busy` already reads False."""
+    from qtpy.QtWidgets import QApplication
+    assert system.wait()
+    QApplication.processEvents()
+
+
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
+# The suite's plate-sipper rig is the shipped sample, a real rig's config.
+# A test reads the rig's figures (positions, volumes, ports) from the loaded
+# config where it can, so re-teaching the sample breaks only the tests that
+# are about a number.
+SIPPER_CONFIG = Path(__file__).parents[1] / "sample_config" / "plate_sipper_config.yaml"
+
+
+def plate_block(config, name):
+    """The config's block for plate `name` (the config's own object, so a
+    test's change to it reaches the rig): where it sits, how deep the tip
+    dips, what a well holds when loaded."""
+    from fluidics.vocabulary import sipper_vocabulary
+    return sipper_vocabulary(config).reservoirs[name]
 
 
 # The two sequences the editor suites are built from: one fluidic row with
@@ -46,6 +73,30 @@ def flow_cell_config():
 def open_chamber_config():
     from fluidics.control.config import load_config
     return load_config(str(FIXTURES_DIR / "open_chamber_config.yaml"))
+
+
+@pytest.fixture
+def simulated_system(tmp_path):
+    """A FluidicsSystem over an instant simulated rig for `config`, closed
+    clean at teardown -- the rig the widget suites hold. The flow sensors
+    are closed at once: none of these tests reads flow, and under the fake
+    clock the publish thread's per-reading wait is a busy spin (close() is
+    idempotent, so the teardown's close is unharmed). Run reports land in
+    the test's tmp_path, never the user's log directory."""
+    from fluidics.devices import build_devices
+    from fluidics.system import FluidicsSystem
+    systems = []
+
+    def _build(config):
+        devices = build_devices(config, simulation=True, instant=True)
+        for sensor in devices.flow_sensors:
+            sensor.close()
+        system = FluidicsSystem(config, devices, report_dir=tmp_path)
+        systems.append(system)
+        return system
+
+    yield _build
+    assert [error for system in systems for error in system.close()] == []
 
 
 # Captured at import, before _fast_clock patches them.
@@ -328,3 +379,69 @@ def _fast_clock(monkeypatch):
 
     # Patch threading.Event.wait (used by DiscPump.aspirate)
     monkeypatch.setattr(threading.Event, "wait", fake_event_wait)
+
+
+# --- the plate sipper (spec D3, Task A2/B2) ---
+
+def driver_or_skip(require_axes=("X1", "Y2", "Z3")):
+    """importorskip for the servo driver -- a hard failure under the robot
+    CI job, where a skip would hide a broken import behind a green run.
+    A driver that imports but lacks an axis this rig maps (nm-servo before
+    PR #8 had no X1) skips the same way."""
+    import fluidics.robot._driver as driver   # the shim catches the vendored driver's ImportError itself
+    missing = None
+    if not driver.DRIVER_AVAILABLE:
+        missing = f"the servo driver did not import: {driver._IMPORT_ERROR}"
+    else:
+        names = {axis.value for axis in driver.AxisName}
+        absent = [axis for axis in require_axes if axis not in names]
+        if absent:
+            missing = f"the servo driver has no axis {', '.join(absent)}"
+    if missing:
+        if os.environ.get("ROBOT_DRIVER_REQUIRED") == "1":
+            pytest.fail(f"ROBOT_DRIVER_REQUIRED=1 but {missing}")
+        pytest.skip(missing)
+    return driver
+
+
+@pytest.fixture
+def plate_sipper_config():
+    from fluidics.control.config import load_config
+    return load_config(str(SIPPER_CONFIG))
+
+
+@pytest.fixture
+def config_on_file(tmp_path):
+    """load(source): the config file `source` loaded from a byte-for-byte
+    copy in the test's tmp_path, for a test that saves the config (a
+    loaded volume set, Save in the Teach window), so the save lands in the
+    copy, never in the original."""
+    def load(source):
+        import shutil
+        from fluidics.control.config import load_config
+        path = tmp_path / source.name
+        shutil.copy(source, path)
+        return load_config(str(path))
+    return load
+
+
+@pytest.fixture
+def plate_sipper_config_on_file(config_on_file):
+    return config_on_file(SIPPER_CONFIG)
+
+
+@pytest.fixture
+def vocabulary(plate_sipper_config):
+    """The sample sipper rig's well vocabulary -- what the gate, the live
+    paint and the editor are handed on that rig (None is a rig without one)."""
+    from fluidics.vocabulary import sipper_vocabulary
+    return sipper_vocabulary(plate_sipper_config)
+
+
+# The rows the sipper suites are built from, against the sample sipper
+# config: a well draw from the default plate's A1 through the sipper's port
+# (1); the push that follows one (the config's push_volume_ul); a priming
+# from the 4x SSC bottle (port 3, untracked).
+HYB = {"type": "flow_reagent", "fluidic_port": 1, "well": "A1", "flow_rate": 2000, "volume": 100}
+PUSH = {"type": "push", "well": "ssct/A1", "flow_rate": 2000}
+PRIME = {"type": "priming", "fluidic_port": 3, "flow_rate": 5000, "volume": 800}

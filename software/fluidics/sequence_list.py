@@ -36,6 +36,13 @@ from .sequences import (SequenceListAdapter, is_included, label_for_type,
 Included = namedtuple("Included", "rows sequences")
 
 
+def _well_suffix(seq):
+    """The ": well" a well row's title carries, spelled once: what title()
+    appends is exactly what set_name() takes off."""
+    well = seq.get("well")
+    return f": {well}" if well else ""
+
+
 class SequenceList:
     """The rows, the verdicts, and the verbs that reorder them.
 
@@ -46,9 +53,10 @@ class SequenceList:
     for the life of the list -- every verdict is reached under them.
     """
 
-    def __init__(self, application, ports, sequences=()):
+    def __init__(self, application, ports, sequences=(), sipper=None):
         self._application = application
         self._ports = ports
+        self._sipper = sipper          # the SipperVocabulary, or None
         self._rows = []
         self._problems = {}
         self.replace(sequences)
@@ -154,13 +162,16 @@ class SequenceList:
         The one place that rule is spelled -- a renderer and an edit both
         ask it rather than each composing the fallback."""
         seq = self._rows[row]
-        return seq.get("name") or label_for_type(seq.get("type", ""))
+        title = seq.get("name") or label_for_type(seq.get("type", ""))
+        return f"{title}{_well_suffix(seq)}"
 
     def set_name(self, row, name):
         """Name the row, or unname it: blank, or the type's own label typed
-        back, both mean unnamed."""
+        back, both mean unnamed. The editor hands back the whole title, so
+        the ": well" suffix title() appends is taken off first -- else it
+        would pile up on the name with every edit."""
         seq = self._rows[row]
-        name = (name or "").strip()
+        name = (name or "").removesuffix(_well_suffix(seq)).strip()
         label = label_for_type(seq.get("type", ""))
         seq["name"] = name if name and name != label else None
         self._validate_row(row)
@@ -181,7 +192,7 @@ class SequenceList:
 
     def _validate_row(self, row):
         problem = sequence_problem(self._rows[row], self._application,
-                                   self._ports)
+                                   self._ports, sipper=self._sipper)
         if problem is None:
             self._problems.pop(row, None)
         else:

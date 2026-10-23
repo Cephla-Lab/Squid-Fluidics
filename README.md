@@ -12,6 +12,8 @@ Automated liquid handling system for microfluidics experiments. Supports MERFISH
 - **Solenoid valves:** NXP33996 driver (SPI)
 - **Temperature controller:** Yexian M207 TCM (optional)
 
+**Plate sipper (optional, Flow Cell):** an XYG321-A XYZ stage (three NiMotion servo axes, X1, Y2 and Z3, on one RS-485 adapter) carries a sipper on one selector-valve port over two 96-well plates, so a sequence row can draw from a well (`well: ssct/A1`) instead of a bottle. It is configured by the `reagent_selection.nimotion_gantry_system` block: `software/sample_config/plate_sipper_config.yaml` is a commented example, and `software/sample_sequences/seqfish-plate-sipper.yaml` one seqFISH+ round to run on it. Teach each plate's A1 and dip depth on the GUI's Robot tab, or at the console with `python -m tests.hardware.robot_check --config ../config.yaml` from `software/`.
+
 ## Getting Started
 
 ### Firmware
@@ -116,6 +118,7 @@ All sequence types share these optional fields: `name` (custom label), `repeat` 
 | Type | Extra Fields | Description |
 |------|-------------|-------------|
 | `flow_reagent` | `fluidic_port`, `flow_rate`, `volume`, `fill_tubing_with` | Flow reagent from the specified port |
+| `push` | `well`, `flow_rate`, `dip_cycles` | Plate-sipper rigs only: draw the config's `push_volume_ul` from a well through the sipper, moving the previous row's reagent into the flow cell |
 | `priming` | `fluidic_port`, `flow_rate`, `volume` | Prime all tubings with corresponding reagents |
 | `clean_up` | `fluidic_port`, `flow_rate`, `volume` | Flush all tubings (typically with water) |
 

@@ -47,8 +47,72 @@ class DeviceNotFoundError(DeviceError):
     """
 
 
+class StageError(DeviceError):
+    """The robot stage refused a move: XY commanded below travel height, a
+    target outside an axis stroke, or a position it no longer knows.
+    Nothing moved."""
+
+
 class OperationError(FluidicsError):
     """A step failed; something is wrong with the step."""
+
+
+class ReservoirError(FluidicsError):
+    """A reagent source cannot supply a draw. Typed, and let through the
+    operations' wrappers like Cancelled, so the reservoir gate's replay and
+    the run's reporting see which reservoir and by how much."""
+
+
+class ReservoirOverdraw(ReservoirError):
+    """A draw the reservoir cannot supply now; loaded_ul is what it holds
+    when loaded, carried for the gate's verdict (ReservoirShortfall)."""
+
+    def __init__(self, key, needed_ul, remaining_ul, loaded_ul):
+        super().__init__(f"{key}: {needed_ul:.0f} uL needed, {remaining_ul:.0f} uL left")
+        self.key, self.needed_ul, self.remaining_ul = key, needed_ul, remaining_ul
+        self.loaded_ul = loaded_ul
+
+
+class ReservoirDrawTooLarge(ReservoirError):
+    """A draw larger than the reservoir holds when loaded, a well's or a
+    bottle's: no refill makes it fit, so the step must be split."""
+
+    def __init__(self, key, volume_ul, loaded_ul):
+        super().__init__(f"{key}: a draw of {volume_ul:.0f} uL exceeds the "
+                         f"{loaded_ul:.0f} uL it holds when loaded; split the step")
+        self.key, self.volume_ul, self.loaded_ul = key, volume_ul, loaded_ul
+
+
+class ReservoirUndeclared(ReservoirError):
+    """The volume tracker could not restore an entry and will not guess:
+    the operator declares its refill first."""
+
+
+class ReservoirShortfall(ReservoirError):
+    """The reservoir gate's verdict: which step, which reservoir, how much.
+    remaining_ul is the projection -- what the reservoir would hold when the
+    step comes round -- and loaded_ul what it holds when loaded."""
+
+    def __init__(self, key, needed_ul, remaining_ul, loaded_ul, step_label):
+        super().__init__(f"{step_label}: {key} cannot supply {needed_ul:.0f} uL "
+                         f"(it would have {remaining_ul:.0f} uL left of {loaded_ul:.0f} loaded "
+                         "at this step); refill or reload before starting")
+        self.key, self.needed_ul = key, needed_ul
+        self.remaining_ul, self.loaded_ul, self.step_label = remaining_ul, loaded_ul, step_label
+
+
+class ReservoirNoWell(ReservoirError):
+    """A draw through the sipper's port with the tip in no well: refused at
+    the pump, the last line of the no-air rule."""
+
+
+class ReservoirWriteError(ReservoirError):
+    """The volume tracking file could not be written, so the draw it
+    would have recorded was not started."""
+
+
+class ReservoirInUse(ReservoirError):
+    """Another process holds this rig's volume tracking file."""
 
 
 class Cancelled(FluidicsError):

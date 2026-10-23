@@ -1,0 +1,175 @@
+"""The sipper on the stage: the verbs the operations call (spec §2.3).
+
+current_well (a labware.WellRef) is the witness the no-air rule reads (spec D9): set only
+while the tip sits at dip depth in a well, cleared by retract, home, a
+jog, a fault reset, a new travel height, and for the length of an
+agitation (the tip leaves dip depth, so a draw interrupted there would
+start from the wrong depth). With `lower_tip` off
+(the Robot tab's "Do not lower tip"), go_to_well ends retracted over the
+well and sets no witness, so positions can be checked over an empty deck
+and no draw can pass. Between steps and sessions the tip rests in the last
+step's well; there is no park well. Every plate's corners
+are checked against the stage's strokes when the sipper is built and when
+a placement is taught, so a plate the stage cannot reach fails bring-up
+with the plate and the well named, not a run hours in. So is its
+agitation stroke against travel height (the config's rule, here too so
+the verb that sets the witness never vouches for a tip in air), and a new
+travel height against every plate (check_travel).
+"""
+
+from ..errors import StageError
+from .labware import agitation_problem, unknown_reservoir, well_key
+
+
+class RobotSipper:
+    def __init__(self, stage, placements, agitate_amplitude_mm):
+        self._stage = stage
+        self._placements = {}
+        self.agitate_amplitude_mm = float(agitate_amplitude_mm)
+        self.current_well = None
+        self.lower_tip = True          # off: go_to_well stops retracted over the well
+        self.moves = stage.moves
+        for name, placement in placements.items():
+            self.set_placement(name, placement)
+
+    @property
+    def placements(self):
+        return dict(self._placements)
+
+    def current_well_key(self):
+        """Volume tracking's spelling of the well the tip is in (`ssct/A1`),
+        or None with the tip in no well: what the volume tracker asks
+        before a draw through the sipper's port."""
+        return None if self.current_well is None else well_key(self.current_well)
+
+    def set_placement(self, name, placement):
+        """Install (or replace, after teaching) a plate, once every corner
+        of it is within reach and its agitation stroke stays below travel
+        height. Clears the witness: the taught depth or corner may have
+        moved the wells. A refused placement changes nothing."""
+        self._check_agitation(name, placement, self._stage.travel_z_mm)
+        for well, (x, y) in placement.corners():
+            try:
+                self._stage.check_reach(x, y, placement.dip_z_mm)
+            except StageError as e:
+                raise StageError(f"plate {name!r}: well {well} is out of reach: {e}") from None
+        self._placements[name] = placement
+        self.current_well = None
+
+    def check_travel(self, travel_z_mm):
+        """StageError naming the first installed plate whose agitation
+        stroke would reach `travel_z_mm`; no motion. A new travel height
+        is checked here before it is set."""
+        for name, placement in self._placements.items():
+            self._check_agitation(name, placement, travel_z_mm)
+
+    def set_travel(self, travel_z_mm):
+        """Set the stage's travel height, once every installed plate's
+        agitation stroke stays below it (check_travel) and Z can reach it;
+        no motion. Clears the witness: what counts as retracted changed.
+        A refused height changes nothing."""
+        self.check_travel(travel_z_mm)
+        self._stage.check_reach(z=travel_z_mm)
+        self._stage.travel_z_mm = travel_z_mm
+        self.current_well = None
+
+    def _check_agitation(self, name, placement, travel_z_mm):
+        """labware.agitation_problem's rule as the sipper's refusal; no motion."""
+        problem = agitation_problem(name, placement.dip_z_mm, self.agitate_amplitude_mm, travel_z_mm)
+        if problem is not None:
+            raise StageError(problem)
+
+    def _placement(self, ref):
+        try:
+            return self._placements[ref.reservoir]
+        except KeyError:
+            raise ValueError(unknown_reservoir(ref.reservoir, self._placements)) from None
+
+    def go_to_well(self, ref):
+        """Retract, travel over the well, dip to the plate's depth, and
+        vouch for the well. With lower_tip off the move ends retracted over
+        the well and vouches for nothing."""
+        plate = self._placement(ref)
+        x, y = plate.xy_mm(ref.well)          # refuses a well the plate lacks
+        self.current_well = None
+        self._stage.retract()
+        self._stage.move_xy(x, y)
+        if not self.lower_tip:
+            return
+        self._stage.move_z(plate.dip_z_mm)
+        self.current_well = ref
+
+    def agitate(self, cycles):
+        """Up by the amplitude and back, `cycles` times, ending at dip
+        depth. The witness is down for the duration: it says the tip is at
+        dip depth, the only height a draw is made from, and an interrupted
+        cycle leaves the tip above it."""
+        if self.current_well is None:
+            raise StageError("agitate refused: the sipper is not in a well")
+        ref = self.current_well
+        dip = self._placement(ref).dip_z_mm
+        self.current_well = None
+        for _ in range(cycles):
+            self._stage.move_z(dip - self.agitate_amplitude_mm)
+            self._stage.move_z(dip)
+        self.current_well = ref
+
+    def retract(self):
+        self.current_well = None
+        self._stage.retract()
+
+    def home(self):
+        self.current_well = None
+        self._stage.home()
+
+    def jog(self, axis, mm):
+        """One axis (`x`, `y` or `z`) by `mm` from where it is. No witness
+        either way: a Z jog leaves dip depth, an XY jog leaves the well.
+        XY below travel height is refused by the stage itself."""
+        position = self.position()
+        if position is None:
+            raise StageError("the stage position is unknown: home first")
+        x, y, z = position
+        self.current_well = None
+        if axis == "z":
+            self._stage.move_z(z + mm)
+        else:
+            self._stage.move_xy(x + (mm if axis == "x" else 0), y + (mm if axis == "y" else 0))
+
+    def reset_faults(self):
+        """Clear a drive fault and re-enable the drives; the stage re-reads
+        where they are. The fault left the tip wherever it stopped: no
+        witness."""
+        self.current_well = None
+        self._stage.reset_faults()
+
+    def position(self):
+        return self._stage.position()
+
+    @property
+    def is_retracted(self):
+        """Whether the tip is known to be clear of the deck: the stage homed
+        and its last published Z at or above travel height (no I/O)."""
+        return self._stage.is_retracted
+
+    def retracted_at(self, position):
+        """Whether a published position counts as retracted (no I/O)."""
+        return self._stage.retracted_at(position)
+
+    def strokes(self):
+        """The stage's XYZ strokes in mm (no I/O): the deck a map draws."""
+        return self._stage.strokes()
+
+    def halt(self):
+        self.current_well = None
+        self._stage.halt()
+
+    def close(self, quiescent=True):
+        """No move either way: the tip waits where the last step left it,
+        wet in its well (the lead screw holds Z unpowered, and the next
+        launch homes upward first); under a live job the stage halts. A
+        closed robot vouches for no well. Returns the steps' exceptions."""
+        self.current_well = None
+        errors = self._stage.close(quiescent=quiescent)
+        self.current_well = None
+        return errors

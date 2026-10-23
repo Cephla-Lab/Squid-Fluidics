@@ -25,6 +25,7 @@ from fluidics.devices import (DeviceSet, build_devices, build_operations, build_
 from fluidics.errors import RunControl
 from fluidics.merfish_operations import MERFISHOperations
 from fluidics.open_chamber_operations import OpenChamberOperations
+from fluidics.reservoirs import VolumeTracker
 
 
 class RecordingIssues:
@@ -297,7 +298,8 @@ def device_set(config, pump=None, controller=None, tc=None, sensors=(),
                      pump if pump is not None else RecordingPump(),
                      selector_valves=None, disc_pump=disc_pump,
                      temperature_controller=tc, flow_sensors=list(sensors),
-                     run_control=run_control if run_control is not None else RunControl())
+                     run_control=run_control if run_control is not None else RunControl(),
+                     reservoirs=VolumeTracker({}))
 
 
 class TestMakeSafe:

@@ -1,0 +1,710 @@
+"""XYZStage over the simulated service: the rules, the poll, the halt."""
+import time
+
+import pytest
+
+from fluidics.errors import AbortRequested, DeviceError, RunControl, StageError
+from fluidics.robot.simulation import SimulatedService
+from fluidics.robot.stage import SETTLE_BUDGET_S, XYZStage
+
+AXES = {"x": "X1", "y": "Y2", "z": "Z3"}
+STROKES = {"X1": (0.0, 200.0), "Y2": (0.0, 102.0), "Z3": (0.0, 58.5)}
+
+
+def build(instant=True, strokes=STROKES, travel_z_mm=0.0, homed=False):
+    """A connected stage over a simulated service, homed when asked."""
+    control = RunControl()
+    service = SimulatedService(AXES.values(), strokes, instant=instant)
+    stage = XYZStage(service, AXES, travel_z_mm=travel_z_mm, xy_velocity_mm_s=50.0,
+                     z_velocity_mm_s=20.0, run_control=control)
+    stage.connect()
+    if homed:
+        stage.home()
+    return stage, service, control
+
+
+# The suite's fake clock (conftest._fast_clock) advances by each poll's
+# sleep, so a non-instant simulated service moves 50 ms of travel per poll,
+# deterministically, and a timeout expires after exactly its polls.
+
+
+def record_homing(service):
+    """The service's homing calls and reads, in order: ("home", axis) for
+    each dispatch, ("state", axis, attained) for each homing read, and
+    ("read", axis) for each position read."""
+    events = []
+    home, homing_state, read = service.home, service.homing_state, service.read
+
+    def recording_home(axis):
+        events.append(("home", axis))
+        home(axis)
+
+    def recording_state(axis):
+        reading = homing_state(axis)
+        events.append(("state", axis, reading.attained))
+        return reading
+
+    def recording_read(axis):
+        events.append(("read", axis))
+        return read(axis)
+    service.home, service.homing_state, service.read = recording_home, recording_state, recording_read
+    return events
+
+
+def attained_at(events, axis):
+    """The index of `axis`'s first attained reading after its bit cleared."""
+    cleared = False
+    for i, event in enumerate(events):
+        if event[:2] == ("state", axis):
+            if not event[2]:
+                cleared = True
+            elif cleared:
+                return i
+    raise AssertionError(f"{axis} never attained")
+
+
+@pytest.fixture
+def rig():
+    return build(homed=True)
+
+
+class TestRules:
+    def test_after_homing_every_axis_is_read_and_the_stage_is_retracted_at_the_top(self, rig):
+        stage, service, _ = rig
+        assert stage.position() == (0.0, 0.0, 0.0)
+        assert stage.is_retracted
+        assert "move_to" not in [verb for verb, _ in service.log], "inside a stroke from 0: no move"
+
+    def test_homing_clears_each_axis_off_its_switch_into_its_stroke(self):
+        """The driver's strokes start 0.5 mm clear of the switches and homing
+        parks short of that (0.2 mm here, 0.1 to 0.5 on the drives): left
+        there, a jog of one axis would be refused for the others' targets.
+        Z first, never below travel height, then X and Y as one leg."""
+        strokes = {"X1": (0.5, 200.0), "Y2": (0.5, 109.0), "Z3": (0.5, 58.5)}
+        stage, service, _ = build(strokes=strokes, travel_z_mm=1.0, homed=True)
+        assert stage.position() == (0.5, 0.5, 0.5) and stage.is_retracted
+        assert [axis for verb, axis in service.log if verb == "move_to"] == ["Z3", "X1", "Y2"]
+        stage.move_xy(1.5, 0.5)                   # a single-axis jog's shape: the other axis stays put
+
+    def test_only_the_axes_below_their_strokes_are_cleared(self):
+        """X from 0 and Z from 0 park inside their strokes: only Y moves, and
+        X is not even sent a zero-length set-point."""
+        strokes = {"X1": (0.0, 200.0), "Y2": (0.5, 109.0), "Z3": (0.0, 58.5)}
+        stage, service, _ = build(strokes=strokes, travel_z_mm=1.0, homed=True)
+        assert [axis for verb, axis in service.log if verb == "move_to"] == ["Y2"]
+        assert stage.position() == (0.0, 0.5, 0.0)
+
+    def test_z_is_not_cleared_above_travel_height(self):
+        """A Z stroke starting above travel height: clearing Z would un-retract
+        the stage, so Z stays where homing parked it and only X and Y clear."""
+        strokes = {"X1": (0.5, 200.0), "Y2": (0.5, 109.0), "Z3": (1.05, 58.5)}
+        stage, service, _ = build(strokes=strokes, travel_z_mm=1.0, homed=True)    # parks Z at 0.75
+        assert [axis for verb, axis in service.log if verb == "move_to"] == ["X1", "Y2"]
+        assert stage.position() == (0.5, 0.5, 0.75) and stage.is_retracted
+
+    def test_a_fault_during_the_clearing_leg_halts_and_keeps_the_homing(self):
+        """The homing reference is good; the clearing leg fails like any leg:
+        halted, re-read, raised. The stage stays homed (a re-home would run
+        the same leg) and refuses the next move until the fault is reset."""
+        strokes = {"X1": (0.5, 200.0), "Y2": (0.5, 109.0), "Z3": (0.5, 58.5)}
+        stage, service, _ = build(strokes=strokes, travel_z_mm=1.0)
+        original_read = service.read
+
+        def read(axis):
+            if ("move_to", "Y2") in service.log and "Y2" not in service._faults:
+                service.fault("Y2", after_polls=0, error_code=0x7331)
+            return original_read(axis)
+        service.read = read
+        with pytest.raises(DeviceError, match="Y2.*7331"):
+            stage.home()
+        assert stage.is_homed and stage.position() is not None
+        assert ("stop", "X1") in service.log and ("stop", "Y2") in service.log
+        with pytest.raises(DeviceError, match="Y2"):
+            stage.move_xy(10.0, 10.0)
+
+    def test_a_jog_after_a_re_read_at_the_stroke_start_is_not_refused(self):
+        """The drives count in pulses, so a re-read of an axis cleared to 0.5
+        comes back as 0.49995: after a STOP, a jog of the other axis must
+        not be refused for it. The untouched axis is left out of the leg."""
+        strokes = {"X1": (0.5, 200.0), "Y2": (0.5, 109.0), "Z3": (0.5, 58.5)}
+        stage, service, _ = build(strokes=strokes, travel_z_mm=1.0, homed=True)
+        original_read = service.read
+
+        def read(axis):
+            reading = original_read(axis)
+            return reading._replace(position_mm=reading.position_mm - 0.00005)
+        service.read = read
+        stage.halt()                                  # re-reads: Y now 0.49995
+        assert stage.position()[1] < 0.5
+        before = len(service.log)
+        stage.move_xy(1.5, stage.position()[1])       # the jog's shape
+        assert [axis for verb, axis in service.log[before:] if verb == "move_to"] == ["X1"]
+
+    def test_homing_waits_for_the_axis_to_settle_before_reading_or_moving(self):
+        """Attained comes on with the axis still creeping (nm-servo #14): the
+        position is read, and the clearing leg sent, only once it holds
+        within the window of a reference. The creep here is 0.02 mm a read,
+        under the window read to read but over it every third read, so a
+        last-read comparison would settle at once and the reference does
+        not until the creep ends."""
+        strokes = {"X1": (0.0, 200.0), "Y2": (0.0, 109.0), "Z3": (0.0, 58.5)}
+        stage, service, _ = build(strokes=strokes, travel_z_mm=1.0)
+        service.creep("X1", 0.02, reads=10)           # 0.2 mm over the next ten reads
+        stage.home()
+        assert stage.position()[0] == pytest.approx(0.2)
+        assert "move_to" not in [verb for verb, _ in service.log]
+
+    def test_a_homing_that_never_settles_goes_on_with_a_warning(self, caplog):
+        strokes = {"X1": (0.0, 200.0), "Y2": (0.0, 109.0), "Z3": (0.0, 58.5)}
+        stage, service, _ = build(strokes=strokes, travel_z_mm=1.0)
+        service.creep("Y2", 0.02)                     # for ever
+        stage.home()
+        assert stage.is_homed
+        assert any("Y2: still moving" in record.message for record in caplog.records)
+
+    def test_before_homing_the_position_is_unknown_and_xy_is_refused(self):
+        stage, service, _ = build()
+        assert stage.position() is None
+        with pytest.raises(StageError, match="not homed"):
+            stage.move_xy(10.0, 10.0)
+        assert ("move_to", "X1") not in service.log
+
+    def test_before_homing_z_is_refused_too(self):
+        """Unhomed, Z's frame is unreferenced: even a retract could drive
+        the tip toward the deck."""
+        stage, service, _ = build()
+        with pytest.raises(StageError, match="not homed"):
+            stage.move_z(0.0)
+        with pytest.raises(StageError, match="not homed"):
+            stage.retract()
+        assert "move_to" not in [verb for verb, _ in service.log]
+
+    def test_xy_is_refused_while_the_tip_is_down(self, rig):
+        stage, service, _ = rig
+        stage.move_z(40.0)
+        with pytest.raises(StageError, match="travel height"):
+            stage.move_xy(10.0, 10.0)
+        assert service.log[-1] != ("move_to", "X1"), "nothing was sent"
+
+    def test_retracted_at_judges_a_published_position_on_its_own(self, rig):
+        """For a paint that lands after the publish, when the stage may be
+        mid-leg with its position unknown: the published Z decides."""
+        stage, _, _ = rig
+        assert stage.retracted_at((5.0, 5.0, stage.travel_z_mm))
+        assert stage.retracted_at((5.0, 5.0, stage.travel_z_mm + 0.04))
+        assert not stage.retracted_at((5.0, 5.0, stage.travel_z_mm + 1.0))
+        assert not stage.retracted_at(None)
+
+    def test_retracted_means_at_or_above_travel_height(self, rig):
+        stage, _, _ = rig
+        stage.move_z(0.0)
+        assert stage.is_retracted
+        stage.move_z(0.1)
+        assert not stage.is_retracted
+
+    def test_a_target_outside_the_stroke_is_refused_before_sending(self, rig):
+        stage, service, _ = rig
+        sent = len(service.log)
+        with pytest.raises(StageError, match="stroke"):
+            stage.move_z(70.0)
+        assert len(service.log) == sent
+
+    def test_check_reach_refuses_without_moving(self, rig):
+        stage, service, _ = rig
+        sent = len(service.log)
+        stage.check_reach(x=200.0, y=102.0, z=58.5)
+        with pytest.raises(StageError, match="Y2"):
+            stage.check_reach(y=102.1)
+        assert len(service.log) == sent
+
+    def test_home_runs_z_first_then_x_and_y(self, rig):
+        _, service, _ = rig
+        homed = [axis for verb, axis in service.log if verb == "home"]
+        assert homed == ["Z3", "X1", "Y2"]
+
+    def test_xy_is_one_leg_dispatched_together(self, rig):
+        stage, service, _ = rig
+        before = len(service.log)
+        stage.move_xy(30.0, 40.0)
+        verbs = [entry for entry in service.log[before:] if entry[0] == "move_to"]
+        assert [axis for _, axis in verbs] == ["X1", "Y2"]
+        assert stage.position() == (30.0, 40.0, 0.0)
+
+
+class TestHoming:
+    def test_a_stale_attained_bit_at_the_start_does_not_count(self):
+        """The drive's bit 12 lingers from the last homing: the simulated
+        service reads it stale on the first poll. A stage that took that
+        for completion would report homed with the axis where it was."""
+        stage, service, _ = build()
+        service._position["Z3"] = 30.0           # where a restart found the tip
+        stage.home()
+        assert stage.position() == (0.0, 0.0, 0.0)
+        assert service._polls["Z3"] > 2, "the stage waited for the bit to clear and set again"
+
+    def test_a_fault_during_homing_halts_and_names_the_axis(self):
+        stage, service, _ = build()
+        service.fault("Z3", after_polls=2, error_code=0x7306)
+        with pytest.raises(DeviceError, match="Z3.*fault"):
+            stage.home()
+        assert ("stop", "Z3") in service.log
+        assert not stage.is_retracted, "a failed homing leaves the stage unhomed"
+        with pytest.raises(StageError, match="not homed"):
+            stage.move_xy(1.0, 1.0)
+
+    def test_an_axis_that_never_homes_times_out(self, monkeypatch):
+        stage, service, _ = build()
+        service.freeze("Z3")
+        monkeypatch.setattr(service, "homing_timeout_s", lambda axis: 0.0)
+        with pytest.raises(DeviceError, match="Z3.*did not complete"):
+            stage.home()
+        assert ("stop", "Z3") in service.log
+
+    def test_x_and_y_home_together_once_z_is_up(self):
+        """Z alone first, attained before X or Y is sent home; then X and Y
+        both dispatched before either attains, and polled together."""
+        stage, service, _ = build()
+        events = record_homing(service)
+        stage.home()
+        assert [event for event in events if event[0] == "home"] == [
+            ("home", "Z3"), ("home", "X1"), ("home", "Y2")]
+        x_sent, y_sent = events.index(("home", "X1")), events.index(("home", "Y2"))
+        assert attained_at(events, "Z3") < x_sent, "Z was up before X or Y moved"
+        assert y_sent == x_sent + 1, "nothing read between the two dispatches"
+        assert y_sent < attained_at(events, "X1") and y_sent < attained_at(events, "Y2")
+        polled = [event[1] for event in events[y_sent + 1:] if event[0] == "state"]
+        assert polled[:4] == ["X1", "Y2", "X1", "Y2"]
+
+    def test_the_axis_that_attains_first_stays_watched_and_both_settle_once_both_have(self):
+        """X attains while Y still homes (Y2 took 13 s on the bench, X1 6 s).
+        X is still read for a fault meanwhile; a settle reads only its own
+        axis, so both settle once both have attained, each waited out to
+        where its creep stops."""
+        strokes = {"X1": (0.0, 200.0), "Y2": (0.0, 109.0), "Z3": (0.0, 58.5)}
+        stage, service, _ = build(strokes=strokes, travel_z_mm=1.0)
+        service.homing_polls("Y2", 20)
+        service.creep("X1", 0.02, reads=10)
+        service.creep("Y2", 0.02, reads=10)
+        events = record_homing(service)
+        stage.home()
+        x_done, y_done = attained_at(events, "X1"), attained_at(events, "Y2")
+        assert x_done < y_done
+        x_watched = [event for event in events[x_done + 1:y_done] if event[:2] == ("state", "X1")]
+        assert len(x_watched) > 10, "X was still read while Y homed"
+        assert events.index(("read", "X1")) > y_done, "X settled only once Y had attained"
+        assert stage.position()[:2] == (pytest.approx(0.2), pytest.approx(0.2))
+        assert "move_to" not in [verb for verb, _ in service.log]
+
+    @pytest.mark.parametrize("after_polls", [3, 6], ids=["x-homing", "x-attained"])
+    def test_a_fault_on_x_while_y_homes_halts_both_and_names_x(self, after_polls):
+        """X's third homing read is mid-homing, its sixth after it attained
+        (on its fifth): either way Y is still homing, and both are halted."""
+        stage, service, _ = build()
+        service.homing_polls("Y2", 20)
+        service.fault("X1", after_polls=after_polls, error_code=0x7306)
+        with pytest.raises(DeviceError, match="axis X1: drive fault during homing"):
+            stage.home()
+        assert ("stop", "X1") in service.log and ("stop", "Y2") in service.log
+        assert not stage.is_homed
+
+    def test_a_homing_error_on_x_while_y_homes_halts_both_and_names_x(self):
+        stage, service, _ = build()
+        service.homing_polls("Y2", 20)
+        original = service.homing_state
+
+        def homing_state(axis):
+            reading = original(axis)
+            if axis == "X1" and not reading.attained:
+                return reading._replace(error=True)      # counted from X's second read once started
+            return reading
+        service.homing_state = homing_state
+        with pytest.raises(DeviceError, match="axis X1: homing error"):
+            stage.home()
+        assert ("stop", "X1") in service.log and ("stop", "Y2") in service.log
+        assert not service._homed["Y2"], "Y was halted while it homed"
+
+    def test_each_axis_runs_out_its_own_homing_deadline(self, monkeypatch):
+        """X attains within its 1 s; Y, which never attains, runs out its
+        own 2 s: an attained axis's deadline no longer counts, and the axis
+        that ran out is named. Both are halted."""
+        stage, service, _ = build()
+        service.freeze("Y2")
+        timeouts = {"X1": 1.0, "Y2": 2.0, "Z3": 60.0}
+        monkeypatch.setattr(service, "homing_timeout_s", timeouts.get)
+        events = record_homing(service)
+        with pytest.raises(DeviceError, match="axis Y2: homing did not complete in 2 s"):
+            stage.home()
+        attained_at(events, "X1")
+        y_reads = [event for event in events if event[:2] == ("state", "Y2")]
+        assert 38 <= len(y_reads) <= 42, "Y's 2 s at 50 ms a poll"
+        assert ("stop", "X1") in service.log and ("stop", "Y2") in service.log
+
+    def test_z_that_homes_to_the_deck_end_is_refused(self):
+        stage, service, _ = build()
+        service._strokes["Z3"] = (58.5, 0.0)      # a homing that ends at the deck end
+        with pytest.raises(DeviceError, match="homing method"):
+            stage.home()
+
+    def test_a_travel_height_above_where_homing_parks_is_refused_with_the_reason(self):
+        """The drives park 0.1 to 0.5 mm past 0 after homing (nm-servo PR
+        #12), so a travel height of 0 can never be reached: the refusal
+        must say so, not only suspect the homing method."""
+        stage, service, _ = build()
+        service._strokes["Z3"] = (0.6, 58.5)      # the simulation parks 0.3 short of the stroke's start: at 0.3
+        with pytest.raises(DeviceError, match="travel height 0.00.*homing parks"):
+            stage.home()
+
+
+class TestPolling:
+    def test_a_stale_target_reached_bit_does_not_end_a_leg_early(self):
+        """The bit can still read reached from the previous move: the leg
+        is done only when the position agrees. On the real clock the axis
+        is seen in flight, position short of the target, bit reading set."""
+        stage, service, _ = build(instant=False, homed=True)
+        service.stale_target_reached = True
+        seen = []
+        service.on_poll = lambda: seen.append(service.position_of("Z3"))
+        stage.move_z(2.0)                         # 2 mm at 20 mm/s: two polls
+        assert stage.position()[2] == 2.0
+        assert service.position_of("Z3") == pytest.approx(2.0)
+        assert len(seen) >= 2
+        assert any(0.0 < z < 2.0 for z in seen), "a poll saw the axis in flight"
+
+    def test_a_short_move_that_settles_for_more_than_a_second_completes(self, rig):
+        """X1 on the bench, 2026-10-22: a 0.5 mm move ended 62 um past and
+        crept back at about 10 um/s (0.5 um a 50 ms poll), the drive
+        reporting the target reached only inside its window. Past the old
+        allowance (twice the 10 ms of travel, then 1 s); the leg now allows
+        SETTLE_BUDGET_S past the travel."""
+        stage, service, _ = rig
+        service.overshoot("X1", past_mm=0.062, back_per_read_mm=0.0005)
+        start = time.monotonic()
+        stage.move_xy(0.5, 0.0)
+        assert time.monotonic() - start > 1.0
+        assert stage.position() == (0.5, 0.0, 0.0)
+        assert "stop" not in [verb for verb, _ in service.log]
+
+    def test_a_move_that_never_settles_times_out_at_the_allowance_and_halts(self, rig):
+        """Twice the 10 ms of travel, then SETTLE_BUDGET_S: the leg ends in
+        the timeout, halted, and the axis is re-read where it stayed."""
+        stage, service, _ = rig
+        service.overshoot("X1", past_mm=0.062, back_per_read_mm=0.0)
+        start = time.monotonic()
+        with pytest.raises(DeviceError, match="axis X1: move to 0.50 mm did not complete in time"):
+            stage.move_xy(0.5, 0.0)
+        assert SETTLE_BUDGET_S < time.monotonic() - start < SETTLE_BUDGET_S + 0.2
+        assert ("stop", "X1") in service.log
+        assert stage.position()[0] == pytest.approx(0.562)
+
+    def test_a_long_move_that_never_settles_times_out_after_twice_its_travel_and_the_budget(self, rig):
+        """The travel term stays in the allowance: 1 s of travel at 50 mm/s,
+        so the timeout comes after 2 s plus SETTLE_BUDGET_S, not before."""
+        stage, service, _ = rig
+        service.overshoot("X1", past_mm=0.062, back_per_read_mm=0.0)
+        start = time.monotonic()
+        with pytest.raises(DeviceError, match="did not complete in time"):
+            stage.move_xy(50.0, 0.0)
+        assert 2 * 1.0 + SETTLE_BUDGET_S < time.monotonic() - start < 2 * 1.0 + SETTLE_BUDGET_S + 0.2
+
+    def test_one_reached_reading_off_target_does_not_end_the_leg(self, rig):
+        """An overshoot can read reached as it passes through the drive's
+        window, the position read a moment later outside it: one such
+        reading is not a move that ended there, and the leg completes once
+        the axis settles."""
+        stage, service, _ = rig
+        service.overshoot("X1", past_mm=0.062, back_per_read_mm=0.0005)
+        original, reads = service.read, []
+
+        def read(axis):
+            reading = original(axis)
+            if axis == "X1":
+                reads.append(reading)
+                if len(reads) == 3:    # after the pre-dispatch read and one in flight
+                    assert not reading.target_reached
+                    return reading._replace(target_reached=True)
+            return reading
+
+        service.read = read
+        stage.move_xy(0.5, 0.0)
+        assert stage.position() == (0.5, 0.0, 0.0)
+        assert "stop" not in [verb for verb, _ in service.log]
+
+    def test_a_leg_that_never_arrives_times_out_and_halts(self, rig):
+        stage, service, _ = rig
+        service.freeze("Z3")
+        with pytest.raises(DeviceError, match="Z3"):
+            stage.move_z(20.0)
+        assert ("stop", "Z3") in service.log
+
+    def test_a_fault_during_a_leg_halts_and_names_the_axis_until_reset(self, rig):
+        stage, service, _ = rig
+        service.fault("Z3", after_polls=2, error_code=0x7331)
+        with pytest.raises(DeviceError, match="Z3.*7331"):
+            stage.move_z(20.0)
+        assert ("stop", "Z3") in service.log
+        with pytest.raises(DeviceError, match="Z3.*7331"):
+            stage.move_z(20.0)                     # still faulted: refused before dispatch
+        stage.reset_faults()
+        assert ("reset_fault", "Z3") in service.log
+        reset = service.log.index(("reset_fault", "Z3"))
+        assert ("enable", "Z3") in service.log[reset:], "the axis was enabled again"
+        stage.move_z(20.0)
+        assert stage.position()[2] == 20.0
+
+    def test_an_axis_that_arrived_stays_watched_until_the_leg_ends(self):
+        """Codex finding 2: X and Y are one leg, and X arrives first. A fault
+        on X while Y still travels must end the leg, not let it succeed: the
+        next Z leg reads only Z and would dip a faulted stage. With modelled
+        motion (instant=False) under the suite's fake clock, X's 5 mm takes
+        2 or 3 polls and Y's 80 mm about 32, so X's 10th read from here (the
+        pre-check is the first) lands in between."""
+        stage, service, _ = build(instant=False, homed=True)
+        service.fault("X1", after_polls=10, error_code=0x7331)
+        with pytest.raises(DeviceError, match="X1.*7331"):
+            stage.move_xy(5.0, 80.0)
+        assert ("stop", "X1") in service.log
+        assert ("stop", "Y2") in service.log
+        position = stage.position()
+        assert position is not None, "the axes were re-read after the halt"
+        assert position[0] == 5.0, "X had arrived when it faulted"
+        assert 0.0 < position[1] < 80.0, "Y was halted in flight"
+        sent = len(service.log)
+        with pytest.raises(DeviceError, match="X1.*7331"):
+            stage.move_xy(5.0, 80.0)               # still faulted: refused before dispatch
+        assert "move_to" not in [verb for verb, _ in service.log[sent:]]
+        stage.reset_faults()
+        stage.move_xy(5.0, 80.0)
+        assert stage.position() == (5.0, 80.0, 0.0)
+
+    def test_a_cancel_during_a_leg_halts_every_started_axis(self):
+        """Review focus 5: the poll raises the cancel on the job thread, the
+        stage halts what it started, nothing is left to resume. On the real
+        clock, so the leg spans polls (an instant leg ends on its first)."""
+        stage, service, control = build(instant=False, homed=True)
+
+        def cancel_once_moving():
+            if ("move_to", "X1") in service.log:
+                control.cancel(AbortRequested("stop"))
+        service.on_poll = cancel_once_moving
+        with pytest.raises(AbortRequested):
+            stage.move_xy(30.0, 40.0)
+        stopped = [axis for verb, axis in service.log if verb == "stop"]
+        assert sorted(stopped) == ["X1", "Y2"]
+
+    def test_a_cancel_latched_before_the_dispatch_sends_nothing(self, rig):
+        """A cancel that lands while the pre-check reads the axes is caught
+        before the dispatch: nothing moves, nothing needs stopping, and the
+        position stays known."""
+        stage, service, control = rig
+        service.on_poll = lambda: control.cancel(AbortRequested("stop"))
+        before = len(service.log)
+        with pytest.raises(AbortRequested):
+            stage.move_xy(30.0, 40.0)
+        assert service.log[before:] == []
+        assert stage.position() == (0.0, 0.0, 0.0)
+
+    def test_an_early_end_re_reads_where_the_axes_stopped(self):
+        """The witness after a halt is the drive's reading, not the leg's
+        target or its start: an aborted dive down to 40 mm, stopped
+        half-way, leaves Z at 20 and XY refused."""
+        stage, service, control = build(instant=False, homed=True)
+
+        def cancel_half_way():
+            if service.position_of("Z3") >= 20.0:
+                control.cancel(AbortRequested("stop"))
+        service.on_poll = cancel_half_way
+        with pytest.raises(AbortRequested):
+            stage.move_z(40.0)                     # 40 mm at 20 mm/s: 40 polls
+        z = stage.position()[2]
+        assert 19.0 < z < 22.0, z
+        assert not stage.is_retracted
+        with pytest.raises(StageError, match="travel height"):
+            stage.move_xy(1.0, 1.0)
+
+    def test_a_port_error_from_a_read_halts_what_started(self, rig):
+        """A driver or OSError is not a fluidics error, and must still halt
+        every axis that may have started before it goes on."""
+        stage, service, _ = rig
+        service.fail_read("Y2", OSError("no response"), after_polls=2)   # the poll after the dispatch
+        with pytest.raises(OSError):
+            stage.move_xy(30.0, 40.0)
+        stopped = [axis for verb, axis in service.log if verb == "stop"]
+        assert sorted(stopped) == ["X1", "Y2"]
+
+    def test_a_stop_that_fails_is_reported_after_every_axis_was_tried(self):
+        stage, service, control = build(instant=False, homed=True)
+
+        def cancel_once_moving():
+            if ("move_to", "X1") in service.log:
+                control.cancel(AbortRequested("stop"))
+        service.on_poll = cancel_once_moving
+        service.fail_stop("X1")
+        with pytest.raises(DeviceError, match="could not stop axis X1") as info:
+            stage.move_xy(30.0, 40.0)
+        assert isinstance(info.value.__cause__, AbortRequested)
+        assert ("stop", "Y2") in service.log, "the other axis was still stopped"
+
+    def test_a_limit_stop_ends_the_leg_at_once_naming_the_position(self):
+        """nm-servo PR #10, measured on the drives: a move that a limit
+        switch ends leaves the drive enabled with alarm 8614h, and target
+        reached never comes. The stage must not wait out the leg's timeout:
+        it halts, re-reads, and says where the axis stopped."""
+        stage, service, _ = build(instant=False, homed=True)
+        service.limit_switch("Y2", at_mm=30.0)     # a switch inside the configured stroke
+        polls = []
+        service.on_poll = lambda: polls.append(service.position_of("Y2"))
+        with pytest.raises(DeviceError, match="Y2.*60.00 mm.*limit switch.*30.00 mm"):
+            stage.move_xy(10.0, 60.0)                 # Y: 60 mm at 50 mm/s; the timeout would be 7.4 s
+        assert len(polls) < 40, "raised when the alarm showed, not at the timeout (148 polls)"
+        assert ("stop", "Y2") in service.log
+        assert stage.position() == (10.0, 30.0, 0.0)
+
+    def test_a_move_that_ends_on_an_active_limit_input_is_an_error_not_an_arrival(self):
+        """Copilot review, and the driver's own wait: the target reached
+        with a limit input (60FDh) active -- a switch with a wide span, a
+        target on the switch -- is not a completed move. The stage halts,
+        re-reads and names the position rather than dipping from there."""
+        stage, service, _ = build(instant=False, homed=True)
+        service.limit_input("Y2")
+        with pytest.raises(DeviceError, match="Y2.*60.00 mm ended on a limit switch at 60.00 mm"):
+            stage.move_xy(10.0, 60.0)
+        assert ("stop", "Y2") in service.log
+        assert stage.position() == (10.0, 60.0, 0.0)
+        service.limit_input("Y2", active=False)
+        stage.move_xy(10.0, 61.0)                  # the input released: moves complete again
+        assert stage.position() == (10.0, 61.0, 0.0)
+
+    def test_a_move_that_ends_short_of_its_target_is_an_error_not_a_timeout(self):
+        """X1's far switch flickers (nm-servo PR #10): the drive once
+        cleared the limit and reported the target reached 2 mm short.
+        Target reached with the position off, once the axis has been seen
+        moving, ends the leg as an error; before that it is the stale bit."""
+        stage, service, _ = build(instant=False, homed=True)
+        service.end_short("X1", at_mm=148.0)
+        with pytest.raises(DeviceError, match="X1.*150.00 mm.*ended at 148.00 mm"):
+            stage.move_xy(150.0, 0.0)
+        assert ("stop", "X1") in service.log
+        assert stage.position() == (148.0, 0.0, 0.0)
+
+    def test_position_is_published_after_each_leg_and_after_a_halt(self, rig):
+        stage, _, _ = rig
+        heard = []
+        stage.moves.subscribe(heard.append)
+        stage.move_z(10.0)
+        stage.retract()
+        stage.halt()
+        assert heard == [(0.0, 0.0, 10.0), (0.0, 0.0, 0.0), (0.0, 0.0, 0.0)]
+
+    def test_travel_time_is_counted_even_when_instant_with_xy_concurrent(self, rig):
+        stage, service, _ = rig
+        stage.move_z(20.0)            # 20 mm at 20 mm/s: 1 s
+        stage.retract()               # 1 s
+        stage.move_xy(50.0, 100.0)    # X 1 s, Y 2 s, together: 2 s
+        assert service.travel_seconds == pytest.approx(4.0)
+
+
+class TestClose:
+    def test_a_quiescent_close_makes_no_move_brakes_disables_and_disconnects(self, rig):
+        """The tip stays put in its well: the lead screw holds Z, and the
+        next launch homes upward first."""
+        stage, service, _ = rig
+        stage.move_z(30.0)
+        before = len(service.log)
+        assert stage.close(quiescent=True) == []
+        verbs = [entry[0] for entry in service.log[before:]]
+        assert verbs == ["engage_brake", "disable", "disable", "disable", "disconnect"]
+
+    def test_a_close_under_a_live_job_makes_no_move(self, rig):
+        stage, service, _ = rig
+        stage.move_z(30.0)
+        before = len(service.log)
+        stage.close(quiescent=False)
+        assert "move_to" not in [entry[0] for entry in service.log[before:]]
+        assert ("stop", "Z3") in service.log[before:]
+
+    def test_a_failed_step_is_returned_and_the_rest_still_run(self, rig):
+        stage, service, _ = rig
+        service.fail_stop("Y2")
+        errors = stage.close(quiescent=False)
+        assert len(errors) == 1 and "Y2" in str(errors[0])
+        assert service.log[-1] == ("disconnect", None)
+
+
+class TestMessages:
+    def test_an_enum_axis_is_named_by_its_value(self):
+        """The driver's AxisName is a plain Enum, whose str() is
+        'AxisName.X1': every message names the axis as the drive label
+        says it, 'axis X1'."""
+        from enum import Enum
+
+        class AxisName(Enum):
+            X1 = "X1"
+            Y2 = "Y2"
+            Z3 = "Z3"
+
+        axes = {"x": AxisName.X1, "y": AxisName.Y2, "z": AxisName.Z3}
+        service = SimulatedService(axes.values(), {AxisName(name): stroke
+                                                   for name, stroke in STROKES.items()},
+                                   instant=True)
+        stage = XYZStage(service, axes, 0.0, 50.0, 20.0, RunControl())
+        stage.connect()
+        stage.home()
+        with pytest.raises(StageError) as refused:
+            stage.move_xy(250.0, 10.0)
+        assert str(refused.value) == "axis X1: 250.000 mm is outside the stroke 0.000..200.000 mm"
+        service.fault(AxisName.Z3, after_polls=2, error_code=0x7331)    # in flight
+        service.fail_stop(AxisName.Z3, OSError("no response"))
+        with pytest.raises(DeviceError) as failed:
+            stage.move_z(20.0)
+        assert str(failed.value) == "could not stop axis Z3: no response"
+        assert str(failed.value.__cause__) == "axis Z3: drive fault, error code 0x7331"
+        assert "AxisName" not in str(refused.value) + str(failed.value) + str(failed.value.__cause__)
+
+
+def test_a_stop_while_x_and_y_home_halts_both():
+    """STOP (a cancel) lands while X and Y home together: both are halted,
+    not only the one being read."""
+    stage, service, control = build()
+    service.homing_polls("Y2", 20)
+    service.on_poll = lambda: (control.cancel(AbortRequested("stop"))
+                               if ("home", "Y2") in service.log else None)
+    with pytest.raises(AbortRequested):
+        stage.home()
+    assert ("stop", "X1") in service.log and ("stop", "Y2") in service.log
+
+
+def test_a_homing_start_that_fails_on_y_halts_x_and_y():
+    """Y's dispatch raises after X's went out: X is halted too."""
+    stage, service, _ = build()
+    original = service.home
+
+    def home(axis):
+        original(axis)
+        if axis == "Y2":
+            raise OSError("Y2: no response")
+
+    service.home = home
+    with pytest.raises(OSError):
+        stage.home()
+    assert ("stop", "X1") in service.log and ("stop", "Y2") in service.log
+
+
+def test_y_with_a_stale_attained_bit_that_lingers_is_not_taken_for_homed():
+    """Each axis's stale attained bit must clear before it counts: X
+    starting does not count Y as started."""
+    stage, service, _ = build()
+    service.homing_polls("Y2", 20)
+    original = service.homing_state
+    y_reads = []
+
+    def homing_state(axis):
+        reading = original(axis)
+        if axis == "Y2":
+            y_reads.append(reading)
+            if len(y_reads) == 2:
+                return reading._replace(attained=True)       # still the last homing's bit
+        return reading
+
+    service.homing_state = homing_state
+    stage.home()
+    assert len(y_reads) > 20, "Y was waited out, not taken as homed on its stale bit"

@@ -76,7 +76,6 @@ class PortNamesDialog(QDialog):
         super().accept()
 
 
-
 class ManualControlWidget(PostsToQtThread, QWidget):
     """The operator's hand on the rig, one move at a time -- see _run."""
 
@@ -91,9 +90,10 @@ class ManualControlWidget(PostsToQtThread, QWidget):
         self.progress_timer = QTimer(self)
         self.progress_timer.timeout.connect(self.updateProgress)
         # The plunger bar paints what the pump publishes after each of its
-        # own readings; the GUI thread never touches the serial line. Detached
-        # on destroyed: an embedded widget must not outlive itself.
-        detach = subscribe_until_detached((system.devices.syringe_pump.held_volume, self._onHeldVolume))
+        # own readings; the GUI thread never touches the serial line.
+        # Detached on destroyed: an embedded widget must not outlive itself.
+        detach = subscribe_until_detached(
+            (system.devices.syringe_pump.held_volume, self._onHeldVolume))
         self.destroyed.connect(detach)
 
         self.initUI()

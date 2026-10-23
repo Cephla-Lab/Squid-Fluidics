@@ -6,7 +6,7 @@ from fluidics.control.disc_pump import DiscPump
 from fluidics.control.selector_valve import SelectorValveSystem
 from fluidics.control.syringe_pump import SyringePumpSimulation
 from fluidics.control.temperature_controller import TCMControllerSimulation
-from fluidics.devices import build_devices
+from fluidics.devices import build_devices, build_operations
 from fluidics.merfish_operations import MERFISHOperations
 from fluidics.open_chamber_operations import OpenChamberOperations
 
@@ -22,9 +22,10 @@ def instant_devices(built):
     """A simulated DeviceSet with its pacing switched off (build_devices'
     instant knob): the controller's one-second commands and the pump's
     five-second moves would otherwise be spent for real under real_clock.
-    The gates are untouched."""
-    def _build(config):
-        devices = built(config, simulation=True, instant=True)
+    The gates are untouched; any other build_devices keyword
+    (volume_tracking_path) passes through."""
+    def _build(config, **build_kwargs):
+        devices = built(config, simulation=True, instant=True, **build_kwargs)
         # The publish thread has nothing to say to these tests (none read
         # flow), and under the fake clock its per-reading wait is a busy
         # spin; close() is idempotent, so the teardown's close is unharmed.
@@ -36,15 +37,47 @@ def instant_devices(built):
 
 
 @pytest.fixture
-def system(flow_cell_config, instant_devices, tmp_path):
-    """A FluidicsSystem on the instant simulated DeviceSet, torn down clean
-    -- the shape test_system and test_usage share. Run reports land in the
-    test's own tmp_path, never the user's log directory."""
+def plate_sipper_rig(plate_sipper_config, instant_devices):
+    """(MERFISHOperations with a sipper, syringe_pump) over the sample
+    sipper config: an instant simulated rig with a fresh in-memory volume
+    tracker, every well full, for the rows only a sipper rig can run."""
+    devices = instant_devices(plate_sipper_config)
+    return build_operations(plate_sipper_config, devices), devices.syringe_pump
+
+
+@pytest.fixture
+def make_system(instant_devices, tmp_path):
+    """FluidicsSystem(config, **build_kwargs) on the instant simulated
+    DeviceSet, each one torn down clean -- the shape test_system, test_usage
+    and the sipper modules share, whichever config or volume tracking they
+    build on. Run reports land in the test's own tmp_path, never the user's log
+    directory."""
     from fluidics.system import FluidicsSystem
-    built = FluidicsSystem(flow_cell_config, instant_devices(flow_cell_config),
-                           report_dir=tmp_path)
-    yield built
-    assert built.close() == []
+    systems = []
+
+    def _make(config, **build_kwargs):
+        system = FluidicsSystem(config, instant_devices(config, **build_kwargs),
+                                report_dir=tmp_path)
+        systems.append(system)
+        return system
+
+    yield _make
+    assert [e for s in systems for e in s.close()] == []
+
+
+@pytest.fixture
+def system(flow_cell_config, make_system):
+    """The flow cell rig as a FluidicsSystem: what most modules take."""
+    return make_system(flow_cell_config)
+
+
+@pytest.fixture
+def plate_sipper_system(plate_sipper_config, make_system):
+    """`system` on the sample sipper config: a FluidicsSystem over an
+    instant simulated sipper rig with a fresh in-memory volume tracker,
+    every well full, torn down clean; its run reports land in the test's
+    tmp_path."""
+    return make_system(plate_sipper_config)
 
 
 @pytest.fixture

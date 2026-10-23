@@ -1,0 +1,36 @@
+# Two seqFISH+ rounds on the sample plate-sipper rig
+# (sample_config/plate_sipper_config.yaml). Port 1 is the sipper; plate 1
+# (probes) holds one hyb mix per round (A1 for R01, A2 for R02), plate 2
+# (ssct) the paired 4x SSCT well at the same position.
+# - hyb draws 100 uL into the sipper's line, and the push row then draws the
+#   config's push_volume_ul (710) from the paired ssct well, which puts the
+#   hyb in the flow cell for push's 20-minute incubation.
+# - ssct washes 1000 uL through from the same well. A row that draws from a
+#   well cannot fill tubing, so hyb, push and ssct have no fill. Each ssct
+#   well gives 710 + 1000 = 1710 uL of its 1800 per round.
+# - Every bottle row fills its tubing with 4x SSC (port 3) after its draw:
+#   310 uL, valve to flow cell, so the row's whole volume passes through the
+#   cell. dapi's 300 uL would not reach the cell without it; on the 4x SSC
+#   and rinse rows the fill is 310 uL more of the same buffer.
+sequences:
+  - {type: priming,      round: setup, fluidic_port: 3, flow_rate: 5000, volume: 800}
+
+  - {type: flow_reagent, round: R01, name: hyb,         fluidic_port: 1, well: A1,      flow_rate: 2000, volume: 100}
+  - {type: push,         round: R01, name: push,        well: ssct/A1, flow_rate: 2000, incubation_time: 20}
+  - {type: flow_reagent, round: R01, name: ssct,        fluidic_port: 1, well: ssct/A1, flow_rate: 5000, volume: 1000, dip_cycles: 3}
+  - {type: flow_reagent, round: R01, name: wash 1,      fluidic_port: 2, flow_rate: 5000, volume: 1000, fill_tubing_with: 3}
+  - {type: flow_reagent, round: R01, name: 4x SSC,      fluidic_port: 3, flow_rate: 5000, volume: 1000, fill_tubing_with: 3}
+  - {type: flow_reagent, round: R01, name: dapi,        fluidic_port: 4, flow_rate: 5000, volume: 300,  fill_tubing_with: 3, incubation_time: 0.5}
+  - {type: flow_reagent, round: R01, name: anti-bleach, fluidic_port: 5, flow_rate: 5000, volume: 1000, fill_tubing_with: 3}
+  - {type: flow_reagent, round: R01, name: wash 2,      fluidic_port: 6, flow_rate: 1000, volume: 1000, fill_tubing_with: 3, incubation_time: 1}
+  - {type: flow_reagent, round: R01, name: rinse,       fluidic_port: 3, flow_rate: 5000, volume: 1000, fill_tubing_with: 3}
+
+  - {type: flow_reagent, round: R02, name: hyb,         fluidic_port: 1, well: A2,      flow_rate: 2000, volume: 100}
+  - {type: push,         round: R02, name: push,        well: ssct/A2, flow_rate: 2000, incubation_time: 20}
+  - {type: flow_reagent, round: R02, name: ssct,        fluidic_port: 1, well: ssct/A2, flow_rate: 5000, volume: 1000, dip_cycles: 3}
+  - {type: flow_reagent, round: R02, name: wash 1,      fluidic_port: 2, flow_rate: 5000, volume: 1000, fill_tubing_with: 3}
+  - {type: flow_reagent, round: R02, name: 4x SSC,      fluidic_port: 3, flow_rate: 5000, volume: 1000, fill_tubing_with: 3}
+  - {type: flow_reagent, round: R02, name: dapi,        fluidic_port: 4, flow_rate: 5000, volume: 300,  fill_tubing_with: 3, incubation_time: 0.5}
+  - {type: flow_reagent, round: R02, name: anti-bleach, fluidic_port: 5, flow_rate: 5000, volume: 1000, fill_tubing_with: 3}
+  - {type: flow_reagent, round: R02, name: wash 2,      fluidic_port: 6, flow_rate: 1000, volume: 1000, fill_tubing_with: 3, incubation_time: 1}
+  - {type: flow_reagent, round: R02, name: rinse,       fluidic_port: 3, flow_rate: 5000, volume: 1000, fill_tubing_with: 3}
