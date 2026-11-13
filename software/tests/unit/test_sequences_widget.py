@@ -486,3 +486,24 @@ class TestAddSequenceDialog:
         combo.setCurrentIndex(combo.findData(5))
         dialog.accept()
         assert dialog.result_dict["fluidic_port"] == 5
+
+    def _set_temperature_dialog(self):
+        dialog = gui.AddSequenceDialog(None, "Flow Cell", self.PORTS)
+        dialog.typeCombo.setCurrentIndex(
+            dialog.typeCombo.findData("set_temperature"))
+        return dialog
+
+    def test_wait_is_a_checkbox_ticked_to_begin_with(self, qapp):
+        """A yes/no field in a number box reads "1"; and the default has to
+        be the behaviour every existing step has."""
+        from qtpy.QtWidgets import QCheckBox
+        dialog = self._set_temperature_dialog()   # held: it owns the widget
+        widget = dialog._field_widgets["wait"]
+        assert isinstance(widget, QCheckBox)
+        assert widget.isChecked()
+
+    def test_an_unticked_wait_survives_accept(self, qapp):
+        dialog = self._set_temperature_dialog()
+        dialog._field_widgets["wait"].setChecked(False)
+        dialog.accept()
+        assert dialog.result_dict["wait"] is False

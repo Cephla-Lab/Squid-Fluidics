@@ -41,6 +41,20 @@ class TestSequenceModels:
                 {"type": "set_temperature", "temperature": 37, "fluidic_port": 1}
             ])
 
+    def test_set_temperature_waits_unless_told_otherwise(self):
+        """Every sequence file written before `wait` existed must keep
+        holding the run until the temperature is reached."""
+        seq = SequenceListAdapter.validate_python([
+            {"type": "set_temperature", "temperature": 37.5}
+        ])
+        assert seq[0].wait is True
+
+    def test_set_temperature_can_be_told_not_to_wait(self):
+        seq = SequenceListAdapter.validate_python([
+            {"type": "set_temperature", "temperature": 37.5, "wait": False}
+        ])
+        assert seq[0].wait is False
+
     def test_unknown_type_rejected(self):
         with pytest.raises(ValidationError):
             SequenceListAdapter.validate_python([
@@ -152,6 +166,14 @@ class TestSaveSequences:
         assert loaded[0]["fluidic_port"] == 1
         assert loaded[1]["type"] == "set_temperature"
         assert loaded[1]["temperature"] == 37
+
+    def test_wait_false_survives_a_save(self, tmp_path):
+        path = str(tmp_path / "out.yaml")
+        save_sequences_yaml(
+            [{"type": "set_temperature", "temperature": 25, "wait": False}], path)
+        with open(path) as f:
+            saved = yaml.safe_load(f)["sequences"]
+        assert saved == [{"type": "set_temperature", "temperature": 25.0, "wait": False}]
 
     def test_defaults_excluded(self, tmp_path):
         original = [

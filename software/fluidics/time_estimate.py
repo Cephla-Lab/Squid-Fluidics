@@ -128,7 +128,10 @@ def _replay(config, sequences):
         for seq in sequences:
             for _ in range(seq.get("repeat", 1)):
                 if seq["type"] == "set_temperature":
-                    fixed += SET_TEMPERATURE_SECONDS
+                    # The constant is the wait for the target; a step told
+                    # not to wait writes two commands and moves on.
+                    if seq.get("wait", True):
+                        fixed += SET_TEMPERATURE_SECONDS
                 else:
                     ops.process_sequence(seq)
                 fixed += seq.get("incubation_time", 0) * 60

@@ -61,6 +61,13 @@ class TestTheEstimate:
             flow_cell_config, [{"type": "set_temperature", "temperature": 37}])
         assert (seconds, durations) == (SET_TEMPERATURE_SECONDS, [SET_TEMPERATURE_SECONDS])
 
+    def test_set_temperature_that_does_not_wait_costs_nothing(self, flow_cell_config):
+        """The constant stands for the wait; a step told not to wait has none."""
+        seconds, durations = estimate_run_time(
+            flow_cell_config,
+            [{"type": "set_temperature", "temperature": 37, "wait": False}])
+        assert (seconds, durations) == (0, [0])
+
     def test_the_dumps_the_operations_insert_are_counted(self, open_chamber_config):
         """add_reagent dumps the syringe before drawing; a naive
         volume-over-rate figure misses every dump and turnover chain."""

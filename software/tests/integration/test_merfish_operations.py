@@ -126,6 +126,17 @@ class TestSetTemperature:
         ops_with_tc.process_sequence(seq)
         assert ops_with_tc.tc.target_temperatures == [37]
 
+    def test_wait_false_reaches_the_step(self, ops_with_tc):
+        """The row's `wait` has to arrive at the controller: a step that
+        does not wait never looks at the temperature."""
+        def get_actual_temperature(channel):
+            raise AssertionError("waited for a step told not to")
+
+        ops_with_tc.tc.get_actual_temperature = get_actual_temperature
+        seq = {"type": "set_temperature", "temperature": 37, "wait": False}
+        ops_with_tc.process_sequence(seq)
+        assert ops_with_tc.tc.target_temperatures == [37]
+
     def test_set_temperature_without_controller_no_raise(self, flow_cell_hardware):
         config, sp, sv = flow_cell_hardware
         ops = MERFISHOperations(config, sp, sv)

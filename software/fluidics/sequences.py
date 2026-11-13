@@ -65,6 +65,9 @@ class CleanUpSequence(FluidicSequence):
 class SetTemperatureSequence(SequenceBase):
     type: Literal["set_temperature"]
     temperature: float
+    # False: write the target, switch the output on and move on, rather than
+    # hold the run until the temperature is reached.
+    wait: bool = True
 
 
 Sequence = Annotated[
