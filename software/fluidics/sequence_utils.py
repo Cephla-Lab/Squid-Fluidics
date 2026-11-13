@@ -8,13 +8,17 @@ from .errors import OperationError
 _logger = logging.getLogger(__name__)
 
 
-def set_temperature(tc, target, run_control):
+def set_temperature(tc, target, run_control, wait=True):
     """Drive every channel on `tc` to `target` and block until all channels
     are within tolerance or the timeout fires.
 
     On timeout, raises OperationError so the experiment worker stops. A
     cancelled run raises its cause -- before the first target is written, and
     out of the wait. If `tc` is None, logs a warning and returns.
+
+    wait=False returns as soon as the target is written and the output is on:
+    no temperature is read, so there is nothing to time out on, and the run
+    carries on while the rig is still on its way there.
     """
     if tc is None:
         _logger.warning("No temperature controller found. Skipping temperature control sequence.")
@@ -27,6 +31,10 @@ def set_temperature(tc, target, run_control):
         # The setpoint alone does not drive the TEC -- the output switch is a separate
         # command -- so assert it on, or the run just waits for a temperature that never moves.
         tc.set_output_enabled(channel, True)
+
+    if not wait:
+        _logger.info("Temperature target %s set; not waiting for it to be reached", target)
+        return
 
     # Running seconds, not wall clock: each delay() returns after one second
     # of running time, so counting them *is* the clock -- and a pause stops it.

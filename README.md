@@ -128,7 +128,7 @@ All sequence types share these optional fields: `name` (custom label), `repeat` 
 | `wash_constant_flow` | `fluidic_port`, `flow_rate`, `volume`, `fill_tubing_with` | Flow reagent while aspirating with disc pump |
 | `priming` | `fluidic_port`, `flow_rate`, `volume` | Prime all tubings |
 | `clean_up` | `fluidic_port`, `flow_rate`, `volume` | Flush all tubings and aspirate chamber |
-| `set_temperature` | `temperature` | Set temperature controller to target |
+| `set_temperature` | `temperature`, `wait` | Set temperature controller to target and wait until it is reached; `wait: false` (default true) sets the target and moves on without waiting |
 
 ## Communication Protocol
 
