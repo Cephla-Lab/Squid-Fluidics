@@ -6,7 +6,8 @@
    This class implements the folowing features:
         - Initialization
         - Set new I2C address
-        - Set position (with direction of rotation)
+        - Start a move to a position (the wait lives in the caller's state
+          machine, never in this driver)
         - Get current position
         - Report status
 
@@ -66,11 +67,13 @@ class RheoLink {
   public:
     RheoLink();
     uint8_t begin(TwoWire &w, uint8_t address, uint8_t p_min, uint8_t p_max);
+    // Deliberately no blocking position wait: a move is started with
+    // send_command(RheoLink_POS, pos) and watched from the superloop's
+    // state machine (INTERNAL_STATE_MOVING_ROTARY), which polls
+    // read_register(RheoLink_STATUS) once per sensor tick -- a delay loop
+    // here would stall control loops, telemetry, and command reception.
     uint8_t send_command(RheoLinkCommand_t cmd, uint8_t data = RheoLink_DUMMY_DATA);
     uint8_t read_register(RheoLinkCommand_t target);
-    uint8_t block_until_done(uint32_t timeout = RheoLink_TIMEOUT);
-    uint8_t block_until_position_reached(uint8_t pos, uint32_t timeout = RheoLink_TIMEOUT);
-    uint8_t set_position(uint8_t pos, bool wait_for_completion = true, uint32_t timeout = RheoLink_TIMEOUT);
     uint8_t pos_min;
     uint8_t pos_max;
   private:

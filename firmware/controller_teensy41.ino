@@ -41,6 +41,15 @@ uint32_t fs_front_time, fs_back_time, fs_back_neg_time;
 
 // Selector valves
 RheoLink selectorvalves[SELECTORVALVE_QTY];
+// A rotary move rides the state machine (INTERNAL_STATE_MOVING_ROTARY)
+// instead of blocking inside the packet handler: rotary_target[i] != 0 marks
+// a valve still on its way there, judged once per sensor tick. The retry
+// budget matches the old blocking set_position(): the first send plus
+// ROTARY_MAX_RETRIES re-sends, each attempt given RheoLink_TIMEOUT ms.
+uint8_t  rotary_target[SELECTORVALVE_QTY] = {0};
+uint8_t  rotary_retries[SELECTORVALVE_QTY];
+uint32_t rotary_attempt_ms[SELECTORVALVE_QTY];
+#define ROTARY_MAX_RETRIES 3
 
 // SLF3X flowrate sensor
 // Slot 0 is the process sensor (bus 1 / Wire1): it alone drives
@@ -216,27 +225,49 @@ void loop() {
           //          }
         }
         break;
-      /*
       case INTERNAL_STATE_MOVING_ROTARY: {
-          // Check if we timed out
-          // If any of the valves are reporting a value greater than their pos_max, value_moving becomes true
-          bool valve_moving = false;
+          // Each active valve is judged the way the old blocking wait in
+          // set_position() judged it, once per tick instead of in a delay
+          // loop: the target position ends its move; a status above pos_max
+          // (an error report) or a per-attempt timeout re-sends the
+          // position, up to the same four attempts in all. All active
+          // valves move in parallel -- CLEAR homes every valve at once.
+          bool any_moving = false;
+          bool failed = false;
           for (uint8_t i = 0; i < SELECTORVALVE_QTY; i++) {
-            valve_moving |= (selectorvalve_status[i] > selectorvalves[i].pos_max);
+            if (rotary_target[i] == 0) {
+              continue;
+            }
+            if (selectorvalve_status[i] == rotary_target[i]) {
+              rotary_target[i] = 0;
+              continue;
+            }
+            if ((selectorvalve_status[i] > selectorvalves[i].pos_max)
+                || ((millis() - rotary_attempt_ms[i]) > RheoLink_TIMEOUT)) {
+              if (rotary_retries[i] < ROTARY_MAX_RETRIES) {
+                rotary_retries[i]++;
+                rotary_attempt_ms[i] = millis();
+                selectorvalves[i].send_command(RheoLink_POS, rotary_target[i]);
+              }
+              else {
+                failed = true;
+              }
+            }
+            any_moving = true;
           }
-          // If we aren't moving, we are done here
-          if (!valve_moving) {
-            state = INTERNAL_STATE_IDLE;
-            execution_status = COMPLETED_WITHOUT_ERRORS;
-          }
-          // If we aren't, check if we timed out
-          else if (time_since_cmd_started > timeout_duration) {
+          if (failed) {
+            for (uint8_t i = 0; i < SELECTORVALVE_QTY; i++) {
+              rotary_target[i] = 0;
+            }
             state = INTERNAL_STATE_IDLE;
             execution_status = CMD_EXECUTION_ERROR;
           }
+          else if (!any_moving) {
+            state = INTERNAL_STATE_IDLE;
+            execution_status = COMPLETED_WITHOUT_ERRORS;
+          }
         }
         break;
-      */
       case INTERNAL_STATE_CALIB_FLUID: {
           // Wait for timeout
           if (time_since_cmd_started > timeout_duration) {
@@ -546,23 +577,44 @@ void onPacketReceived(const uint8_t* buffer, size_t size) {
         // Stop all operations
         disableControlLoops();
         valves.clear_all();
+        // Home every selector valve at once: the sends are quick I2C
+        // writes, and the waiting happens in the state machine, in
+        // parallel -- not one blocking (up to 8 s) wait per valve inside
+        // this handler, during which no packet could be read. A CLEAR sent
+        // to stop the rig now answers immediately.
         // Accumulate rather than assign: plain assignment kept only the last
         // valve's result, so a failure on any earlier valve was reported as
         // success. Initialized because the loop body may not run at all.
         uint8_t err = 0;
+        bool homing = false;
         for (uint8_t i = 0; i < SELECTORVALVE_QTY; i++) {
-          err |= selectorvalves[i].set_position(1, true, RheoLink_TIMEOUT);
+          rotary_target[i] = 0;
+          uint8_t send_err = selectorvalves[i].send_command(RheoLink_POS, 1);
+          err |= send_err;
+          if (send_err == 0) {
+            rotary_target[i] = 1;
+            rotary_retries[i] = 0;
+            rotary_attempt_ms[i] = millis();
+            homing = true;
+          }
         }
 
         time_since_last_tx = 0;
 
         time_since_last_sensor = 0;
 
-        state = INTERNAL_STATE_IDLE;
-        if (err != 0)
+        if (err != 0) {
+          state = INTERNAL_STATE_IDLE;
           execution_status = CMD_EXECUTION_ERROR;
-        else
+        }
+        else if (homing) {
+          state = INTERNAL_STATE_MOVING_ROTARY;
+          execution_status = IN_PROGRESS;
+        }
+        else {
+          state = INTERNAL_STATE_IDLE;
           execution_status = COMPLETED_WITHOUT_ERRORS;
+        }
         cmd_uid = 0;
         integrate_flowrate = false;
         integrated_volume_uL = 0;
@@ -902,15 +954,24 @@ void onPacketReceived(const uint8_t* buffer, size_t size) {
           execution_status = CMD_INVALID;
           return;
         }
-        // Set position
-        uint8_t err = selectorvalves[idx].set_position(pos, true, RheoLink_TIMEOUT);
+        // Send the position and let the state machine do the waiting: the
+        // old in-handler wait blocked the superloop -- control loops,
+        // telemetry, and command reception itself -- for up to four 2 s
+        // attempts. A send that fails outright still reports at once.
+        uint8_t err = selectorvalves[idx].send_command(RheoLink_POS, pos);
         if (err != 0) {
+          state = INTERNAL_STATE_IDLE;
           execution_status = CMD_EXECUTION_ERROR;
+          return;
         }
-        else {
-          execution_status = COMPLETED_WITHOUT_ERRORS;
+        for (uint8_t i = 0; i < SELECTORVALVE_QTY; i++) {
+          rotary_target[i] = 0;   // no stale targets from an interrupted move
         }
-        state = INTERNAL_STATE_IDLE;
+        rotary_target[idx] = pos;
+        rotary_retries[idx] = 0;
+        rotary_attempt_ms[idx] = millis();
+        execution_status = IN_PROGRESS;
+        state = INTERNAL_STATE_MOVING_ROTARY;
       }
       break;
 
