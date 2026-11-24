@@ -98,7 +98,7 @@ These must stay in sync. Same applies to `VALVE_POSITIONS`/`ValvesStates_t` and 
 
 `fluidics/sequences.py` defines pydantic models using a discriminated union on the `type` field. Each sequence type has only the fields it needs:
 - **Fluidic types** (`flow_reagent`, `add_reagent`, `clear_and_add_reagent`, `wash_constant_flow`, `priming`, `clean_up`): `fluidic_port`, `flow_rate`, `volume`; some also have `fill_tubing_with`
-- **`set_temperature`**: `temperature` field only
+- **`set_temperature`**: `temperature`, plus optional `wait` (default true; false writes the target, switches the output on and moves on without waiting for it to be reached)
 - **All types** share: `name` (optional label), `repeat`, `include`, `incubation_time`
 
 Per-application available types are defined in `APPLICATION_SEQUENCES` dict. Models use `extra='forbid'` to catch typos.

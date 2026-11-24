@@ -69,7 +69,8 @@ class MERFISHOperations():
                 sequence.get('use_ports'))
         elif seq_type == "set_temperature":
             sequence_utils.set_temperature(self.tc, sequence['temperature'],
-                                           self.run_control)
+                                           self.run_control,
+                                           wait=sequence.get('wait', True))
         else:
             raise ValueError(f"Unknown sequence type: {seq_type}")
 

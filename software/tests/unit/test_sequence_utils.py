@@ -114,3 +114,26 @@ class TestSetTemperature:
         with pytest.raises(AbortRequested):
             set_temperature(tc, 50.0, control)
         assert tc.target_temperatures == [0.0]      # nothing written
+
+
+class TestSetTemperatureWithoutWaiting:
+    """wait=False: the step sets the rig going and the run moves on. The
+    controller here never converges, so a step that waited anyway would
+    raise "failed to stabilize"."""
+
+    def test_it_still_writes_the_target_and_turns_the_output_on(self, control):
+        tc = _StuckController(channels=2, stabilization_timeout_seconds=5)
+        set_temperature(tc, 50.0, control, wait=False)
+        assert tc.target_temperatures == [50.0, 50.0]
+        assert tc.output_enabled == [True, True]
+
+    def test_it_never_reads_the_temperature(self, control):
+        """Not one look: a unit that has stopped answering reads must not
+        fail a step that was told not to care where the temperature is."""
+        tc = _StuckController(channels=1, stabilization_timeout_seconds=5)
+
+        def get_actual_temperature(channel):
+            raise AssertionError("read the temperature of a step told not to wait")
+
+        tc.get_actual_temperature = get_actual_temperature
+        set_temperature(tc, 50.0, control, wait=False)

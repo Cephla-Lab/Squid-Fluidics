@@ -143,6 +143,17 @@ class TestProcessSequence:
         seq = {"type": "set_temperature", "temperature": 50}
         oc_ops.process_sequence(seq)
 
+    def test_set_temperature_wait_false_reaches_the_step(self, oc_ops):
+        """The row's `wait` has to arrive at the controller: a step that
+        does not wait never looks at the temperature."""
+        def get_actual_temperature(channel):
+            raise AssertionError("waited for a step told not to")
+
+        oc_ops.tc.get_actual_temperature = get_actual_temperature
+        seq = {"type": "set_temperature", "temperature": 50, "wait": False}
+        oc_ops.process_sequence(seq)
+        assert oc_ops.tc.target_temperatures == [50, 50]
+
     def test_unknown_type_raises(self, oc_ops):
         seq = {"type": "nonexistent"}
         with pytest.raises(ValueError, match="Unknown sequence type"):

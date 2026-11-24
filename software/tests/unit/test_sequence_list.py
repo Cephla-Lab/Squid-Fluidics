@@ -97,6 +97,15 @@ class TestWhatSetFieldTakes:
         assert model.problem(0) is None, model.problem(0)
         assert model.validated()[0]["temperature"] == 0
 
+    def test_a_typed_false_stops_the_step_waiting(self):
+        """The editor's cell is text, and "false" is a truthy string: what
+        the run takes has to be the boolean, or a step the operator told
+        not to wait holds the run anyway."""
+        model = flow_cell(TEMP)
+        model.set_field(0, "wait", "false")
+        assert model.problem(0) is None, model.problem(0)
+        assert model.validated()[0]["wait"] is False
+
     def test_an_emptied_cell_reads_as_unset(self):
         model = flow_cell(dict(FLOW, fill_tubing_with=3))
         model.set_field(0, "fill_tubing_with", "")

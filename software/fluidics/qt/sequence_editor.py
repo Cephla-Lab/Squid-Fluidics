@@ -9,6 +9,7 @@ import time
 from qtpy.QtCore import Qt, QSignalBlocker, QTimer
 from qtpy.QtGui import QBrush, QColor
 from qtpy.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -128,6 +129,11 @@ class AddSequenceDialog(QDialog):
                     # An unmatched port selects nothing rather than silently
                     # standing in for the first one; see _showCurrentPort.
                     widget.setCurrentIndex(widget.findData(int(default)))
+            elif field_info.annotation is bool:
+                # A yes/no field (set_temperature's wait): in the spin box
+                # below it would read "1" and take any number.
+                widget = QCheckBox()
+                widget.setChecked(bool(default))
             elif field_name in ('temperature', 'incubation_time'):
                 widget = QDoubleSpinBox()
                 widget.setDecimals(2)
@@ -152,6 +158,8 @@ class AddSequenceDialog(QDialog):
                 val = widget.text().strip()
                 if val:
                     d[field_name] = val
+            elif isinstance(widget, QCheckBox):
+                d[field_name] = widget.isChecked()
             elif isinstance(widget, QComboBox):
                 d[field_name] = widget.currentData()
             elif isinstance(widget, QDoubleSpinBox):
@@ -352,6 +360,7 @@ class SequencesWidget(PostsToQtThread, QWidget):
         'incubation_time': 'Incubation Time (min)',
         'repeat': 'Repeat',
         'temperature': 'Temperature (\u00b0C)',
+        'wait': 'Wait Until Reached',
         'round': 'Round',
     }
 

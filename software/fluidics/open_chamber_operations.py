@@ -62,7 +62,8 @@ class OpenChamberOperations():
                 sequence['volume'],
                 clean_up=True)
         elif seq_type == "set_temperature":
-            self.set_temperature(sequence['temperature'])
+            self.set_temperature(sequence['temperature'],
+                                 wait=sequence.get('wait', True))
         else:
             raise ValueError(f"Unknown sequence type: {seq_type}")
 
@@ -235,5 +236,5 @@ class OpenChamberOperations():
         except Exception as e:
             raise OperationError(f"Error in priming_or_clean_up: {str(e)}")
 
-    def set_temperature(self, target):
-        sequence_utils.set_temperature(self.tc, target, self.run_control)
+    def set_temperature(self, target, wait=True):
+        sequence_utils.set_temperature(self.tc, target, self.run_control, wait=wait)
