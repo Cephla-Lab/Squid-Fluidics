@@ -86,7 +86,10 @@ class TestACancelWakesTheWait:
         pump.wait_for_stop(0.3)
         elapsed = time.monotonic() - started
 
-        assert elapsed >= 0.3
+        # time.monotonic() ticks every ~15.6 ms on Windows (1 ns on Linux), so a
+        # full 0.3 s wait can read as 19 ticks = 0.297 s: allow one tick.
+        tick = time.get_clock_info("monotonic").resolution
+        assert elapsed >= 0.3 - tick
 
 
 class TestTheSignal:
