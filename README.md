@@ -79,7 +79,7 @@ Use `--simulation` to run without connected hardware. Legacy CSV sequence files 
 
 ### Tests
 
-pytest comes with the `[test]` extra above. CI runs the full suite plus a firmware compile on every PR.
+pytest comes with the `[test]` extra above. CI runs the full suite on Linux and Windows, plus a firmware compile, on every PR.
 
 ```bash
 cd software
