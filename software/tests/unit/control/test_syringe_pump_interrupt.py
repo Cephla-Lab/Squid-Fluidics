@@ -18,6 +18,7 @@ import pytest
 
 from fluidics.errors import AbortRequested, RunControl, SafetyFault
 
+from ...conftest import MONOTONIC_TICK
 from .pump_helpers import ScriptedSyringe, bare_pump, halt_on_cancel, sim_pump as _pump
 
 
@@ -56,7 +57,7 @@ class TestTheRealPumpsHooks:
         started = time.monotonic()
         with pytest.raises(AbortRequested):
             pump.wait_for_stop(0)
-        assert time.monotonic() - started >= 0.04
+        assert time.monotonic() - started >= 0.04 - MONOTONIC_TICK
 
 
 class TestACancelWakesTheWait:
@@ -86,7 +87,7 @@ class TestACancelWakesTheWait:
         pump.wait_for_stop(0.3)
         elapsed = time.monotonic() - started
 
-        assert elapsed >= 0.3
+        assert elapsed >= 0.3 - MONOTONIC_TICK
 
 
 class TestTheSignal:

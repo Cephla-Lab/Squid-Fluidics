@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from ..conftest import SETTLE, wait_until
+from ..conftest import MONOTONIC_TICK, SETTLE, wait_until
 from fluidics.errors import (AbortRequested, Cancelled, FluidicsError,
                              OperationError, RunControl, SafetyFault)
 
@@ -255,7 +255,7 @@ class TestPause:
         threading.Timer(0.05, control.resume).start()
         started = time.monotonic()
         control.delay(0.02)
-        assert time.monotonic() - started >= 0.06
+        assert time.monotonic() - started >= 0.06 - MONOTONIC_TICK
 
     def test_delay_raises_when_the_run_is_cancelled(self, real_clock):
         control = RunControl()
@@ -270,7 +270,7 @@ class TestPause:
         control.pause()
         started = time.monotonic()
         assert control.wait(0.05) is False
-        assert time.monotonic() - started >= 0.04
+        assert time.monotonic() - started >= 0.04 - MONOTONIC_TICK
 
 
 class TestWaitInterrupted:
@@ -293,7 +293,7 @@ class TestWaitInterrupted:
         control = RunControl()
         started = time.monotonic()
         assert control.wait_interrupted(0.02) is False
-        assert time.monotonic() - started >= 0.015
+        assert time.monotonic() - started >= 0.015 - MONOTONIC_TICK
 
     def test_a_resumed_run_no_longer_wakes_it(self, real_clock):
         control = RunControl()

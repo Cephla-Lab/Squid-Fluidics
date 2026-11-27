@@ -168,13 +168,18 @@ class RunReports:
         return directory / f"{run_id}.json"
 
     def _write(self, report):
-        path = self.path_for(report["run_id"])
+        path = report["run_id"]     # what the log names until a path is known
         try:
+            path = self.path_for(report["run_id"])
             path.parent.mkdir(parents=True, exist_ok=True)
             with atomic_write(path) as f:
                 # default=str: a report is a record -- an unforeseen
                 # value lands as its string, never costs the file.
                 json.dump(report, f, indent=2, default=str)
             _logger.info("Run report: %s", path)
-        except OSError:
+        except Exception:
+            # Any error, not only OSError: on Windows an AttributeError
+            # (os.fchmod, absent before Python 3.13) escaped this thread
+            # as a bare traceback, and no report was ever saved. A record
+            # that cannot be written is logged here and costs nothing else.
             _logger.exception("The run report %s could not be written.", path)

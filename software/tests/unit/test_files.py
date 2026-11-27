@@ -8,6 +8,13 @@ import pytest
 
 from fluidics.files import atomic_write
 
+# The mode fix-up is POSIX's alone: atomic_write calls os.fchmod on POSIX
+# only, and on Windows a file has no permission bits to keep -- access is
+# the directory's ACL.
+posix_modes = pytest.mark.skipif(
+    os.name != "posix",
+    reason="file permission bits and os.fchmod are POSIX-only")
+
 
 class TestAtomicWrite:
     def test_the_block_finishing_is_what_creates_the_file(self, tmp_path):
@@ -30,6 +37,7 @@ class TestAtomicWrite:
         assert [p.name for p in tmp_path.iterdir()] == ["out.txt"], \
             "no temp left behind"
 
+    @posix_modes
     def test_a_failure_during_mode_setup_leaks_no_descriptor(
             self, tmp_path, monkeypatch):
         """The temp's descriptor belongs to the handle from the first
@@ -50,6 +58,7 @@ class TestAtomicWrite:
             "the temp's descriptor was stranded"
         assert [p.name for p in tmp_path.iterdir()] == [], "no temp left behind"
 
+    @posix_modes
     def test_a_replaced_file_keeps_its_permissions(self, tmp_path):
         path = tmp_path / "config.yaml"
         path.write_text("a: 1")
@@ -72,6 +81,7 @@ class TestAtomicWrite:
             f.write("x")
         assert flips == [], "a write flipped the process umask"
 
+    @posix_modes
     def test_a_new_file_gets_a_plain_opens_mode_not_the_temps(self, tmp_path):
         """mkstemp creates a private 0600; a config or a report the
         operator reads back must get what open() would have given."""

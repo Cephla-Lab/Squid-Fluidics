@@ -181,6 +181,10 @@ def wait_until(predicate, timeout=2, step=0.002):
 # unambiguously longer than "immediately".
 SETTLE = 0.02
 
+# One tick of time.monotonic(): ~15.6 ms on Windows, 1 ns on Linux. A test that
+# measures a wait's length with it allows one tick, or a full wait can read short.
+MONOTONIC_TICK = _time.get_clock_info("monotonic").resolution
+
 
 @pytest.fixture
 def run_in_background():

@@ -17,10 +17,19 @@ concurrency:
 
 jobs:
   software-tests:
-    runs-on: ubuntu-latest
+    # Windows as well as Linux: rigs run on both. A Unix-only call
+    # (os.fchmod) once broke every save on Windows, and an Ubuntu-only run
+    # had nothing to show it.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
         working-directory: software
+        # One shell on both runners, so every step means the same on each.
+        shell: bash
     steps:
       # Nothing here needs git after checkout; don't leave the token in
       # .git/config for the PR code these jobs run.
@@ -37,7 +46,9 @@ jobs:
 
       # PyQt5 wheels bundle Qt itself but link against these system
       # libraries; the offscreen platform needs no display beyond them.
+      # The Windows wheels need nothing more.
       - name: Install Qt runtime libraries
+        if: runner.os == 'Linux'
         run: >
           sudo apt-get update &&
           sudo apt-get install -y --no-install-recommends
