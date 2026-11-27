@@ -6,9 +6,13 @@ import json
 import logging
 import threading
 import time
+from contextlib import contextmanager
 from types import SimpleNamespace
 
+import pytest
+
 from fluidics.events import RunEnded, RunStarted
+from fluidics.files import atomic_write
 from fluidics.reports import RunReports
 from fluidics.subscribers import Subscribers
 
@@ -185,3 +189,42 @@ class TestTheEdges:
         assert [p.name for p in tmp_path.iterdir()] == ["run-8.json"], \
             "temp wreckage left behind"
         assert "could not be written" in caplog.text
+
+    @pytest.mark.parametrize("error", [
+        AttributeError("module 'os' has no attribute 'fchmod'"),
+        TypeError("keys must be str, int, float, bool or None"),
+    ], ids=lambda error: type(error).__name__)
+    def test_a_write_failing_with_any_error_is_logged_and_the_next_writes(
+            self, tmp_path, caplog, monkeypatch, error):
+        """On a Windows rig every write raised AttributeError (os.fchmod
+        is not there before Python 3.13), not an OSError: it escaped the
+        writer thread without the report's own message, and no run report
+        was ever saved. Whatever a write raises is the report's failure --
+        logged with its traceback, kept inside the thread -- and the next
+        run's report still writes."""
+        escaped = []
+        monkeypatch.setattr(threading, "excepthook", escaped.append)
+        failures = [error]
+
+        @contextmanager
+        def fails_once(path):
+            if failures:
+                raise failures.pop()
+            with atomic_write(path) as f:
+                yield f
+
+        monkeypatch.setattr("fluidics.reports.atomic_write", fails_once)
+        r = rig(tmp_path)
+        r.events.notify(RunStarted("run-9", ()))
+        with caplog.at_level(logging.ERROR, logger="fluidics"):
+            r.events.notify(RunEnded("run-9", "finished", None, 1.0, None))
+            assert r.reports.wait(5)
+        assert escaped == [], "the error escaped the writer thread"
+        [logged] = [record for record in caplog.records
+                    if "could not be written" in record.getMessage()]
+        assert logged.exc_info and logged.exc_info[1] is error, \
+            "logged without its traceback"
+        assert not (tmp_path / "run-9.json").exists()
+        r.events.notify(RunStarted("run-10", ()))
+        r.events.notify(RunEnded("run-10", "finished", None, 1.0, None))
+        assert written(tmp_path, r.reports, "run-10")["outcome"] == "finished"
