@@ -18,6 +18,7 @@ import pytest
 
 from fluidics.errors import AbortRequested, RunControl, SafetyFault
 
+from ...conftest import MONOTONIC_TICK
 from .pump_helpers import ScriptedSyringe, bare_pump, halt_on_cancel, sim_pump as _pump
 
 
@@ -56,7 +57,7 @@ class TestTheRealPumpsHooks:
         started = time.monotonic()
         with pytest.raises(AbortRequested):
             pump.wait_for_stop(0)
-        assert time.monotonic() - started >= 0.04
+        assert time.monotonic() - started >= 0.04 - MONOTONIC_TICK
 
 
 class TestACancelWakesTheWait:
@@ -86,10 +87,7 @@ class TestACancelWakesTheWait:
         pump.wait_for_stop(0.3)
         elapsed = time.monotonic() - started
 
-        # time.monotonic() ticks every ~15.6 ms on Windows (1 ns on Linux), so a
-        # full 0.3 s wait can read as 19 ticks = 0.297 s: allow one tick.
-        tick = time.get_clock_info("monotonic").resolution
-        assert elapsed >= 0.3 - tick
+        assert elapsed >= 0.3 - MONOTONIC_TICK
 
 
 class TestTheSignal:
